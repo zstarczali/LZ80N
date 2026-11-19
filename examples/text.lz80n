@@ -1,0 +1,43 @@
+-- text.lz80n -- the Next tilemap text layer
+-- 40x32 characters, built-in font, 16 ink colours, transparent paper.
+
+ink(BRIGHT_WHITE)
+print("LZ80N text layer - 40 x 32 characters")
+ink(WHITE)
+print("Next tilemap in text mode, 1-bit font")
+print("")
+
+-- the full character set
+ink(BRIGHT_CYAN)
+print("Character set:")
+ink(WHITE)
+for c = 32, 127 do
+    at(4 + (c - 32) / 32, 4 + (c - 32) % 32)
+    memory[0x6000 + ((4 + (c - 32) / 32) * 40 + 4 + (c - 32) % 32) * 2] = c
+end
+at(8, 0)
+
+-- all 16 inks
+ink(BRIGHT_CYAN)
+print("Inks:")
+for k = 0, 15 do
+    ink(k)
+    at(9 + k / 8, (k % 8) * 5)
+    write("ink", k)
+end
+at(12, 0)
+ink(BRIGHT_YELLOW)
+print("The quick brown fox jumps over")
+print("THE LAZY DOG. the lazy dog!")
+print("0123456789 +-*/ = <> () [] {} ?! @#$%&")
+ink(WHITE)
+
+-- a colour cycling counter, updated every frame
+word n = 0
+while true do
+    vsync()
+    at(16, 0)
+    ink(byte(n >> 3) & 7 + 8)
+    write("frame ", n, "   ")
+    n += 1
+end

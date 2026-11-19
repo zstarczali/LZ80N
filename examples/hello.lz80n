@@ -1,0 +1,29 @@
+-- hello.lz80n -- first LZ80N program
+const LIMIT = 10
+
+function square(byte x) -> word
+    return x * x            -- byte * byte -> word with one Z80N MUL D,E
+end
+
+function fact(byte n) -> word
+    word r = 1
+    for i = 2, n do
+        r = r * i
+    end
+    return r
+end
+
+print("LZ80N - The Next Language")
+print("")
+
+for i = 1, LIMIT do
+    print(i, square(i), fact(byte(i) & 7))
+end
+
+nextreg[0x07] = 3           -- CPU 28 MHz
+byte colour = 0
+while true do
+    border(colour)
+    colour = (colour + 1) & 7
+    vsync()
+end

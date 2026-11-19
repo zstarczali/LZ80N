@@ -1,0 +1,74 @@
+-- sprites.lz80n -- Next hardware sprites
+-- A ship (Q/A/O/P or joystick) and bouncing balls, all hardware sprites.
+-- The sprite sheet is converted from PNG at compile time.
+
+asset sheet = "assets/sprites.png"   -- 32x16 PNG = 2 patterns (ship, ball)
+
+const SHIP = 0
+const BALL = 1
+const NBALLS = 8
+
+-- display area in sprite coordinates: (32,32) .. (287,223)
+const LEFT = 32
+const RIGHT = 272       -- 288 - 16
+const TOP = 32
+const BOTTOM = 208      -- 224 - 16
+
+class Ball
+    word x
+    word y
+    sword dx
+    sword dy
+    byte spr
+
+    function init(byte n)
+        self.spr = n + 1                 -- sprite 0 is the ship
+        self.x = LEFT + n * 28
+        self.y = TOP + n * 19
+        self.dx = 1 + (n & 1)
+        self.dy = 1 + (n & 3)
+        if n & 2 ~= 0 then self.dx = -self.dx end
+        sprite[self.spr].show(BALL)
+    end
+
+    function move()
+        sword nx = self.x + self.dx
+        sword ny = self.y + self.dy
+        if nx < LEFT or nx > RIGHT then self.dx = -self.dx end
+        if ny < TOP or ny > BOTTOM then self.dy = -self.dy end
+        self.x += self.dx
+        self.y += self.dy
+        sprite[self.spr].position(self.x, self.y)
+    end
+end
+
+sprite_load(0, sheet)
+sprites_visible(true, false)
+border(BLACK)
+cls()
+print("LZ80N hardware sprites")
+print("QAOP / joystick moves the ship")
+
+Ball balls[NBALLS]
+for i = 0, NBALLS - 1 do
+    balls[i].init(i)
+end
+
+word sx = 152
+word sy = 200
+sprite[0].position(sx, sy)
+sprite[0].show(SHIP)
+
+while true do
+    vsync()
+    byte joy = kempston()
+    if joy == 255 then joy = 0 end
+    if (key(KEY_O) or joy & JOY_LEFT ~= 0) and sx > LEFT then sx -= 2 end
+    if (key(KEY_P) or joy & JOY_RIGHT ~= 0) and sx < RIGHT then sx += 2 end
+    if (key(KEY_Q) or joy & JOY_UP ~= 0) and sy > TOP then sy -= 2 end
+    if (key(KEY_A) or joy & JOY_DOWN ~= 0) and sy < BOTTOM then sy += 2 end
+    sprite[0].position(sx, sy)
+    for i = 0, NBALLS - 1 do
+        balls[i].move()
+    end
+end

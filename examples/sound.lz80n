@@ -1,0 +1,82 @@
+-- sound.lz80n -- the Next's three AY chips (9 channels)
+--
+--  * background music: melody on channel 0, bass on channel 1 (play_loop)
+--  * keys 1-8 play a scale with beep() on channel 3
+--  * SPACE fires a "laser": a falling tone made with tone() + volume()
+--  * N makes a noise burst on channel 7
+-- Tunes use a PLAY-like notation: c d e f g a b, # sharp, r rest,
+-- a number after a note = frames, o octave, < > octave down/up, l default
+-- length, v volume.
+
+ink(BRIGHT_WHITE)
+at(1, 2)
+write("LZ80N sound - 3 x AY, 9 channels")
+ink(WHITE)
+at(3, 2)
+write("1-8: notes  SPACE: laser  N: noise")
+
+play_loop(0, "o5 l12 e d c d e e e24 d d d24 e g g24 e d c d e e e e d d e d c36 r12")
+play_loop(1, "o3 l24 c g c g c g c g c g c g c g c g < g > c r12")
+
+const NOTE_KEYS = "ACEFHJLM"          -- semitones 0 2 4 5 7 9 11 12, as letters
+byte last_key = 0
+byte laser = 0                      -- frames left of the laser sweep
+word laser_period = 0
+byte boom = 0                       -- frames left of the noise burst
+
+while true do
+    vsync()
+
+    -- piano on keys 1..8 (start a note when a new key goes down)
+    byte down = 0
+    if key(KEY_1) then down = 1 end
+    if key(KEY_2) then down = 2 end
+    if key(KEY_3) then down = 3 end
+    if key(KEY_4) then down = 4 end
+    if key(KEY_5) then down = 5 end
+    if key(KEY_6) then down = 6 end
+    if key(KEY_7) then down = 7 end
+    if key(KEY_8) then down = 8 end
+    if down ~= 0 and down ~= last_key then
+        beep(3, 60 + asc(NOTE_KEYS, down - 1) - 'A', 12)
+    end
+    last_key = down
+
+    -- laser: period rises (pitch falls), volume fades
+    if key(KEY_SPACE) and laser == 0 then
+        laser = 15
+        laser_period = 40
+    end
+    if laser > 0 then
+        tone(6, laser_period)
+        volume(6, laser)
+        laser_period += 25
+        laser -= 1
+        if laser == 0 then sound_off(6) end
+    end
+
+    -- noise burst
+    if key(KEY_N) and boom == 0 then
+        boom = 20
+        noise(7, 18)
+    end
+    if boom > 0 then
+        volume(7, boom * 3 / 4)
+        boom -= 1
+        if boom == 0 then sound_off(7) end
+    end
+
+    -- channel status
+    for ch = 0, 8 do
+        at(6 + ch, 2)
+        ink(BRIGHT_CYAN)
+        write("channel ", ch, ": ")
+        if playing(ch) or ch == 6 and laser > 0 or ch == 7 and boom > 0 then
+            ink(BRIGHT_GREEN)
+            write("playing")
+        else
+            ink(BLUE)
+            write("-      ")
+        end
+    end
+end

@@ -1,0 +1,87 @@
+-- strings.lz80n -- string values and string functions
+--
+-- A string holds up to 64 characters. `..` joins strings and numbers;
+-- len, sub, find, val, asc, chr, str, upper and lower are built in.
+-- reverse, replace and pad below are ordinary LZ80N functions.
+
+function reverse(string s) -> string
+    string r = ""
+    byte i = len(s)
+    while i > 0 do
+        i -= 1
+        r = r .. chr(asc(s, i))
+    end
+    return r
+end
+
+function replace(string s, string from, string to) -> string
+    if len(from) == 0 then return s end
+    string out = ""
+    string rest = s
+    while true do
+        byte p = find(rest, from)
+        if p == NOT_FOUND then break end
+        out = out .. sub(rest, 0, p) .. to
+        rest = sub(rest, p + len(from), 64)
+    end
+    return out .. rest
+end
+
+-- right-align a number in `width` characters
+function pad(word n, byte width) -> string
+    string s = str(n)
+    while len(s) < width do
+        s = " " .. s
+    end
+    return s
+end
+
+string name = "spectrum next"
+
+ink(BRIGHT_WHITE)
+at(1, 2)
+write("LZ80N strings")
+ink(WHITE)
+at(3, 2)
+write("text:    ", name)
+at(4, 2)
+write("upper:   ", upper(name))
+at(5, 2)
+write("reverse: ", reverse(name))
+at(6, 2)
+write("replace: ", replace(name, "e", "3"))
+at(7, 2)
+write("find:    ", find(name, "next"), "   len: ", len(name))
+at(8, 2)
+write("val:     ", val("-120") + 20, "   chr: ", chr(65) .. chr(66) .. chr(67))
+
+ink(BRIGHT_CYAN)
+at(10, 2)
+write("    n   n*n   n*n*n")
+ink(BRIGHT_YELLOW)
+for n = 1, 8 do
+    word w = n
+    at(10 + n, 2)
+    write(pad(w, 5) .. pad(w * w, 6) .. pad(w * w * w, 8))
+end
+
+-- a ticker on the bottom rows: a 40-character window into the message
+string msg = "*** LZ80N: Lua-like, compiled for the ZX Spectrum Next *** "
+byte pos = 0
+while true do
+    vsync()
+    string view = sub(msg, pos, 40)
+    if len(view) < 40 then
+        view = view .. sub(msg, 0, 40 - len(view))
+    end
+    ink(BRIGHT_GREEN)
+    at(28, 0)
+    write(view)
+    ink(WHITE)
+    at(30, 2)
+    write("time: " .. frames() / 50 .. " s")
+    if frames() % 4 == 0 then
+        pos += 1
+        if pos >= len(msg) then pos = 0 end
+    end
+end
