@@ -179,7 +179,7 @@ inside a method).
 
 **Built-in functions** (implemented by the compiler)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing`
 
 **Standard library names** (functions, types and constants written in LZ80N).
 They are reserved in **every** program, even one that does not use the
@@ -1083,6 +1083,7 @@ is relative to the source file.
   Colours are converted to the Next's `RRRGGGBB` format. Transparent pixels
   (alpha < 128) become the sprite transparency colour `$E3`.
 * `.spr`: raw 8-bit sprite patterns (256 bytes each).
+* `.wav`: a sound sample (17.3).
 
 **Pictures for Layer 2**
 
@@ -1222,6 +1223,34 @@ runs in the frame interrupt and steps all channels. The game keeps running
 while the music plays.
 
 See `examples/sound.lz80n`.
+
+### 17.3 Samples (digital sound)
+
+```lua
+asset boom = "assets/boom.wav"
+asset engine = "assets/engine.wav"
+
+sample_play(boom)            -- once
+sample_loop(engine)          -- over and over
+if sample_playing() then ... end
+sample_stop()
+```
+
+* `.wav` files with 8 or 16 bit PCM, mono or stereo, are converted to 8-bit
+  mono when compiling. Rates from 4 kHz to 31.25 kHz are kept; others are
+  converted to 15.6 kHz. Like pictures, samples live in their own memory
+  pages, not in the 31 KB program area: one second at 15.6 kHz is about
+  15 KB.
+* Playback runs **in the background**: the zxnDMA sends the bytes to the
+  DAC (port `$DF`) at the sample's rate, through a 4 KB buffer at
+  `$7000`–`$7FFF` that the frame interrupt refills. The program goes on,
+  and the AY sound (17.1, 17.2) keeps working.
+* One sample sounds at a time; a new `sample_play` replaces the current one.
+* While a sample plays, the DMA is busy: `dma_copy`, `dma_fill` and
+  `layer2_clear` then do their work with the CPU (correct, but slower:
+  clearing Layer 2 takes about 2 frames).
+
+See `examples/samples.lz80n`.
 
 ---
 
@@ -1484,7 +1513,7 @@ Not supported yet:
 
 * more than about 31 KB of global variables and data in the program area
   (big tables belong in `far` arrays, 19.1)
-* sample playback through the Next's DAC, PT3 music import
+* PT3 music import
 
 Planned order: benchmarks against NextBASIC on real hardware →
 `long`/`fixed16`/Layer 2 modes → constructors and inheritance → memory banks
@@ -1552,5 +1581,6 @@ register allocation.
 | `modules.lz80n` | a program in three files: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
+| `samples.lz80n` | `.wav` samples on the DAC in the background |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |

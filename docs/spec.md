@@ -606,6 +606,20 @@ $FDFC..       stack (grows down)
   `FConst` holds raw 16.16. A literal's natural type is `fixed` if it fits
   8.8, else `fixed16`.
 
+## Samples
+
+* `asset s = "x.wav"`: converted to unsigned 8-bit mono; prescaler =
+  round(875000 / rate) for 4..31.25 kHz, else resampled to 15625 Hz
+  (prescaler 56). Bytes in 8K far pages; descriptor `a_s: db page,
+  prescaler / dw len[15:0] / db len[23:16]`.
+* `runtime::SAMPLES` (when a sample_* call is used): zxnDMA, burst mode,
+  memory $7000 (4K ring, auto-restart) -> port $DF with the prescaler.
+  The frame ISR (`rt_smp_tick`) reads back the port A address (WR6 $BB,
+  mask $18, $A7) and refills the 2K half the DMA has left; after the end,
+  halves are filled with $80 and playback stops once a silent half starts.
+  `rt_smp_on` makes `rt_dma_go` (dma_copy / dma_fill / layer2_clear) use
+  LDIR instead of the DMA. NR $08 bit 3 enables the DACs.
+
 ## Source files
 
 * `include "path"` (top level only) is expanded on the token stream before

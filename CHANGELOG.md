@@ -23,6 +23,8 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
   `layer2_height`); second palettes (`PAL_LAYER2_2` ..., `palette_select`).
 * Main programs larger than the 31 KB area: big statements of the
   top-level code move into hidden, banked functions automatically.
+* Samples: `.wav` assets played on the DAC in the background by the zxnDMA
+  (`sample_play`, `sample_loop`, `sample_stop`, `sample_playing`).
 * Recursion, direct and mutual (the caller's frame is saved on the stack
   only around calls that can come back; stack overflow is caught).
 * `include "file.lz80n"`: programs in several source files (paths relative
@@ -48,5 +50,5 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
   code pages automatically; big data goes into `far` arrays.
 * Test suite running the compiled programs in a built-in Z80N emulator.
 
-**Examples**: 22 programs in `examples/`, from `hello.lz80n` to the
+**Examples**: 23 programs in `examples/`, from `hello.lz80n` to the
 `shooter.lz80n` space shooter.

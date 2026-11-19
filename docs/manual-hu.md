@@ -179,7 +179,7 @@ objektum a metóduson belül).
 
 **Beépített függvények** (a fordító valósítja meg őket)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing`
 
 **A szabványos könyvtár nevei** (LZ80N-ben írt függvények, típusok és
 konstansok). **Minden** programban foglaltak, akkor is, ha a program nem
@@ -1095,6 +1095,7 @@ Az `asset`-et a fordító fordításkor alakítja át és építi be a programba
   mintát. A színeket a Next `RRRGGGBB` formátumára alakítja. Az átlátszó
   pixelekből (alfa < 128) a sprite-átlátszósági szín (`$E3`) lesz.
 * `.spr`: nyers 8 bites sprite-minták (egyenként 256 bájt).
+* `.wav`: hangminta (17.3).
 
 **Képek a Layer 2-re**
 
@@ -1234,6 +1235,34 @@ hangmeghajtó fut a képkocka-megszakításban, és lépteti az összes csatorn�
 játék közben tovább fut, miközben a zene szól.
 
 Lásd: `examples/sound.lz80n`.
+
+### 17.3 Minták (digitális hang)
+
+```lua
+asset boom = "assets/boom.wav"
+asset engine = "assets/engine.wav"
+
+sample_play(boom)            -- egyszer
+sample_loop(engine)          -- újra meg újra
+if sample_playing() then ... end
+sample_stop()
+```
+
+* A 8 vagy 16 bites PCM `.wav` fájlokat (mono vagy sztereó) a fordító 8 bites
+  monóvá alakítja. A 4 kHz és 31,25 kHz közötti mintavételezés megmarad, a
+  többit 15,6 kHz-re alakítja. A minták a képekhez hasonlóan saját
+  memórialapokon vannak, nem a 31 KB-os programterületen: egy másodperc
+  15,6 kHz-en kb. 15 KB.
+* A lejátszás **a háttérben** fut: a zxnDMA a minta ütemében küldi a
+  bájtokat a DAC-ra (`$DF` port), egy `$7000`–`$7FFF`-en lévő 4 KB-os
+  pufferen át, amelyet a képkocka-megszakítás tölt újra. A program tovább
+  fut, és az AY hang (17.1, 17.2) is működik.
+* Egyszerre egy minta szól; egy új `sample_play` lecseréli az előzőt.
+* Amíg minta szól, a DMA foglalt: a `dma_copy`, a `dma_fill` és a
+  `layer2_clear` ilyenkor a CPU-val dolgozik (helyesen, de lassabban: a
+  Layer 2 törlése kb. 2 képkocka).
+
+Lásd: `examples/samples.lz80n`.
 
 ---
 
@@ -1503,7 +1532,7 @@ Még nem támogatott:
 
 * kb. 31 KB-nál több globális változó és adat a programterületen (a nagy
   táblák helye a `far` tömb, 19.1)
-* mintalejátszás a Next DAC-ján, PT3 zene importálása
+* PT3 zene importálása
 
 Tervezett sorrend: sebességmérés a NextBASIC ellen valódi gépen →
 `long`/`fixed16`/Layer 2 módok → konstruktorok és öröklődés → memóriabankok →
@@ -1570,5 +1599,6 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `modules.lz80n` | program három fájlban: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
+| `samples.lz80n` | `.wav` minták a DAC-on, a háttérben |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |
