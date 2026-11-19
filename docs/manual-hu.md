@@ -170,7 +170,7 @@ jelzi: `` `név` is a reserved name ``.
 
 `and` `or` `not` `if` `then` `elseif` `else` `end` `while` `do` `for`
 `function` `return` `break` `const` `var` `true` `false` `asm` `struct`
-`class` `asset` `interrupt` `far`
+`class` `asset` `interrupt` `far` `include`
 
 **Típusnevek és a `self`**
 
@@ -207,6 +207,38 @@ egy változó nem kaphatja egy függvény vagy típus nevét.
 **Struktúrán és osztályon belül szabad.** A mező- és metódusnevek a saját
 típusukhoz tartoznak, így a kulcsszavakon kívül bármi lehet a nevük: egy
 osztálynak lehet `line` mezője vagy `update()` metódusa.
+
+### 3.6 Több forrásfájl: `include`
+
+A program több fájlra bontható. Az `include "fájl"` egy másik forrásfájlt
+illeszt be a beillesztő fájl legfelső szintjén:
+
+```lua
+-- game.lz80n
+include "lib/screen.lz80n"     -- title(), status()
+include "lib/enemies.lz80n"    -- az Enemy osztály
+
+title("My game")
+```
+
+* Az útvonal az `include`-ot tartalmazó fájlhoz képest relatív (a `lib/`
+  mappában lévő fájl a szomszédjait így éri el: `include "other.lz80n"`).
+* Minden fájl **egyszer** kerül be: ugyanannak a fájlnak a második
+  `include`-ja kimarad. A fájlok így maguk is beilleszthetik, amire
+  szükségük van, és akár kölcsönösen is hivatkozhatnak egymásra.
+* Az `include` csak a fájl legfelső szintjén állhat, függvényen, osztályon
+  vagy blokkon belül nem. A beillesztett fájlban bármi lehet, ami egy
+  programban: függvények, osztályok, globális változók, konstansok,
+  erőforrások és legfelső szintű utasítások (ezek ott futnak le, ahol az
+  `include` áll).
+* Az erőforrások útvonala (`asset x = "..."`) az erőforrást deklaráló
+  fájlhoz képest relatív.
+* Minden egyetlen programmá áll össze, egyetlen névtérrel: az egyik fájlban
+  deklarált név az utána következő összes fájlban látszik, és ugyanaz a név
+  két fájlban hiba. A hibaüzenet megnevezi a fájlt:
+  `lib/enemies.lz80n:12:5: error: ...`
+* A `modules.lz80n` példa a `lib/screen.lz80n` és `lib/ball.lz80n` fájlokat
+  használja.
 
 ---
 
@@ -1336,6 +1368,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
 | `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
 | `banks.lz80n` | `far` tömbök: 16 KB-os barlangtérkép memóriabankokban |
+| `modules.lz80n` | program három fájlban: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |

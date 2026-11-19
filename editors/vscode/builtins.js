@@ -120,7 +120,7 @@ const TYPES = {
 const KEYWORDS = [
   'and', 'or', 'not', 'if', 'then', 'elseif', 'else', 'end', 'while', 'do', 'for',
   'function', 'return', 'break', 'const', 'var', 'true', 'false', 'asm', 'struct',
-  'class', 'asset', 'interrupt', 'far', 'self', 'raster', 'frame',
+  'class', 'asset', 'interrupt', 'far', 'include', 'self', 'raster', 'frame',
 ];
 
 const COLOURS = ['BLACK', 'BLUE', 'RED', 'MAGENTA', 'GREEN', 'CYAN', 'YELLOW', 'WHITE'];
