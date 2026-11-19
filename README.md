@@ -1,6 +1,8 @@
-# LZ80N — The Next Language
+<p align="center">
+  <img src="assets/logo.png" alt="LZ80N — The simplicity of Lua. The power of Z80N." width="800">
+</p>
 
-> The simplicity of Lua. The power of Z80N.
+# LZ80N — The Next Language
 
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.
@@ -82,3 +84,8 @@ See `docs/LZ80N.md` (concept document) for the full vision and roadmap.
 
 `benchmarks/` holds the same seven tasks in LZ80N and NextBASIC
 (`benchmark.lz80n`, `benchmark.bas`); see `benchmarks/README.md`.
+
+## License
+
+LZ80N is released under the [MIT License](LICENSE).
+SjASMPlus, which the compiler calls, is a separate project under the BSD licence.

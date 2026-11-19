@@ -2,6 +2,7 @@
 name = "lz80nc"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 png = "0.17"
