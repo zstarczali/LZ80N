@@ -3,8 +3,8 @@
 -- Sprites (assets/ships.png, made by assets/make_ship_sprites.py):
 --  * the player is cut from assets/space-ship.png: 32x32, four hardware
 --    sprites, with an animated engine flame
---  * five kinds of enemies, drawn as 16x16 pixel art and shown at double
---    size by the sprite hardware (scale)
+--  * five kinds of enemies, drawn as 16x16 pixel art with two animation
+--    frames each
 --
 --   crab    slow, sways wide                     10 points
 --   wasp    zigzags fast                         20 points
@@ -170,11 +170,11 @@ function shoot(word x, sword y)
     for i = 0, NBULLETS - 1 do
         if not bullets[i].active then
             bullets[i].active = true
-            bullets[i].x = sword(x) + 8
-            bullets[i].y = y + 20
+            bullets[i].x = sword(x)
+            bullets[i].y = y + 8
             bullets[i].dx = 0
-            if px + 8 > x + 24 then bullets[i].dx = 1 end
-            if px + 24 < x + 8 then bullets[i].dx = -1 end
+            if px > x + 8 then bullets[i].dx = 1 end
+            if px + 24 < x then bullets[i].dx = -1 end
             return
         end
     end
@@ -242,8 +242,8 @@ class Enemy
         self.y += self.speed
         if self.kind == ARROW then
             -- steer towards the player
-            if self.centre + 4 < px then self.centre += 1 end
-            if self.centre > px + 4 then self.centre -= 1 end
+            if self.centre < px + 4 then self.centre += 1 end
+            if self.centre > px + 12 then self.centre -= 1 end
         end
         self.phase += self.step
         self.x = word(sword(self.centre) + sword(sin(self.phase) * self.amp))
@@ -271,10 +271,17 @@ class Enemy
         return true
     end
 
-    -- is the point (hx, hy) inside this enemy's body (32x32 on screen)?
+    -- is the point (hx, hy) inside this enemy's body (16x16)?
     function hit(word hx, sword hy) -> bool
         if self.boom > 0 or self.y < 0 then return false end
-        return hx >= self.x + 3 and hx < self.x + 29 and hy >= self.y + 3 and hy < self.y + 29
+        return hx >= self.x + 1 and hx < self.x + 15 and hy >= self.y + 2 and hy < self.y + 14
+    end
+
+    -- does this enemy overlap the player's body (px+6..px+26, py+4..py+28)?
+    function touches() -> bool
+        if self.boom > 0 or self.y < 0 then return false end
+        sword top = sword(py)
+        return self.x + 14 > px + 6 and self.x + 2 < px + 26 and self.y + 14 > top + 4 and self.y + 2 < top + 28
     end
 end
 
@@ -405,7 +412,7 @@ function collisions()
             end
         end
         -- the enemy rams the player
-        if safe == 0 and pboom == 0 and enemies[e].hit(px + 16, sword(py) + 14) then
+        if safe == 0 and pboom == 0 and enemies[e].touches() then
             enemies[e].health = 1
             enemies[e].damage()
             player_hit()
@@ -443,8 +450,6 @@ end
 for i = 0, NENEMIES - 1 do
     enemies[i].spr = S_ENEMY + i
     enemies[i].bspr = S_BOOM + i
-    sprite[S_ENEMY + i].scale = 1        -- 16x16 pixel art at double size
-    sprite[S_BOOM + i].scale = 1
 end
 for i = 0, NSTARS - 1 do
     star_x[i] = byte(random(256))

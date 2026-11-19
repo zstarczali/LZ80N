@@ -1,0 +1,118 @@
+{
+  "function": {
+    "prefix": "function",
+    "body": ["function ${1:name}(${2})${3: -> ${4:byte}}", "\t$0", "end"],
+    "description": "function declaration"
+  },
+  "if": {
+    "prefix": "if",
+    "body": ["if ${1:condition} then", "\t$0", "end"],
+    "description": "if ... then ... end"
+  },
+  "ifelse": {
+    "prefix": "ifelse",
+    "body": ["if ${1:condition} then", "\t$2", "else", "\t$0", "end"],
+    "description": "if ... then ... else ... end"
+  },
+  "elseif": {
+    "prefix": "elseif",
+    "body": ["elseif ${1:condition} then", "\t$0"],
+    "description": "elseif branch"
+  },
+  "for": {
+    "prefix": "for",
+    "body": ["for ${1:i} = ${2:0}, ${3:9} do", "\t$0", "end"],
+    "description": "numeric for loop"
+  },
+  "forstep": {
+    "prefix": "forstep",
+    "body": ["for ${1:i} = ${2:0}, ${3:9}, ${4:2} do", "\t$0", "end"],
+    "description": "numeric for loop with step"
+  },
+  "while": {
+    "prefix": "while",
+    "body": ["while ${1:condition} do", "\t$0", "end"],
+    "description": "while loop"
+  },
+  "mainloop": {
+    "prefix": "mainloop",
+    "body": ["while true do", "\tvsync()", "\t$0", "end"],
+    "description": "frame-synced main loop"
+  },
+  "struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name}", "\t${2:byte} ${3:field}", "end"],
+    "description": "struct declaration"
+  },
+  "class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name}",
+      "\t${2:byte} ${3:x} = ${4:0}",
+      "",
+      "\tfunction ${5:update}()",
+      "\t\t$0",
+      "\tend",
+      "end"
+    ],
+    "description": "class with a method"
+  },
+  "interrupt raster": {
+    "prefix": "irq",
+    "body": ["interrupt raster(${1:96})", "\t$0", "end"],
+    "description": "raster line interrupt"
+  },
+  "interrupt frame": {
+    "prefix": "irqframe",
+    "body": ["interrupt frame", "\t$0", "end"],
+    "description": "once-per-frame interrupt"
+  },
+  "asm": {
+    "prefix": "asm",
+    "body": ["asm", "\t$0", "end"],
+    "description": "inline Z80N assembly block (SjASMPlus syntax)"
+  },
+  "asset image": {
+    "prefix": "assetimg",
+    "body": ["asset ${1:pic} = image(\"${2:assets/picture.png}\")"],
+    "description": "PNG picture for draw_image"
+  },
+  "asset sprites": {
+    "prefix": "assetspr",
+    "body": ["asset ${1:sheet} = \"${2:assets/sprites.png}\""],
+    "description": "PNG sprite sheet for sprite_load"
+  },
+  "layer2 setup": {
+    "prefix": "layer2",
+    "body": ["layer2_visible(true)", "layer2_clear(${1:0})", "$0"],
+    "description": "turn on and clear Layer 2"
+  },
+  "sprite setup": {
+    "prefix": "sprites",
+    "body": [
+      "sprite_load(0, ${1:sheet})",
+      "sprites_visible(true, false)",
+      "sprite[${2:0}].position(${3:100}, ${4:100})",
+      "sprite[$2].show(${5:0})",
+      "$0"
+    ],
+    "description": "upload patterns and show a sprite"
+  },
+  "copper list": {
+    "prefix": "copper",
+    "body": [
+      "copper_begin()",
+      "for y = 0, 191${1:, 2} do",
+      "\tcopper_wait(y)",
+      "\tcopper_move(${2:0x4A}, ${3:y})",
+      "end",
+      "copper_start()"
+    ],
+    "description": "build and start a copper list"
+  },
+  "block comment": {
+    "prefix": "--[[",
+    "body": ["--[[", "$0", "]]"],
+    "description": "block comment"
+  }
+}
