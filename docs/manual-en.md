@@ -188,8 +188,8 @@ module, so a name never changes meaning when a program starts to use it:
 | Module | Names |
 |--------|-------|
 | sprite | `Sprite` `sprite` `sprites_visible` |
-| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` |
-| palette | `palette` `palette9` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` |
+| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` `L2_256` `L2_320` `L2_640` |
+| palette | `palette` `palette9` `palette_select` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` `PAL_ULA_2` `PAL_LAYER2_2` `PAL_SPRITES_2` `PAL_TEXT_2` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
 | sound | `sound_reset` `sound_mix` `tone` `noise` `volume` `sound_off` `beep` `play` `play_loop` `playing` `sound_tick` |
 
@@ -937,7 +937,8 @@ print("took", (frames() - t) * 20, "ms")
 
 ## 14. Layer 2 graphics
 
-Layer 2 is the Next's 256 × 192 bitmap layer with one byte per pixel. A colour
+Layer 2 is the Next's bitmap layer: 256 × 192 with one byte per pixel by
+default, 320 × 256 or 640 × 256 on request (14.1). A colour
 is an 8-bit `RRRGGGBB` value. `TRANSPARENT` (`$E3`) lets lower layers show
 through.
 
@@ -961,6 +962,8 @@ through.
 | `fill_triangle(x0, y0, x1, y1, x2, y2, c)` | filled triangle (corners in any order) |
 | `draw_image(img, x, y)` | draw a picture (see 16.1) |
 | `layer2_flip()` | double buffering: show the image drawn so far, draw into the other buffer |
+| `layer2_mode(m)` | `L2_256`, `L2_320` or `L2_640` (14.1) |
+| `layer2_width()` / `layer2_height()` → word | size of the current mode |
 
 Circles, ellipses and filled triangles take `sword` coordinates and are
 **clipped**: a shape may hang off any edge of the screen. Radii are 0–255.
@@ -988,10 +991,35 @@ end
 
 Layer order is **S-U-L**: sprites on top, then text, then Layer 2.
 
-Rows 192 and below are ignored by `plot`. Pixels are accessed through MMU
+Pixels outside the screen (in 256 × 192: rows 192 and below) are ignored by `plot`. Pixels are accessed through MMU
 slot 0 (`$0000`–`$1FFF`); `draw_image` also uses slot 1 (`$2000`–`$3FFF`)
 while it copies and puts the ROM back there afterwards. Once Layer 2 drawing has been used, `memory[0]` …
 `memory[$1FFF]` show the last Layer 2 page used, not the ROM.
+
+### 14.1 320 × 256 and 640 × 256
+
+```lua
+layer2_mode(L2_320)        -- 320 x 256, 256 colours: the whole display, border included
+layer2_mode(L2_640)        -- 640 x 256, 16 colours (palette indices 0..15)
+layer2_mode(L2_256)        -- back to 256 x 192 (the default)
+word w = layer2_width()    -- 256, 320 or 640
+word h = layer2_height()   -- 192 or 256
+```
+
+* Every drawing call works in every mode: x goes up to 639, y up to 255.
+  Shapes are clipped to the current size; `layer2_clear`, `layer2_flip`
+  and `draw_image` follow the mode too.
+* In 640 × 256 a pixel is a palette index 0–15 and is half as wide as it is
+  tall: a round circle needs twice the radius across
+  (`fill_ellipse(x, y, 2 * r, r, c)`). Load the 16 colours with
+  `palette(PAL_LAYER2, i, colour)`.
+* The wide modes store pixels by columns: vertical lines and
+  `hline`/`fill_rect` in 320 × 256 are fast, 640 × 256 draws pixel by pixel.
+* The two buffers then take 16K banks 8–17 (instead of 8–13), and pictures
+  and `far` arrays start above them. The compiler arranges this when the
+  program calls `layer2_mode`.
+
+The example `hires.lz80n` switches between the two modes.
 
 ---
 
@@ -1005,9 +1033,23 @@ redrawing anything. This is useful for colour cycling, fades and flashes.
 | `palette(layer, index, colour)` | 8-bit `RRRGGGBB` colour |
 | `palette9(layer, index, colour)` | 9-bit `RRRGGGBBB` colour |
 | `rgb9(r, g, b)` → word | 9-bit colour: r, g, b 0–7 |
+| `palette_select(layer, second)` | show the first (`false`) or second (`true`) palette |
 
 `layer`: `PAL_ULA`, `PAL_LAYER2`, `PAL_SPRITES`, `PAL_TEXT`.
 Text colour `k` is entry `2k+1` of `PAL_TEXT`.
+
+Every layer has a **second palette** too: `PAL_ULA_2`, `PAL_LAYER2_2`,
+`PAL_SPRITES_2`, `PAL_TEXT_2`. `palette_select(layer, second)` chooses which
+of the two a layer shows, so a whole prepared set of colours (a night
+version, a flash, a fade step) appears at once:
+
+```lua
+for i = 0, 255 do
+    palette(PAL_LAYER2_2, byte(i), dim(byte(i)))   -- prepare the second palette
+end
+palette_select(PAL_LAYER2, true)                   -- show it
+palette_select(PAL_LAYER2, false)                  -- and back
+```
 
 ```lua
 -- colour cycling: rewrite 16 Layer 2 palette entries every frame
@@ -1435,7 +1477,6 @@ automatically, largest first. Nothing changes in the source.
 
 Not supported yet:
 
-* Layer 2 320 × 256 and 640 × 256 modes, second palettes
 * a main program (top-level code, globals and data) larger than about
   31 KB; functions are banked automatically (22.5)
 * sample playback through the Next's DAC, PT3 music import
@@ -1477,7 +1518,9 @@ register allocation.
 | `MHZ_3 MHZ_7 MHZ_14 MHZ_28` | 0–3 |
 | `NOT_FOUND` | 255 |
 | `TRANSPARENT` | `$E3` |
-| `PAL_ULA PAL_LAYER2 PAL_SPRITES PAL_TEXT` | palette selectors |
+| `PAL_ULA PAL_LAYER2 PAL_SPRITES PAL_TEXT` | palette selectors (first palettes) |
+| `PAL_ULA_2 PAL_LAYER2_2 PAL_SPRITES_2 PAL_TEXT_2` | second palettes |
+| `L2_256 L2_320 L2_640` | Layer 2 modes |
 
 ### 24.3 Example programs
 
@@ -1491,6 +1534,7 @@ register allocation.
 | `layer2.lz80n` | Layer 2 drawing, layering with text and sprites |
 | `math.lz80n` | `fixed`, `sin`/`cos`/`atan2`/`sqrt`, double buffering |
 | `palette.lz80n` | colour cycling, `dma_copy`, `addr` |
+| `hires.lz80n` | Layer 2 320 × 256 and 640 × 256, second palettes |
 | `raster.lz80n` | copper, raster and frame interrupts, `random` |
 | `strings.lz80n` | strings and string functions, a scrolling ticker |
 | `tables.lz80n` | array initialisers: menu, bar chart and colour tables, `/=` `%=` |

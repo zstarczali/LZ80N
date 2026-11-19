@@ -133,6 +133,9 @@ pub struct Options {
     pub file_dirs: Vec<std::path::PathBuf>,
     /// Put every function into its own code page (tests of code banking).
     pub bank_all: bool,
+    /// The program switches Layer 2 to 320x256 / 640x256: its two buffers
+    /// take banks 8-17, so pictures and `far` data start at bank 18.
+    pub l2_hires: bool,
 }
 
 pub struct Output {
@@ -199,11 +202,13 @@ struct Gen {
     uses_recursion: bool,
     /// `long` / `fixed16` arithmetic: the 32-bit runtime is needed.
     uses_long: bool,
+    /// first 8K page above the Layer 2 buffers (28, or 36 for 320/640 modes)
+    first_page: u32,
 }
 
 const INTRINSICS: &[&str] = &[
     "print", "write", "vsync", "border", "sprite_load", "memory", "nextreg", "port",
-    "plot", "point", "hline", "layer2_clear", "layer2_flip", "dma_copy", "dma_fill", "addr", "key", "kempston", "frames", "cls", "at", "ink",
+    "plot", "point", "hline", "layer2_clear", "layer2_flip", "layer2_mode", "layer2_width", "layer2_height", "dma_copy", "dma_fill", "addr", "key", "kempston", "frames", "cls", "at", "ink",
     "cpu_speed", "random", "seed", "pause", "any_key", "wait_key",
     "abs", "min", "max", "clamp", "sqrt", "sin", "cos", "atan2", "round",
     "len", "sub", "find", "val", "asc", "chr", "str", "upper", "lower",
@@ -628,6 +633,7 @@ impl Gen {
     fn run(&mut self, prog: &Program, opts: &Options) {
         self.base_dir = opts.base_dir.clone();
         self.file_dirs = opts.file_dirs.clone();
+        self.first_page = if opts.l2_hires { 36 } else { 28 };
         for (n, v) in builtin_consts() {
             self.globals.insert(n, Sym::Const(v));
         }
@@ -760,7 +766,7 @@ impl Gen {
     /// `n` consecutive 8K pages from the pool above the Layer 2 buffers
     /// (page 28 = 16K bank 14 up to the 1 MB limit).
     fn alloc_pages(&mut self, n: u32, pos: Pos) -> R<u32> {
-        let first = self.far_pages.iter().map(|(p, _, _)| p + 1).max().unwrap_or(28);
+        let first = self.far_pages.iter().map(|(p, _, _)| p + 1).max().unwrap_or(self.first_page);
         if first + n > 224 {
             return Err(Diag::new(pos, "pictures and `far` arrays need more than the Next's 1 MB of memory"));
         }
@@ -2631,7 +2637,7 @@ impl Gen {
                     Some(Ty::Word)
                 } else if n == "point" {
                     Some(Ty::Byte)
-                } else if matches!(n.as_str(), "addr" | "random" | "image_width" | "image_height") {
+                } else if matches!(n.as_str(), "addr" | "random" | "image_width" | "image_height" | "layer2_width" | "layer2_height") {
                     Some(Ty::Word)
                 } else if n == "any_key" {
                     Some(Ty::Bool)
@@ -4377,69 +4383,64 @@ impl Gen {
                 return Ok(None);
             }
             "plot" | "point" | "hline" => {
-                // D = y, E = x, A = colour, BC = length (hline)
+                // D = y, HL = x, A = colour, BC = length (hline)
                 let n = if name == "point" { 2 } else if name == "plot" { 3 } else { 4 };
                 argc(n)?;
-                if name != "hline" {
-                    // constants and plain byte variables load straight into registers
-                    let colour = if name == "plot" { self.trivial8(&args[2])? } else { None };
-                    if name == "plot" && colour.is_none() {
-                        self.gen_expr(&args[2], Ty::Byte)?;
-                        self.e("push af");
-                    }
-                    if let Some(x) = self.trivial8(&args[0])? {
-                        self.gen_expr(&args[1], Ty::Byte)?;
-                        self.e("ld d,a");
-                        self.e(&format!("ld a,{x}"));
-                        self.e("ld e,a");
-                    } else {
-                        self.gen_expr(&args[1], Ty::Byte)?;
-                        self.e("push af");
-                        self.gen_expr(&args[0], Ty::Byte)?;
-                        self.e("ld e,a");
-                        self.e("pop af");
-                        self.e("ld d,a");
-                    }
-                    if name == "point" {
-                        self.e("call rt_point");
-                        return Ok(Some(Ty::Byte));
-                    }
-                    match colour {
-                        Some(c) => self.e(&format!("ld a,{c}")),
-                        None => self.e("pop af"),
-                    }
-                    self.e("call rt_plot");
-                    return Ok(None);
+                let colour = if name == "point" { None } else { self.trivial8(&args[n - 1])? };
+                if name != "point" && colour.is_none() {
+                    self.gen_expr(&args[n - 1], Ty::Byte)?;
+                    self.e("push af");
                 }
                 if name == "hline" {
-                    self.gen_expr(&args[3], Ty::Byte)?;
-                    self.e("push af");
                     self.gen_expr(&args[2], Ty::Word)?;
                     self.e("push hl");
                 }
-                self.gen_expr(&args[1], Ty::Byte)?;
-                self.e("push af");
-                self.gen_expr(&args[0], Ty::Byte)?;
-                self.e("ld e,a");
-                self.e("pop af");
-                self.e("ld d,a");
-                match name {
-                    "plot" => {
-                        self.e("pop af");
-                        self.e("call rt_plot");
-                        return Ok(None);
+                match self.trivial8(&args[1])? {
+                    Some(y) => {
+                        self.gen_expr(&args[0], Ty::Word)?;
+                        self.e(&format!("ld a,{y}"));
+                        self.e("ld d,a");
                     }
-                    "hline" => {
-                        self.e("pop bc");
+                    None => {
+                        self.gen_expr(&args[1], Ty::Byte)?;
+                        self.e("push af");
+                        self.gen_expr(&args[0], Ty::Word)?;
                         self.e("pop af");
-                        self.e("call rt_hline");
-                        return Ok(None);
+                        self.e("ld d,a");
                     }
-                    _ => {
+                }
+                if name == "hline" {
+                    self.e("pop bc");
+                }
+                match (name, colour) {
+                    ("point", _) => {
                         self.e("call rt_point");
                         return Ok(Some(Ty::Byte));
                     }
+                    (_, Some(c)) => self.e(&format!("ld a,{c}")),
+                    (_, None) => self.e("pop af"),
                 }
+                self.e(if name == "plot" { "call rt_plot" } else { "call rt_hline" });
+                return Ok(None);
+            }
+            "layer2_mode" => {
+                argc(1)?;
+                self.gen_expr(&args[0], Ty::Byte)?;
+                self.e("call rt_l2_setmode");
+                return Ok(None);
+            }
+            "layer2_width" => {
+                argc(0)?;
+                self.e("ld hl,(rt_l2wid)");
+                return Ok(Some(Ty::Word));
+            }
+            "layer2_height" => {
+                argc(0)?;
+                self.e("ld a,(rt_l2hmax)");
+                self.e("ld l,a");
+                self.e("ld h,0");
+                self.e("inc hl");
+                return Ok(Some(Ty::Word));
             }
             "addr" => {
                 argc(1)?;
@@ -4853,7 +4854,7 @@ impl Gen {
                 None => pages.push((sz, vec![i])),
             }
         }
-        let first = self.far_pages.iter().map(|(p, _, _)| p + 1).max().unwrap_or(28) as usize;
+        let first = self.far_pages.iter().map(|(p, _, _)| p + 1).max().unwrap_or(self.first_page) as usize;
         for (k, (_, members)) in pages.iter().enumerate() {
             let page = first + k;
             let _ = writeln!(pages_text, "; code page {page}\n    MMU 2 e, {page}\n    ORG $4000");

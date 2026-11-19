@@ -852,12 +852,36 @@ fn render(cpu: &Cpu) -> Vec<u8> {
         p[3] = 255;
     }
     if cpu.l2_port & 2 != 0 {
-        for y in 0..192 {
-            let pal = state(32 + y).1;
-            for x in 0..256 {
-                let c = pal[1][cpu.l2_pixel(x, y) as usize];
-                if c != 0xE3 {
-                    put(&mut img, 32 + x, 32 + y, c);
+        // NR $70: 256x192 by rows, 320x256 / 640x256 by columns (640: the
+        // left pixel of each pair is shown); NR $43 bit 2: second palette
+        let l2pal = |row: usize| if state(row).0[0x43] & 4 != 0 { 5 } else { 1 };
+        let base = cpu.nextreg[0x12] as usize * 2;
+        let byte = |page: usize, off: usize| cpu.pages.get(&(page as u8)).map_or(0, |p| p[off]);
+        match (cpu.nextreg[0x70] >> 4) & 3 {
+            0 => {
+                for y in 0..192 {
+                    let pal = state(32 + y).1;
+                    for x in 0..256 {
+                        let c = pal[l2pal(32 + y)][cpu.l2_pixel(x, y) as usize];
+                        if c != 0xE3 {
+                            put(&mut img, 32 + x, 32 + y, c);
+                        }
+                    }
+                }
+            }
+            mode => {
+                for y in 0..256 {
+                    let pal = state(y).1;
+                    for x in 0..320 {
+                        let mut v = byte(base + x / 32, (x % 32) * 256 + y);
+                        if mode == 2 {
+                            v >>= 4;
+                        }
+                        let c = pal[l2pal(y)][v as usize];
+                        if c != 0xE3 {
+                            put(&mut img, x, y, c);
+                        }
+                    }
                 }
             }
         }
@@ -874,7 +898,8 @@ fn render(cpu: &Cpu) -> Vec<u8> {
                     for px in 0..8 {
                         let bit = (bits >> (7 - px)) & 1;
                         let idx = (attr & 0xFE) | bit;
-                        let c = state(row * 8 + py).1[3][idx as usize];
+                        let tpal = if cpu.nextreg[0x6B] & 0x10 != 0 { 7 } else { 3 };
+                        let c = state(row * 8 + py).1[tpal][idx as usize];
                         if c != 0xE3 {
                             put(&mut img, col * 8 + px, row * 8 + py, c);
                         }
@@ -900,7 +925,8 @@ fn render(cpu: &Cpu) -> Vec<u8> {
                     let px = if mirror { 15 - px } else { px };
                     let c = cpu.patterns[pat * 256 + py * 16 + px];
                     if c != 0xE3 {
-                        put(&mut img, x + sx, y + sy, state(y + sy).1[2][c as usize]);
+                        let spal = if state(y + sy).0[0x43] & 8 != 0 { 6 } else { 2 };
+                        put(&mut img, x + sx, y + sy, state(y + sy).1[spal][c as usize]);
                     }
                 }
             }
@@ -2482,4 +2508,49 @@ print(d.x, d.y, b.who(), A.who(b))
         "4 6 101 1\n",
     );
     assert!(err("struct V\n byte x\nend\nfunction f() -> V\n return {1}\nend\nbyte k = f().x").contains("in a variable first"));
+}
+
+#[test]
+fn run_layer2_hires() {
+    expect(
+        "l2_hires",
+        "layer2_mode(L2_320)
+hline(250, 10, 20, 7)
+print(point(249, 10), point(250, 10), point(256, 10), point(269, 10), point(270, 10))
+hline(300, 11, 100, 8)
+print(point(299, 11), point(300, 11), point(319, 11), point(320, 11))
+fill_circle(224, 110, 36, 5)
+print(point(224, 110), point(190, 110), point(258, 110), point(224, 80))
+fill_circle(288, 110, 36, 6)
+print(point(288, 110), point(300, 120))
+plot(300, 255, 9)
+print(point(300, 255), layer2_width(), layer2_height())
+layer2_mode(L2_640)
+layer2_clear(3)
+plot(639, 255, 12)
+plot(638, 255, 21)
+hline(600, 3, 50, 9)
+print(point(0, 0), point(639, 255), point(638, 255), point(599, 3), point(600, 3), point(639, 3))
+print(layer2_width(), layer2_height())
+layer2_mode(L2_256)
+print(layer2_width(), layer2_height(), point(0, 192))
+palette_select(PAL_LAYER2, true)
+palette_select(PAL_SPRITES, true)
+palette(PAL_LAYER2_2, 1, 2)
+print(nextreg[0x43] & 0x0E, nextreg[0x43] >> 4)
+palette_select(PAL_LAYER2, false)
+print(nextreg[0x43] & 0x0E)
+",
+        "0 7 7 7 0
+0 8 8 0
+5 5 5 5
+6 6
+9 320 256
+3 12 5 3 9 9
+640 256
+256 192 0
+12 5
+8
+",
+    );
 }

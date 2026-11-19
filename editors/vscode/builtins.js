@@ -27,6 +27,9 @@ const FUNCTIONS = {
   layer2_visible: ['layer2_visible(on)', 'Show / hide Layer 2.', 14],
   layer2_clear: ['layer2_clear(c)', 'Fill the screen with colour `c` (zxnDMA, very fast).', 14],
   layer2_flip: ['layer2_flip()', 'Double buffering: show the image drawn so far, draw into the other buffer.', 14],
+  layer2_mode: ['layer2_mode(m)', '`L2_256` (256x192, default), `L2_320` (320x256) or `L2_640` (640x256, 16 colours).', 14],
+  layer2_width: ['layer2_width() -> word', 'Width of the current Layer 2 mode: 256, 320 or 640.', 14],
+  layer2_height: ['layer2_height() -> word', 'Height of the current Layer 2 mode: 192 or 256.', 14],
   plot: ['plot(x, y, c)', 'Draw a pixel.', 14],
   point: ['point(x, y) -> byte', 'Read a pixel.', 14],
   hline: ['hline(x, y, len, c)', 'Horizontal line.', 14],
@@ -48,6 +51,7 @@ const FUNCTIONS = {
   // 15 palette
   palette: ['palette(layer, index, colour)', '8-bit `RRRGGGBB` colour. `layer`: `PAL_ULA`, `PAL_LAYER2`, `PAL_SPRITES`, `PAL_TEXT`.', 15],
   palette9: ['palette9(layer, index, colour)', '9-bit `RRRGGGBBB` colour.', 15],
+  palette_select: ['palette_select(layer, second)', 'Show the first (`false`) or the second (`true`) palette of a layer.', 15],
   rgb9: ['rgb9(r, g, b) -> word', '9-bit colour: r, g, b 0–7.', 15],
   // 16 sprites
   sprite_load: ['sprite_load(first, asset)', 'Upload the sprite patterns of a PNG asset, starting at pattern slot `first`.', 16],
