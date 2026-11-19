@@ -145,6 +145,14 @@ asm ... end             -- raw Z80N assembly lines
   before the target is mapped. All-zero pages are not stored in the .nex
   (SAVENEX AUTO skips empty banks) and are cleared at startup
   (`rt_far_zero`). No place()/by-ref/addr() for far elements.
+* Code banking: functions are compiled into separate chunks. If the
+  estimated resident size (asm_size, ~exact) exceeds 30500 bytes, the
+  largest non-interrupt functions move into 8K code pages (first fit,
+  <= 7800 est. bytes per page) assembled at $4000 via `MMU 2 e`. Each gets
+  a resident stub `f: ld hl,f_bank / ld a,page / jp rt_bcall`; rt_bcall
+  saves rt_codepage, maps NR $52, calls, restores (keeps A via rt_bret, HL;
+  flags not kept). The ISR saves/restores rt_codepage and rt_bret.
+  `--bank-all` (tests: compile_opts) = one function per page.
 * Reserved names: keywords, type names, `self`, built-in functions, built-in
   constants, and the public names of the standard modules (always, even
   when the module is not used) plus the `snd_` prefix
