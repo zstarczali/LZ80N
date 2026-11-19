@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="assets/logo.png" alt="LZ80N — The simplicity of Lua. The power of Z80N." width="800">
+  <img src="assets/logo-square.png" alt="LZ80N logo" width="260">
 </p>
 
-# LZ80N — The Next Language
+<h1 align="center">LZ80N — The Next Language</h1>
+
+<p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
 
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.
