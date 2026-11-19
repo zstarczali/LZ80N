@@ -19,6 +19,9 @@ fn err(src: &str) -> String {
 }
 
 fn sjasmplus() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("SJASMPLUS") {
+        return Some(p.into());
+    }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../tools/sjasmplus/sjasmplus-1.24.0.win/sjasmplus.exe");
     p.exists().then_some(p)
