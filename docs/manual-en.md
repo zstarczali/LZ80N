@@ -174,7 +174,7 @@ parameters, loop variables, types or assets. The compiler reports
 
 **Type names and `self`**
 
-`bool` `byte` `sbyte` `word` `sword` `fixed` `string`, and `self` (the object
+`bool` `byte` `sbyte` `word` `sword` `fixed` `long` `fixed16` `string`, and `self` (the object
 inside a method).
 
 **Built-in functions** (implemented by the compiler)
@@ -252,6 +252,8 @@ title("My game")
 | `word` | 2 | 0 … 65535 | unsigned |
 | `sword` | 2 | -32768 … 32767 | signed |
 | `fixed` | 2 | -128 … 127.996 | 8.8 fixed point, step 1/256 |
+| `long` | 4 | -2 147 483 648 … 2 147 483 647 | signed 32-bit (10.4) |
+| `fixed16` | 4 | -32768 … 32767.99998 | 16.16 fixed point, step 1/65536 (10.4) |
 | `string` | 65 | 0 … 64 characters | text value |
 
 Choose the smallest type that is big enough. On the Z80, 8-bit operations
@@ -353,7 +355,7 @@ word table[] = {N * 100, N * 200}         -- constant expressions are fine
 ### 4.6 Conversions (casts)
 
 A value can always be **widened** implicitly: `byte` → `word`, `sbyte` →
-`sword`. **Narrowing** must be written explicitly:
+`sword`, any integer → `long`, `fixed` → `fixed16`. **Narrowing** must be written explicitly:
 
 ```lua
 word w = 1000
@@ -710,6 +712,49 @@ end
 
 The sine and arctangent tables (about 0.6 KB) are only included in the
 program when `sin`, `cos` or `atan2` is used.
+
+### 10.4 32-bit numbers: `long` and `fixed16`
+
+When 16 bits are not enough:
+
+| Type | Size | Range | Use |
+|------|------|-------|-----|
+| `long` | 4 bytes | -2 147 483 648 … 2 147 483 647 | big scores, counters, products |
+| `fixed16` | 4 bytes | -32768 … 32767.99998, step 1/65536 | precise positions and physics |
+
+```lua
+long score = 0
+score += long(level) * 25000         -- widen before multiplying
+long f = 1
+for i = 2, 12 do
+    f *= i                           -- 479001600
+end
+
+fixed16 x = 4
+fixed16 vy = -3.5
+vy += 0.05                           -- small steps add up precisely
+plot(byte(x), byte(y), c)
+```
+
+* Integers (`byte` … `sword`) widen to `long` automatically; `fixed`
+  widens to `fixed16`. The other directions need a conversion: `long(f)`,
+  `fixed16(n)`, `word(l)`, `byte(l)`, `fixed(f16)`. Fixed point to integer
+  rounds down.
+* All operators work on `long` (`+ - * / % & | ~ << >>`, comparisons;
+  `>>` keeps the sign). `fixed16` has `+ - * / %` and comparisons;
+  `fixed16 * integer` and `fixed16 / integer` are exact.
+* `print`, `write`, `str()` and `..` show `long` in full and `fixed16` with
+  up to four decimals. `abs`, `min`, `max` and `clamp` work too.
+* `long` and `fixed16` can be variables, array elements (with
+  initialisers), struct fields, parameters and return values. Not yet:
+  `far` arrays of them, and `for` loops counting in `long` (use `while`).
+* Speed: addition and comparison take a few dozen T-states, a
+  multiplication about 700 and a division about 3000 (runtime routines, the
+  multiplication uses the Z80N `MUL`). Prefer 16-bit types where they fit.
+* A number with a decimal point is `fixed` when it fits in 8.8, otherwise
+  `fixed16`. Assigned to a `fixed16`, it keeps all its precision.
+
+The example `bignum.lz80n` uses both types.
 
 ---
 
@@ -1311,7 +1356,6 @@ automatically, largest first. Nothing changes in the source.
 
 Not supported yet:
 
-* `long` (32-bit), `fixed16` (16.16)
 * returning structs, constructors, inheritance, initialisers for arrays of structs
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
 * a main program (top-level code, globals and data) larger than about
@@ -1375,6 +1419,7 @@ register allocation.
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2, transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `bignum.lz80n` | `long` and `fixed16`: big scores, 12!, a cannonball's path |
 | `recursion.lz80n` | recursion: a fractal tree, the Towers of Hanoi, mutual recursion |
 | `modules.lz80n` | a program in three files: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
