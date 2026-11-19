@@ -178,7 +178,7 @@ parameters, loop variables, types or assets. The compiler reports
 
 `and` `or` `not` `if` `then` `elseif` `else` `end` `while` `do` `for`
 `function` `return` `break` `const` `var` `true` `false` `asm` `struct`
-`class` `asset` `interrupt`
+`class` `asset` `interrupt` `far`
 
 **Type names and `self`**
 
@@ -887,7 +887,8 @@ const LOGO_H = image_height(logo)
 * The PNG is converted to `RRRGGGBB` when compiling. Its pixels are stored
   in their **own memory pages** (from 16K bank 14 up), not in the 31 KB
   program area, so a full 256 × 192 picture (48 KB) costs the program
-  only 6 bytes. All pictures together can use about 780 KB.
+  only 6 bytes. Pictures and `far` arrays (19.1) together can use about
+  780 KB.
 * `draw_image` copies the picture into Layer 2 (the buffer being drawn),
   clipped at every edge. Rows are copied with `LDIR`: a full screen takes
   about 2 frames at 28 MHz.
@@ -1099,6 +1100,36 @@ mapping applies.
 
 ---
 
+### 19.1 `far` arrays: data in memory banks
+
+The program area (code and ordinary variables) is about 31 KB. Large data
+can live in the Next's other memory instead:
+
+```lua
+far byte level[22][720]                 -- 15840 bytes, outside the program area
+far word scores[10000]
+far fixed curve[] = {0.5, 1, 1.5, 2}    -- initialisers work too
+far byte map[64][64] = {{1, 1, 1}, {1, 0, 1}}
+
+level[y][x] = 3
+level[y][x + 1] += level[y][x]
+scores[i] = scores[i - 1] + 10
+```
+
+* Element types: `byte`, `sbyte`, `word`, `sword`, `fixed`, `bool`; one or
+  more dimensions; at most 64 KB per array. Declared at the top level.
+* The data is stored in 8K pages from 16K bank 14 up, shared with the
+  pictures (`image(...)`): about 780 KB together. The values of an
+  initialiser are part of the `.nex` file; arrays without one are cleared
+  when the program starts.
+* An element is read or assigned like any array element. A page is mapped
+  into MMU slot 1 (`$2000`–`$3FFF`) on access, so it costs a little more
+  than an ordinary array (about 60–80 T-states when the page is already
+  mapped). Interrupt handlers may use `far` arrays: the mapping is saved
+  and restored around them.
+* A `far` element cannot be passed by reference or used with `addr()`; a
+  whole row (`level[y]`) cannot be used on its own.
+
 ## 20. Inline assembly
 
 ```lua
@@ -1181,9 +1212,9 @@ $0000..$1FFF  MMU slot 0: Layer 2 drawing window (after drawing)
 $4000..$5AFF  ULA screen (unused, cleared)
 $6000..$69FF  tilemap (text layer)
 $6C00..$6FFF  text font
-$2000..$3FFF  MMU slot 1: picture pages (only inside draw_image)
+$2000..$3FFF  MMU slot 1: far data / picture pages, mapped on access
 banks 8-10    Layer 2 buffer 1, banks 11-13: buffer 2 (set at startup)
-banks 14..    pictures (asset ... = image(...))
+banks 14..    pictures and far arrays
 $8000..$FCFF  program code and data (checked at compile time)
 $FDFC..       stack (grows downwards)
 $FDFD..$FDFF  JP to the interrupt handler
@@ -1216,7 +1247,8 @@ Not supported yet:
 * `long` (32-bit), `fixed16` (16.16)
 * returning structs, constructors, inheritance, initialisers for arrays of structs
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
-* programs larger than about 31 KB (memory banks)
+* code larger than about 31 KB (code banking: planned next; large data
+  already fits in `far` arrays)
 * sample playback through the Next's DAC, PT3 music import
 
 Planned order: benchmarks against NextBASIC on real hardware →
@@ -1241,7 +1273,7 @@ register allocation.
 | `sprite_load`, `sprites_visible`, `sprite[n]` | 16 |
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
 | `copper_begin`, `copper_wait`, `copper_move`, `copper_start`, `copper_stop` | 18 |
-| `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill` | 19 |
+| `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill`, `far` arrays | 19 |
 | `len`, `sub`, `find`, `val`, `str`, `asc`, `chr`, `upper`, `lower` | 9 |
 | `abs`, `min`, `max`, `clamp`, `sqrt`, `sin`, `cos`, `atan2`, `round` | 10 |
 
@@ -1275,6 +1307,7 @@ register allocation.
 | `life.lz80n` | Game of Life on 2-D arrays, 2-D initialisers |
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2, transparency |
+| `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |

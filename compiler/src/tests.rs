@@ -1929,9 +1929,3 @@ fn far_zero_pages_are_cleared() {
         assert_eq!(out, "0 0 0 8\n");
     }
 }
-
-#[test]
-fn far_debug_tmp() {
-    let src = "far byte cave[64][256]\nfar byte roof[256]\nbyte c[] = {0, 5, 6, 7}\nfor x = 0, 3 do\n roof[x] = 9\n for y = 0, 63 do\n  cave[y][x] = 1\n end\nend\ncave[10][2] = 2\nprint(cave[0][0], cave[10][2], roof[3], c[cave[10][2]])\nfill_rect(0, 0, 8, 8, c[cave[10][2]])\nprint(point(1, 1))";
-    expect("r_far_dbg", src, "1 2 9 6\n6\n");
-}
