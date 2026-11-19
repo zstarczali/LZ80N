@@ -53,6 +53,8 @@ pub struct Cpu {
     pub pages: std::collections::HashMap<u8, Vec<u8>>,
     /// Page in slot 0, or $FF for ROM (= `mem`).
     pub slot0: u8,
+    /// Page in slot 1 ($2000-$3FFF), or $FF for ROM.
+    pub slot1: u8,
     /// Last value written to the Layer 2 port $123B.
     pub l2_port: u8,
     /// Bytes written to the zxnDMA port since the last "enable".
@@ -113,7 +115,7 @@ impl Cpu {
             keys: [0x1F; 8], kempston: 0, halted: false,
             patterns: vec![0; 16384], pattern_ptr: 0, sprite_attr: [[0; 5]; 128],
             palettes: [[0; 256]; 8], pal_idx: 0,
-            pages: std::collections::HashMap::new(), slot0: 0xFF, l2_port: 0,
+            pages: std::collections::HashMap::new(), slot0: 0xFF, slot1: 0xFF, l2_port: 0,
             dma_buf: Vec::new(), dma_transfers: 0, nr44_second: false,
             iff: false, ei_delay: false, int_pending: false,
             ay: [[0; 16]; 3], ay_chip: 0, ay_reg: 0,
@@ -123,15 +125,23 @@ impl Cpu {
         }
     }
 
+    /// RAM page mapped at `a` through MMU slot 0 or 1, if any.
+    fn mapped(&self, a: u16) -> Option<u8> {
+        match a {
+            0x0000..=0x1FFF if self.slot0 != 0xFF => Some(self.slot0),
+            0x2000..=0x3FFF if self.slot1 != 0xFF => Some(self.slot1),
+            _ => None,
+        }
+    }
     fn rd(&self, a: u16) -> u8 {
-        if a < 0x2000 && self.slot0 != 0xFF {
-            return self.pages.get(&self.slot0).map_or(0, |p| p[a as usize]);
+        if let Some(pg) = self.mapped(a) {
+            return self.pages.get(&pg).map_or(0, |p| p[(a & 0x1FFF) as usize]);
         }
         self.mem[a as usize]
     }
     fn wr(&mut self, a: u16, v: u8) {
-        if a < 0x2000 && self.slot0 != 0xFF {
-            self.pages.entry(self.slot0).or_insert_with(|| vec![0; 8192])[a as usize] = v;
+        if let Some(pg) = self.mapped(a) {
+            self.pages.entry(pg).or_insert_with(|| vec![0; 8192])[(a & 0x1FFF) as usize] = v;
             return;
         }
         self.mem[a as usize] = v;
@@ -302,6 +312,7 @@ impl Cpu {
         }
         match r {
             0x50 => self.slot0 = v,
+            0x51 => self.slot1 = v,
             0x60 => {
                 self.copper[self.copper_idx] = v;
                 self.copper_idx = (self.copper_idx + 1) & 2047;
@@ -1024,7 +1035,12 @@ pub fn load_nex(nex: &[u8]) -> Result<Cpu, String> {
             5 => 0x4000,
             2 => 0x8000,
             0 => 0xC000,
-            _ => continue,
+            _ => {
+                // other banks: two 8K pages, reachable through the MMU
+                cpu.pages.insert(bank as u8 * 2, data[..8192].to_vec());
+                cpu.pages.insert(bank as u8 * 2 + 1, data[8192..].to_vec());
+                continue;
+            }
         };
         cpu.mem[addr..addr + 16384].copy_from_slice(data);
     }

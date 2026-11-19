@@ -32,6 +32,66 @@ pub fn load(path: &Path) -> Result<Asset, String> {
     }
 }
 
+/// A picture for Layer 2: RRRGGGBB pixels, row by row. Rows are packed into
+/// 8K pages so that no row crosses a page boundary.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rows_per_page: u32,
+    /// Has TRANSPARENT pixels (drawn with a masked copy).
+    pub masked: bool,
+    /// One entry per 8K page (each at most 8192 bytes).
+    pub pages: Vec<Vec<u8>>,
+}
+
+pub fn load_image(path: &Path) -> Result<Image, String> {
+    let data = std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let (w, h, px) = decode_png(&data).map_err(|e| format!("`{}`: {e}", path.display()))?;
+    if w == 0 || h == 0 || w > 256 || h > 255 {
+        return Err(format!("`{}` is {w}x{h}; images can be at most 256x255 pixels", path.display()));
+    }
+    let rows_per_page = (8192 / w).min(255);
+    let masked = px.contains(&TRANSPARENT);
+    let pages = px
+        .chunks(w * h)
+        .next()
+        .unwrap()
+        .chunks(w * rows_per_page)
+        .map(|c| c.to_vec())
+        .collect();
+    Ok(Image { width: w as u32, height: h as u32, rows_per_page: rows_per_page as u32, masked, pages })
+}
+
+/// Decode a PNG into RRRGGGBB pixels (alpha < 128 -> TRANSPARENT).
+fn decode_png(data: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    let mut dec = png::Decoder::new(data);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let channels = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Grayscale => 1,
+        png::ColorType::Indexed => return Err("unexpected indexed output".into()),
+    };
+    let px = (0..w * h)
+        .map(|i| {
+            let p = &buf[i * channels..i * channels + channels];
+            let (r, g, b, a) = match channels {
+                4 => (p[0], p[1], p[2], p[3]),
+                3 => (p[0], p[1], p[2], 255),
+                2 => (p[0], p[0], p[0], p[1]),
+                _ => (p[0], p[0], p[0], 255),
+            };
+            if a < 128 { TRANSPARENT } else { rgb_to_332(r, g, b) }
+        })
+        .collect();
+    Ok((w, h, px))
+}
+
 pub fn rgb_to_332(r: u8, g: u8, b: u8) -> u8 {
     let v = (r & 0xE0) | ((g >> 3) & 0x1C) | (b >> 6);
     if v == TRANSPARENT { 0xE2 } else { v }

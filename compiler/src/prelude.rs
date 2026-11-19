@@ -134,6 +134,117 @@ function line(byte x0, byte y0, byte x1, byte y1, byte c)
         end
     end
 end
+
+-- ---- circles and ellipses (clipped; the centre may be off screen) ----
+
+function l2_plot(sword x, sword y, byte c)
+    if x >= 0 and x <= 255 and y >= 0 and y <= 191 then
+        plot(byte(x), byte(y), c)
+    end
+end
+
+-- horizontal span x0..x1 on row y, clipped to the screen
+function l2_span(sword x0, sword x1, sword y, byte c)
+    if y < 0 or y > 191 then return end
+    if x0 < 0 then x0 = 0 end
+    if x1 > 255 then x1 = 255 end
+    if x0 > x1 then return end
+    hline(byte(x0), byte(y), word(x1 - x0 + 1), c)
+end
+
+-- half width of an ellipse dy rows from its centre
+function l2_halfw(byte rx, byte ry, byte dy) -> byte
+    if dy > ry then return 0 end
+    if ry == 0 then return rx end
+    -- Pythagoras in the space of the larger radius, then scale down, so
+    -- the integer square root's rounding is never magnified
+    if rx >= ry then
+        word k = (word(dy) * rx + ry / 2) / ry
+        return sqrt(word(rx) * rx - k * k)
+    end
+    byte h = sqrt(word(ry) * ry - word(dy) * dy)
+    return byte((word(rx) * h + ry / 2) / ry)
+end
+
+function fill_ellipse(sword x, sword y, byte rx, byte ry, byte c)
+    for dy = 0, ry do
+        byte w = l2_halfw(rx, ry, dy)
+        l2_span(x - w, x + w, y + dy, c)
+        if dy ~= 0 then l2_span(x - w, x + w, y - dy, c) end
+    end
+end
+
+function ellipse(sword x, sword y, byte rx, byte ry, byte c)
+    for dy = 0, ry do
+        byte w = l2_halfw(rx, ry, dy)
+        -- connect to the next row: from just outside its half width to ours
+        byte inner = w
+        if dy < ry then inner = min(l2_halfw(rx, ry, dy + 1) + 1, w) end
+        if dy == ry then inner = 0 end
+        l2_span(x + inner, x + w, y + dy, c)
+        l2_span(x - w, x - inner, y + dy, c)
+        if dy ~= 0 then
+            l2_span(x + inner, x + w, y - dy, c)
+            l2_span(x - w, x - inner, y - dy, c)
+        end
+    end
+end
+
+function circle(sword x, sword y, byte r, byte c)
+    ellipse(x, y, r, r, c)
+end
+
+function fill_circle(sword x, sword y, byte r, byte c)
+    fill_ellipse(x, y, r, r, c)
+end
+
+-- ---- triangles ----
+
+function triangle(byte x0, byte y0, byte x1, byte y1, byte x2, byte y2, byte c)
+    line(x0, y0, x1, y1, c)
+    line(x1, y1, x2, y2, c)
+    line(x2, y2, x0, y0, c)
+end
+
+-- a + (b - a) * t / n, rounded towards a
+function l2_lerp(sword a, sword b, sword t, sword n) -> sword
+    if n == 0 then return a end
+    sword d = b - a
+    sword m = sword(word(abs(d)) * word(t) / word(n))
+    if d < 0 then return a - m end
+    return a + m
+end
+
+function fill_triangle(sword x0, sword y0, sword x1, sword y1, sword x2, sword y2, byte c)
+    sword t = 0
+    -- sort the corners by y
+    if y1 < y0 then
+        t = x0  x0 = x1  x1 = t
+        t = y0  y0 = y1  y1 = t
+    end
+    if y2 < y0 then
+        t = x0  x0 = x2  x2 = t
+        t = y0  y0 = y2  y2 = t
+    end
+    if y2 < y1 then
+        t = x1  x1 = x2  x2 = t
+        t = y1  y1 = y2  y2 = t
+    end
+    sword ya = max(y0, 0)
+    sword yb = min(y2, 191)
+    sword y = ya
+    while y <= yb do
+        sword xa = l2_lerp(x0, x2, y - y0, y2 - y0)
+        sword xb = 0
+        if y < y1 then
+            xb = l2_lerp(x0, x1, y - y0, y1 - y0)
+        else
+            xb = l2_lerp(x1, x2, y - y1, y2 - y1)
+        end
+        if xa <= xb then l2_span(xa, xb, y, c) else l2_span(xb, xa, y, c) end
+        y += 1
+    end
+end
 "#;
 
 /// Palettes. `palette(layer, index, colour)` with an 8-bit RRRGGGBB colour,
@@ -416,7 +527,7 @@ pub fn uses_palette(src: &str) -> bool {
 
 /// Does the program use the Layer 2 module?
 pub fn uses_layer2(src: &str) -> bool {
-    ["layer2", "plot", "point", "hline", "vline", "line(", "rect", "rgb(", "TRANSPARENT"]
+    ["layer2", "plot", "point", "hline", "vline", "line(", "rect", "rgb(", "TRANSPARENT", "circle", "ellipse", "triangle"]
         .iter()
         .any(|w| src.contains(w))
 }
@@ -424,4 +535,39 @@ pub fn uses_layer2(src: &str) -> bool {
 /// Does the program use the sprite module?
 pub fn uses_sprites(src: &str) -> bool {
     src.contains("sprite") || src.contains("Sprite")
+}
+
+/// Public names of the standard modules. They are reserved in every program,
+/// whether or not the module is compiled in, so a name never changes meaning
+/// when a program starts to use a module. Names starting with `snd_` are
+/// reserved for the sound module's internals.
+pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
+    ("sprite", &["Sprite", "sprite", "sprites_visible"]),
+    (
+        "Layer 2",
+        &[
+            "layer2_visible", "rgb", "vline", "line", "rect", "fill_rect", "TRANSPARENT", "circle",
+            "fill_circle", "ellipse", "fill_ellipse", "triangle", "fill_triangle",
+        ],
+    ),
+    ("palette", &["palette", "palette9", "rgb9", "PAL_ULA", "PAL_LAYER2", "PAL_SPRITES", "PAL_TEXT"]),
+    ("copper", &["copper_begin", "copper_wait", "copper_move", "copper_start", "copper_stop"]),
+    (
+        "sound",
+        &[
+            "sound_reset", "sound_mix", "tone", "noise", "volume", "sound_off", "beep", "play",
+            "play_loop", "playing", "sound_tick",
+        ],
+    ),
+];
+
+/// The module that reserves `name`, if any.
+pub fn library_module(name: &str) -> Option<&'static str> {
+    if name.starts_with("snd_") {
+        return Some("sound");
+    }
+    if name.starts_with("l2_") {
+        return Some("Layer 2");
+    }
+    LIBRARY_NAMES.iter().find(|(_, names)| names.contains(&name)).map(|(m, _)| *m)
 }
