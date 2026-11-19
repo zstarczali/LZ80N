@@ -1685,3 +1685,462 @@ rt_bcall:
 rt_codepage: db 10           ; bank 5, the normal contents of $4000
 rt_bret:     db 0
 "#;
+
+/// Recursive calls: the handler when a saved frame would not fit.
+pub const RECURSION: &str = r#"
+; recursion too deep: the stack would run into the program
+rt_stack_overflow:
+    di
+    ld sp,$FDFD
+    ld hl,.msg
+.l:
+    ld a,(hl)
+    or a
+    jr z,.h
+    push hl
+    call rt_putc
+    pop hl
+    inc hl
+    jr .l
+.h:
+    halt
+    jr .h
+.msg:
+    db 10,"stack overflow (recursion too deep)",0
+"#;
+
+/// 32-bit runtime for `long` and `fixed16`.
+/// X = DE:HL (DE = high word), Y = DE':HL' (the shadow registers).
+pub fn long() -> String {
+    let mut s = String::from(LONG_BASE);
+    for (name, op) in [("and", "and"), ("or", "or"), ("xor", "xor")] {
+        s.push_str(&format!(
+            "rt_{name}32:\n    exx\n    push de\n    push hl\n    exx\n    pop bc\n    ld a,l\n    {op} c\n    ld l,a\n    ld a,h\n    {op} b\n    ld h,a\n    pop bc\n    ld a,e\n    {op} c\n    ld e,a\n    ld a,d\n    {op} b\n    ld d,a\n    ret\n"
+        ));
+    }
+    s.push_str(&mul_routine("rt_mul32", 0, 3));
+    s.push_str(&mul_routine("rt_umulhi32", 2, 5));
+    s
+}
+
+/// Unsigned X * Y with the Z80N MUL D,E: product bytes `first..=last`
+/// (0..3 = low 32 bits, 2..5 = bits 16..47) into DE:HL.
+fn mul_routine(name: &str, first: usize, last: usize) -> String {
+    let mut s = format!(
+        "; X = bytes {first}..{last} of the unsigned product X * Y\n{name}:\n    push ix\n    ld bc,0\n    push bc\n    push bc\n    exx\n    push de\n    push hl\n    exx\n    push de\n    push hl\n    ld ix,0\n    add ix,sp               ; x at ix+0..3, y at ix+4..7, result at ix+8..11\n    ld hl,0\n    ld c,0\n"
+    );
+    for k in 0..=last {
+        let pairs: Vec<(usize, usize)> = (0..4).filter(|i| k >= *i && k - i < 4).map(|i| (i, k - i)).collect();
+        if k == last {
+            s.push_str("    ld a,l\n");
+            for (i, j) in &pairs {
+                s.push_str(&format!("    ld d,(ix+{i})\n    ld e,(ix+{})\n    mul d,e\n    add a,e\n", 4 + j));
+            }
+            s.push_str(&format!("    ld (ix+{}),a\n", 8 + k - first));
+        } else {
+            for (i, j) in &pairs {
+                s.push_str(&format!(
+                    "    ld d,(ix+{i})\n    ld e,(ix+{})\n    mul d,e\n    add hl,de\n    jr nc,$+3\n    inc c\n",
+                    4 + j
+                ));
+            }
+            if k >= first {
+                s.push_str(&format!("    ld (ix+{}),l\n", 8 + k - first));
+            }
+            s.push_str("    ld l,h\n    ld h,c\n    ld c,0\n");
+        }
+    }
+    s.push_str("    ld l,(ix+8)\n    ld h,(ix+9)\n    ld e,(ix+10)\n    ld d,(ix+11)\n    ld ix,12\n    add ix,sp\n    ld sp,ix\n    pop ix\n    ret\n");
+    s
+}
+
+const LONG_BASE: &str = r#"
+; ---- 32-bit arithmetic: X = DE:HL, Y = DE':HL' ----
+rt_add32:
+    exx
+    push de
+    push hl
+    exx
+    pop bc
+    add hl,bc
+    ex de,hl
+    pop bc
+    adc hl,bc
+    ex de,hl
+    ret
+
+rt_sub32:
+    exx
+    push de
+    push hl
+    exx
+    pop bc
+    or a
+    sbc hl,bc
+    ex de,hl
+    pop bc
+    sbc hl,bc
+    ex de,hl
+    ret
+
+rt_neg32:
+    xor a
+    sub l
+    ld l,a
+    ld a,0
+    sbc a,h
+    ld h,a
+    ld a,0
+    sbc a,e
+    ld e,a
+    ld a,0
+    sbc a,d
+    ld d,a
+    ret
+
+rt_cpl32:
+    ld a,l
+    cpl
+    ld l,a
+    ld a,h
+    cpl
+    ld h,a
+    ld a,e
+    cpl
+    ld e,a
+    ld a,d
+    cpl
+    ld d,a
+    ret
+
+; signed compare X with Y: Z = equal, C = X < Y
+rt_cmp32:
+    ld a,d
+    xor $80
+    ld d,a
+    exx
+    ld a,d
+    xor $80
+    ld d,a
+    push de
+    push hl
+    exx
+    pop bc
+    or a
+    sbc hl,bc
+    ex de,hl
+    pop bc
+    sbc hl,bc
+    ret nz
+    push af
+    ld a,d
+    or e
+    jr nz,.ne
+    pop af
+    ret
+.ne:
+    pop af
+    ld a,1
+    jr c,.lt
+    or a
+    ret
+.lt:
+    or a
+    scf
+    ret
+
+rt_min32:
+    exx
+    push de
+    push hl
+    exx
+    push de
+    push hl
+    call rt_cmp32
+    pop hl
+    pop de
+    jr c,.left
+    pop hl
+    pop de
+    ret
+.left:
+    pop bc
+    pop bc
+    ret
+
+rt_max32:
+    exx
+    push de
+    push hl
+    exx
+    push de
+    push hl
+    call rt_cmp32
+    pop hl
+    pop de
+    jr nc,.left
+    pop hl
+    pop de
+    ret
+.left:
+    pop bc
+    pop bc
+    ret
+
+; X <<= B
+rt_shl32:
+    ld a,b
+    or a
+    ret z
+.l:
+    add hl,hl
+    rl e
+    rl d
+    djnz .l
+    ret
+
+; X >>= B (arithmetic)
+rt_sar32:
+    ld a,b
+    or a
+    ret z
+.l:
+    sra d
+    rr e
+    rr h
+    rr l
+    djnz .l
+    ret
+
+; unsigned X / Y: X = quotient, Y = remainder (X, Y < 2^31 + 1)
+rt_divu32:
+    ld bc,0
+; the same with BC = the high part of the dividend (initial remainder)
+rt_div_core:
+    push ix
+    exx
+    push de
+    push hl                 ; divisor at ix+0..3
+    exx
+    push bc
+    exx
+    pop hl
+    ld de,0                 ; remainder
+    exx
+    ld ix,0
+    add ix,sp
+    ld b,32
+.loop:
+    add hl,hl
+    rl e
+    rl d                    ; next dividend bit
+    exx
+    adc hl,hl
+    ex de,hl
+    adc hl,hl
+    ex de,hl                ; remainder = remainder * 2 + bit
+    ld c,(ix+0)
+    ld b,(ix+1)
+    or a
+    sbc hl,bc
+    ex de,hl
+    ld c,(ix+2)
+    ld b,(ix+3)
+    sbc hl,bc
+    ex de,hl
+    jr nc,.fits
+    ld c,(ix+0)
+    ld b,(ix+1)
+    add hl,bc
+    ex de,hl
+    ld c,(ix+2)
+    ld b,(ix+3)
+    adc hl,bc
+    ex de,hl
+    exx
+    djnz .loop
+    jr .done
+.fits:
+    exx
+    inc l                   ; quotient bit
+    djnz .loop
+.done:
+    pop bc
+    pop bc
+    pop ix
+    ret
+
+; signed X / Y: X = quotient (truncated), Y = remainder (sign of X)
+rt_divs32:
+    ld a,d
+    push af                 ; dividend sign
+    exx
+    xor d
+    exx
+    push af                 ; quotient sign
+    bit 7,d
+    call nz,rt_neg32
+    exx
+    bit 7,d
+    call nz,rt_neg32
+    exx
+    call rt_divu32
+    pop af
+    bit 7,a
+    call nz,rt_neg32
+    pop af
+    bit 7,a
+    ret z
+    exx
+    call rt_neg32
+    exx
+    ret
+
+rt_mods32:
+    call rt_divs32
+    exx
+    ret
+
+; 16.16: X = X * Y
+rt_fmul32:
+    ld a,d
+    exx
+    xor d
+    exx
+    push af
+    bit 7,d
+    call nz,rt_neg32
+    exx
+    bit 7,d
+    call nz,rt_neg32
+    exx
+    call rt_umulhi32
+    pop af
+    bit 7,a
+    ret z
+    jp rt_neg32
+
+; 16.16: X = X / Y
+rt_fdiv32:
+    ld a,d
+    exx
+    xor d
+    exx
+    push af
+    bit 7,d
+    call nz,rt_neg32
+    exx
+    bit 7,d
+    call nz,rt_neg32
+    exx
+    ld b,d
+    ld c,e                  ; the dividend is X << 16: X >> 16 starts the remainder
+    ex de,hl
+    ld hl,0
+    call rt_div_core
+    pop af
+    bit 7,a
+    ret z
+    jp rt_neg32
+
+; print X (signed 32-bit) in decimal
+rt_print_s32:
+    bit 7,d
+    jr z,rt_print_u32
+    call rt_neg32
+    push de
+    push hl
+    ld a,'-'
+    call rt_emit
+    pop hl
+    pop de
+rt_print_u32:
+    ld a,d
+    or e
+    jp z,rt_print_u16
+    ld a,$FF
+    push af                 ; sentinel
+.div:
+    exx
+    ld hl,10
+    ld de,0
+    exx
+    call rt_divu32
+    exx
+    ld a,l
+    exx
+    add a,'0'
+    push af
+    ld a,d
+    or e
+    or h
+    or l
+    jr nz,.div
+.out:
+    pop af
+    cp $FF
+    ret z
+    call rt_emit
+    jr .out
+
+; print X (signed 16.16) with up to four decimals: 3.1416, -0.5
+rt_print_fixed16:
+    bit 7,d
+    jr z,.pos
+    call rt_neg32
+    push de
+    push hl
+    ld a,'-'
+    call rt_emit
+    pop hl
+    pop de
+.pos:
+    push hl                 ; fraction
+    ex de,hl
+    call rt_print_u16       ; integer part
+    pop hl
+    ld de,10000
+    call rt_mulhi16         ; HL = fraction in 1/10000
+    ld a,h
+    or l
+    ret z
+    ld b,4
+.trim:
+    push hl
+    push bc
+    ld de,10
+    call rt_divu16
+    pop bc
+    ld a,e
+    or a
+    jr nz,.keep
+    pop af                  ; trailing zero: drop it
+    dec b
+    jr .trim
+.keep:
+    pop hl
+    push hl
+    push bc
+    ld a,'.'
+    call rt_emit
+    pop bc
+    pop hl
+    ld c,b
+.d1:
+    push bc
+    ld de,10
+    call rt_divu16
+    pop bc
+    ld a,e
+    add a,'0'
+    push af
+    djnz .d1
+.d2:
+    pop af
+    push bc
+    call rt_emit
+    pop bc
+    dec c
+    jr nz,.d2
+    ret
+"#;

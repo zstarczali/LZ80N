@@ -34,7 +34,7 @@ CONTENTS
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
                              as Markdown text
-  examples/                  18 example programs, their pictures and
+  examples/                  19 example programs, their pictures and
                              the include files of modules.lz80n (lib/)
   benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
@@ -195,6 +195,11 @@ environment variable, sjasmplus next to lz80nc, sjasmplus on the PATH.
         return a + b
     end
 
+    function fact(word n) -> word  -- recursion works
+        if n <= 1 then return 1 end
+        return n * fact(n - 1)
+    end
+
     class Enemy                    -- structs and classes with methods
         word x
         word y
@@ -251,6 +256,7 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     life       Game of Life on a 2-D array
     banks      far arrays: a 16 KB cave map in memory banks
     modules    a program in several files (include)
+    recursion  a fractal tree, the Towers of Hanoi
     shooter    a little space shooter (O/P/Q/A or joystick, SPACE to fire)
 
 

@@ -30,7 +30,7 @@
   <a href="docs/manual-en.md"><img alt="manual: English" src="https://img.shields.io/badge/manual-English-0a7bbb"></a>
   <a href="docs/manual-hu.md"><img alt="kézikönyv: Magyar" src="https://img.shields.io/badge/k%C3%A9zik%C3%B6nyv-Magyar-0a7bbb"></a>
   <a href="docs/spec.md"><img alt="spec: 1.0" src="https://img.shields.io/badge/spec-1.0-0a7bbb"></a>
-  <a href="examples/"><img alt="examples: 18 programs" src="https://img.shields.io/badge/examples-18%20programs-2ea44f"></a>
+  <a href="examples/"><img alt="examples: 19 programs" src="https://img.shields.io/badge/examples-19%20programs-2ea44f"></a>
   <a href="benchmarks/"><img alt="benchmark: LZ80N vs NextBASIC" src="https://img.shields.io/badge/benchmark-LZ80N%20vs%20NextBASIC-2ea44f"></a>
 </p>
 
@@ -95,6 +95,7 @@ Examples:
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2 with transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `recursion.lz80n` | recursion: a fractal tree, the Towers of Hanoi |
 | `modules.lz80n` | a program in several files with `include` |
 | `shooter.lz80n` | a little space shooter with sprites cut from a picture |
 | `strings.lz80n` | string values, `..`, `sub`/`find`/`upper`/`str`, user string functions, a ticker |
