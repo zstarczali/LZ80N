@@ -1061,19 +1061,16 @@ rt_text_palette:
 ; Pixels are written through MMU slot 0 ($0000-$1FFF): 8K page = base + y/32,
 ; offset = (y & 31) * 256 + x. The mapped page is cached in rt_l2page.
 rt_l2_init:
-    ld a,$13                ; shadow Layer 2 bank (NextReg $13): back buffer
-    ld bc,$243B
-    out (c),a
-    inc b
-    in a,(c)
+    ; fixed buffers: banks 8-10 shown, 11-13 drawn into. They are set, not
+    ; read: NextZXOS leaves NR $12 = 9, which overlaps the default shadow
+    ; bank 11 (the two buffers would share a bank). Pictures start at bank 14.
+    nextreg $12,8
+    nextreg $13,11
+    ld a,11
     ld (rt_l2alt),a
-    dec b
-    ld a,$12                ; visible Layer 2 16K bank (NextReg $12)
-    out (c),a
-    inc b
-    in a,(c)
+    ld a,8
     ld (rt_l2bank),a
-    add a,a                 ; -> first 8K page
+    ld a,16
     ld (rt_l2base),a
     ld a,$FF
     ld (rt_l2page),a
@@ -1438,4 +1435,192 @@ rt_note_period:
     ld l,a
     ret
 
+"#;
+
+/// Layer 2 pictures (`asset name = image("file.png")`, `draw_image`).
+pub const IMAGES: &str = r#"
+; ---- images ----
+; HL = descriptor: db first page, dw width, db height, db rows per page,
+; db masked (1 = the picture has TRANSPARENT pixels; they are skipped).
+; Position (signed words) in rt_img_x / rt_img_y. The picture is clipped to
+; the screen; its 8K pages are mapped into MMU slot 1 ($2000) one at a time
+; and every visible row is copied with LDIR into the Layer 2 page in slot 0.
+rt_draw_image:
+    ld a,(hl)
+    ld (rt_img_page),a
+    inc hl
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld (rt_img_w),de
+    ld a,(hl)
+    ld (rt_img_h),a
+    inc hl
+    ld a,(hl)
+    ld (rt_img_rpp),a
+    inc hl
+    ld a,(hl)
+    ld (rt_img_mask),a
+    ; horizontal: BC = source columns skipped, HL = screen x
+    ld hl,(rt_img_x)
+    ld bc,0
+    bit 7,h
+    jr z,.xpos
+    ld a,l
+    cpl
+    ld c,a
+    ld a,h
+    cpl
+    ld b,a
+    inc bc                  ; skip = -x
+    ld hl,0
+.xpos:
+    ld a,h
+    or a
+    ret nz                  ; x >= 256
+    ld (rt_img_sx),bc
+    ld a,l
+    ld (rt_img_dx),a
+    ex de,hl                ; DE = x
+    ld hl,(rt_img_w)
+    or a
+    sbc hl,bc               ; visible width
+    ret c
+    ret z
+    push hl
+    add hl,de
+    ld bc,257
+    or a
+    sbc hl,bc
+    pop hl
+    jr c,.wok               ; x + width <= 256
+    ld hl,256
+    or a
+    sbc hl,de
+.wok:
+    ld (rt_img_cw),hl
+    ; vertical: B = source rows skipped, A = screen y
+    ld hl,(rt_img_y)
+    ld b,0
+    bit 7,h
+    jr z,.ypos
+    ld a,h
+    inc a
+    ret nz                  ; y < -256
+    ld a,l
+    neg
+    ret z                   ; y = -256
+    ld b,a
+    xor a
+    jr .ytop
+.ypos:
+    ld a,h
+    or a
+    ret nz
+    ld a,l
+    cp 192
+    ret nc
+.ytop:
+    ld (rt_img_dy),a
+    ld c,a
+    ld a,(rt_img_h)
+    sub b
+    ret c
+    ret z
+    ld e,a                  ; rows left in the picture
+    ld a,192
+    sub c                   ; rows left on the screen
+    cp e
+    jr c,.hok
+    ld a,e
+.hok:
+    ld (rt_img_ch),a
+    ; source start: first page, row 0, column skip
+    xor a
+    ld (rt_img_rip),a
+    ld hl,(rt_img_sx)
+    ld de,$2000
+    add hl,de
+    ld (rt_img_ptr),hl
+    ld a,b
+    or a
+    jr z,.row
+.skip:
+    push bc
+    call .adv
+    pop bc
+    djnz .skip
+.row:
+    ld a,(rt_img_dy)
+    ld d,a
+    ld a,(rt_img_dx)
+    ld e,a
+    call rt_l2_map          ; slot 0 = destination page, HL = address
+    ex de,hl
+    ld a,(rt_img_page)
+    nextreg $51,a
+    ld hl,(rt_img_ptr)
+    ld bc,(rt_img_cw)
+    ld a,(rt_img_mask)
+    or a
+    jr nz,.masked
+    ldir
+.next:
+    ld hl,rt_img_dy
+    inc (hl)
+    call .adv
+    ld hl,rt_img_ch
+    dec (hl)
+    jr nz,.row
+    nextreg $51,$FF         ; ROM back in slot 1
+    ret
+; copy BC pixels, leaving the screen where the picture is TRANSPARENT
+.masked:
+    ld a,(hl)
+    cp $E3
+    jr z,.clear
+    ld (de),a
+.clear:
+    inc hl
+    inc de
+    dec bc
+    ld a,b
+    or c
+    jr nz,.masked
+    jr .next
+; next source row
+.adv:
+    ld hl,(rt_img_ptr)
+    ld de,(rt_img_w)
+    add hl,de
+    ld (rt_img_ptr),hl
+    ld hl,rt_img_rip
+    inc (hl)
+    ld a,(rt_img_rpp)
+    cp (hl)
+    ret nz
+    ld (hl),0
+    ld hl,rt_img_page
+    inc (hl)
+    ld hl,(rt_img_sx)
+    ld de,$2000
+    add hl,de
+    ld (rt_img_ptr),hl
+    ret
+
+rt_img_x:    dw 0
+rt_img_y:    dw 0
+rt_img_w:    dw 0
+rt_img_sx:   dw 0
+rt_img_cw:   dw 0
+rt_img_ptr:  dw 0
+rt_img_page: db 0
+rt_img_h:    db 0
+rt_img_rpp:  db 0
+rt_img_rip:  db 0
+rt_img_dx:   db 0
+rt_img_dy:   db 0
+rt_img_ch:   db 0
+rt_img_mask: db 0
 "#;

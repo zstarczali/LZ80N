@@ -1,0 +1,92 @@
+-- life.lz80n -- Conway's Game of Life on a 2-D array
+--
+--  * byte cells[ROWS + 2][COLS + 2]: a grid with an empty border, so the
+--    neighbour count never needs a bounds check
+--  * a 2-D initializer places a glider and a "pentomino" at the start
+--  * each cell is an 8x8 block on Layer 2; SPACE restarts, R adds random cells
+
+const ROWS = 22
+const COLS = 32
+
+byte cells[ROWS + 2][COLS + 2]
+byte next[ROWS + 2][COLS + 2]
+
+-- starting shapes as small 2-D tables
+byte glider[3][3] = {{0, 1, 0}, {0, 0, 1}, {1, 1, 1}}
+byte rpent[3][3] = {{0, 1, 1}, {1, 1, 0}, {0, 1, 0}}
+
+function stamp(byte r, byte c, byte which)
+    for y = 0, 2 do
+        for x = 0, 2 do
+            if which == 0 then
+                cells[r + y][c + x] = glider[y][x]
+            else
+                cells[r + y][c + x] = rpent[y][x]
+            end
+        end
+    end
+end
+
+function restart()
+    for y = 0, ROWS + 1 do
+        for x = 0, COLS + 1 do
+            cells[y][x] = 0
+        end
+    end
+    stamp(2, 2, 0)
+    stamp(10, 15, 1)
+    stamp(3, 25, 0)
+end
+
+function draw()
+    for y = 1, ROWS do
+        for x = 1, COLS do
+            byte c = rgb(0, 0, 1)
+            if cells[y][x] ~= 0 then c = rgb(2, 7, 2) end
+            fill_rect((x - 1) * 8, 8 + y * 8, 7, 7, c)
+        end
+    end
+end
+
+function step()
+    for y = 1, ROWS do
+        for x = 1, COLS do
+            byte n = cells[y - 1][x - 1] + cells[y - 1][x] + cells[y - 1][x + 1]
+            n += cells[y][x - 1] + cells[y][x + 1]
+            n += cells[y + 1][x - 1] + cells[y + 1][x] + cells[y + 1][x + 1]
+            byte alive = 0
+            if n == 3 or (n == 2 and cells[y][x] ~= 0) then alive = 1 end
+            next[y][x] = alive
+        end
+    end
+    for y = 1, ROWS do
+        for x = 1, COLS do
+            cells[y][x] = next[y][x]
+        end
+    end
+end
+
+ink(BRIGHT_WHITE)
+at(0, 1)
+write("Life  SPACE: restart  R: random")
+layer2_visible(true)
+layer2_clear(0)
+restart()
+
+word gen = 0
+while true do
+    draw()
+    step()
+    gen += 1
+    at(1, 1)
+    write("generation ", gen, "   ")
+    if key(KEY_SPACE) then
+        restart()
+        gen = 0
+    end
+    if key(KEY_R) then
+        for i = 1, 60 do
+            cells[1 + random(ROWS)][1 + random(COLS)] = 1
+        end
+    end
+end

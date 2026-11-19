@@ -1,0 +1,74 @@
+-- tables.lz80n -- array initializers: data tables built into the program
+--
+--  * a menu from a string array, moved with O / P, SPACE to "start"
+--  * a bar chart from a byte table on Layer 2, coloured from a colour table
+--  * a 16-step sine-like wobble from a sbyte table
+--  * compound assignment: /=  %=  <<=  >>=
+
+string menu[] = {"Start game", "Options", "High scores", "Credits"}
+byte heights[] = {20, 45, 80, 120, 150, 120, 95, 60, 35, 70, 110, 140, 160, 130, 90, 50}
+byte colours[] = {0xE0, 0xEC, 0xFC, 0x9C, 0x1C, 0x1F, 0x13, 0x63}
+sbyte wobble[] = {0, 2, 4, 5, 6, 5, 4, 2, 0, -2, -4, -5, -6, -5, -4, -2}
+
+layer2_visible(true)
+layer2_clear(0)
+
+-- bar chart: 16 bars of 12 pixels, heights from the table
+for i = 0, 15 do
+    byte h = heights[i]
+    fill_rect(i * 16 + 2, 191 - h, 12, h, colours[i % 8])
+end
+
+ink(BRIGHT_YELLOW)
+at(1, 4)
+write("Tables: initialised arrays")
+ink(WHITE)
+at(3, 4)
+write("O / P: menu   SPACE: select")
+
+byte sel = 0
+byte phase = 0
+bool held = false
+while true do
+    vsync()
+    -- menu, the selected line wobbles sideways
+    for i = 0, 3 do
+        at(6 + i * 2, 1)
+        write("                    ")
+        byte x = 6
+        if i == sel then
+            ink(BRIGHT_CYAN)
+            x = byte(sbyte(6) + wobble[phase >> 1 & 15] / 2)
+        else
+            ink(CYAN)
+        end
+        at(6 + i * 2, x)
+        write(menu[i], "   ")
+    end
+    phase += 1
+
+    bool up = key(KEY_O)
+    bool down = key(KEY_P)
+    if not held then
+        if up and sel > 0 then sel -= 1 end
+        if down and sel < 3 then sel += 1 end
+    end
+    held = up or down
+
+    if key(KEY_SPACE) then
+        ink(BRIGHT_GREEN)
+        at(15, 4)
+        write("selected: ", menu[sel], "            ")
+        -- compound assignment on the table: halve, wrap
+        for i = 0, 15 do
+            heights[i] /= 2
+            heights[i] += 40
+            heights[i] %= 170
+        end
+        layer2_clear(0)
+        for i = 0, 15 do
+            byte h = heights[i]
+            fill_rect(i * 16 + 2, 191 - h, 12, h, colours[(i + sel) % 8])
+        end
+    end
+end

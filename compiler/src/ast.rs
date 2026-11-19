@@ -115,6 +115,9 @@ pub enum ExprKind {
     MethodCall(Box<Expr>, String, Vec<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// `{a, b, c}`: array initializer (only in a declaration);
+    /// also `[]` (size taken from the initializer) as an array size
+    List(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -142,7 +145,8 @@ pub enum StmtKind {
     Expr(Expr),
     Asm(String),
     /// `asset name = "file"` (top level only)
-    Asset { name: String, path: String },
+    /// `image`: `asset name = image("file.png")` (a Layer 2 picture).
+    Asset { name: String, path: String, image: bool },
 }
 
 #[derive(Debug, Clone)]
