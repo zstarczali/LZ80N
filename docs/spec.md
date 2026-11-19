@@ -1,6 +1,6 @@
-# LZ80N v0 — implemented language subset and decisions
+# LZ80N 1.0 — implemented language and decisions
 
-This is the *working* specification for what `lz80nc` v0 implements. It turns
+This is the *working* specification for what `lz80nc` 1.0 implements. It turns
 the open questions of the concept document into concrete (and revisable)
 decisions. Anything not listed here is not implemented yet.
 
@@ -163,7 +163,7 @@ asm ... end             -- raw Z80N assembly lines
   `byte` runs exactly 256 times).
 * Array indexes are not bounds-checked at run time; constant indexes are
   checked at compile time.
-* Compound assignment to `a[expr]` evaluates `expr` twice (v0).
+* Compound assignment to `a[expr]` evaluates `expr` twice.
 
 ## Structs and classes
 
@@ -402,7 +402,7 @@ and not the ROM font.
   layer is transparent the Next shows the fallback colour (NextReg `$4A`),
   which `border(c)` sets — so it colours the border *and* the background.
 
-## Functions and ABI (v0)
+## Functions and ABI
 
 ```lua
 function name(byte a, word b) -> word

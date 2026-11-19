@@ -300,7 +300,7 @@ function hud()
     at(0, 1)
     ink(BRIGHT_YELLOW)
     write("SCORE ", score, "    ")
-    at(0, 30)
+    at(0, 32)
     ink(BRIGHT_CYAN)
     write("LIVES ", lives)
 end
@@ -365,10 +365,15 @@ function player()
         if pboom == 0 then
             sprite[S_PBOOM].hide()
             if lives == 0 then
+                -- clear the sky: hide every sprite but the stars stay
+                for k = S_MISSILE, S_PBOOM do
+                    sprite[k].hide()
+                end
+                -- centred on the 40-column text layer
                 at(12, 15)
                 ink(BRIGHT_RED)
                 write("GAME OVER")
-                at(14, 9)
+                at(14, 10)
                 ink(WHITE)
                 write("press SPACE to play")
                 while key(KEY_SPACE) do vsync() end
