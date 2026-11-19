@@ -21,6 +21,8 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
   `class B extends A` with `super`.
 * Layer 2 320x256 and 640x256 (`layer2_mode`, `layer2_width`,
   `layer2_height`); second palettes (`PAL_LAYER2_2` ..., `palette_select`).
+* Main programs larger than the 31 KB area: big statements of the
+  top-level code move into hidden, banked functions automatically.
 * Recursion, direct and mutual (the caller's frame is saved on the stack
   only around calls that can come back; stack overflow is caught).
 * `include "file.lz80n"`: programs in several source files (paths relative

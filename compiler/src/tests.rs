@@ -2554,3 +2554,33 @@ print(nextreg[0x43] & 0x0E)
 ",
     );
 }
+
+/// A main program (no functions at all) far larger than the resident area:
+/// its big statements become hidden functions, which are banked.
+#[test]
+fn run_large_main_program() {
+    let (nblock, nline) = (60u16, 60u16);
+    let mut src = String::from("word s = 1\nbyte pass = 0\nwhile true do\n    pass += 1\n    if pass > 2 then break end\n");
+    for b in 0..nblock {
+        src += &format!("    if s ~= {} or pass > 0 then\n", 70000 % 65536 + b as u32);
+        for j in 0..nline {
+            src += &format!("        s = s * 3 + {}\n", b * 7 + j);
+        }
+        src += "    end\n";
+    }
+    src += "end\nprint(s, pass)\n";
+    let mut v: u16 = 1;
+    for _ in 0..2 {
+        for b in 0..nblock {
+            for j in 0..nline {
+                v = v.wrapping_mul(3).wrapping_add(b * 7 + j);
+            }
+        }
+    }
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let asm = crate::compile_with(&src, "t.nex", true, &base).unwrap();
+    let pages = asm.matches("    MMU 2 e,").count();
+    assert!(pages >= 2, "expected code pages, got {pages}");
+    assert!(asm.contains("mp_1:"), "parts of the main program moved out");
+    expect("r_big_main", &src, &format!("{v} 3\n"));
+}

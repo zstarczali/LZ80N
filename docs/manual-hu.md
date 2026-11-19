@@ -1483,12 +1483,17 @@ változtatni.
   banktól felfelé). A megszakításkezelők rezidensek maradnak; az általuk
   hívott függvények lehetnek bankoltak (a lapozást a kezelő elmenti és
   visszaállítja).
-* Ami rezidens marad: a főprogram (a legfelső szintű kód), a globális
-  változók, a stringek és a többi adat, a futtatórendszer. Ha ezek
-  önmagukban túl nagyok, az assembler jelzi; ilyenkor tedd a legfelső
-  szintű kódot függvényekbe, a nagy táblákat `far` tömbökbe (19.1).
-* Az `lz80nc --bank-all game.lz80n` minden függvényt külön lapra tesz, így
-  kis programmal is kipróbálható a bankolás.
+* A főprogram is lehet nagy. Ha még az összes függvénye bankolásával sem
+  fér el, a fordító a nagy utasításait (ciklusokat, `if` blokkokat, hosszú
+  utasításokat, a legbelsőkkel kezdve) rejtett függvényekbe emeli ki, és
+  ezeket ugyanígy bankolja. Ha egy `break` kilép az utasításból, vagy
+  `asm` van benne, az utasítás a helyén marad.
+* Ami mindig rezidens marad: a globális változók, a stringek és a többi
+  adat, a futtatórendszer és a főprogram kis utasításai. Ha ezek önmagukban
+  túl nagyok, az assembler jelzi; a nagy táblákat tedd `far` tömbökbe (19.1).
+* Az `lz80nc --bank-all game.lz80n` minden függvényt és a főprogram
+  nagyobb utasításait kódlapokra teszi, így kis programmal is kipróbálható
+  a bankolás (például az `examples/banks.lz80n`-nel).
 
 ---
 
@@ -1496,8 +1501,8 @@ változtatni.
 
 Még nem támogatott:
 
-* kb. 31 KB-nál nagyobb főprogram (legfelső szintű kód, globálisok és
-  adatok); a függvényeket a fordító automatikusan bankolja (22.5)
+* kb. 31 KB-nál több globális változó és adat a programterületen (a nagy
+  táblák helye a `far` tömb, 19.1)
 * mintalejátszás a Next DAC-ján, PT3 zene importálása
 
 Tervezett sorrend: sebességmérés a NextBASIC ellen valódi gépen →

@@ -1464,12 +1464,17 @@ automatically, largest first. Nothing changes in the source.
 * Code pages come after the pictures and `far` arrays (from 16K bank 14
   up). Interrupt handlers stay resident; functions they call may be banked
   (the mapping is saved and restored).
-* What stays resident: the main program (top-level code), global
-  variables, strings and other data, the runtime. If those alone are too
-  large, the assembler reports it; move top-level code into functions and
-  big tables into `far` arrays (19.1).
-* `lz80nc --bank-all game.lz80n` puts every function into its own page, to
-  try banking with a small program.
+* The main program can be large too. If it does not fit even with all its
+  functions banked, the compiler moves its big statements (loops, `if`
+  blocks, long statements, innermost first) into hidden functions, which
+  are banked the same way. A `break` that leaves such a statement, or
+  inline `asm`, keeps it in place.
+* What always stays resident: global variables, strings and other data, the
+  runtime, and the main program's small statements. If those alone are too
+  large, the assembler reports it; move big tables into `far` arrays (19.1).
+* `lz80nc --bank-all game.lz80n` puts every function, and the bigger
+  statements of the main program, into code pages, to try banking with a
+  small program (for example `examples/banks.lz80n`).
 
 ---
 
@@ -1477,8 +1482,8 @@ automatically, largest first. Nothing changes in the source.
 
 Not supported yet:
 
-* a main program (top-level code, globals and data) larger than about
-  31 KB; functions are banked automatically (22.5)
+* more than about 31 KB of global variables and data in the program area
+  (big tables belong in `far` arrays, 19.1)
 * sample playback through the Next's DAC, PT3 music import
 
 Planned order: benchmarks against NextBASIC on real hardware →
