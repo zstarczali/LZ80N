@@ -12,6 +12,7 @@ mod lexer;
 mod parser;
 mod peephole;
 mod prelude;
+mod pt3;
 mod runtime;
 
 use std::path::{Path, PathBuf};

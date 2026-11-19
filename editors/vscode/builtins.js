@@ -69,6 +69,10 @@ const FUNCTIONS = {
   sample_loop: ['sample_loop(s)', 'Play a `.wav` sample asset over and over until `sample_stop()`.', 17],
   sample_stop: ['sample_stop()', 'Stop the sample that is playing.', 17],
   sample_playing: ['sample_playing() -> bool', 'Is a sample sounding?', 17],
+  music_play: ['music_play(m, chip = 0)', 'Play a `.pt3` music asset on an AY chip (0–2), looping from the module\'s loop position.', 17],
+  music_once: ['music_once(m, chip = 0)', 'Play a `.pt3` music asset once, then silence the chip.', 17],
+  music_stop: ['music_stop()', 'Stop the music and silence its chip.', 17],
+  music_playing: ['music_playing() -> bool', 'Is music playing?', 17],
   play: ['play(ch, "music")', 'Play a PLAY-style tune once, in the background (e.g. `"o4 l8 c e g >c"`).', 17],
   play_loop: ['play_loop(ch, "music")', 'Play a PLAY-style tune in a loop, in the background.', 17],
   playing: ['playing(ch) -> bool', 'Is a beep or tune still playing.', 17],
@@ -121,6 +125,8 @@ const TYPES = {
   word: 'Unsigned 16-bit integer, 0 … 65535.',
   sword: 'Signed 16-bit integer, -32768 … 32767.',
   fixed: '8.8 fixed point number, -128 … 127.996 (literals like `1.25`).',
+  long: 'Signed 32-bit integer, -2147483648 … 2147483647.',
+  fixed16: '16.16 fixed point number, -32768 … 32767.99998.',
   string: 'String value, up to 64 characters (65 bytes; literals and constants up to 255). By-value copy, `..` concatenates.',
   Sprite: 'Standard library class of a hardware sprite (`sprite[n]`).',
 };
@@ -129,6 +135,7 @@ const KEYWORDS = [
   'and', 'or', 'not', 'if', 'then', 'elseif', 'else', 'end', 'while', 'do', 'for',
   'function', 'return', 'break', 'const', 'var', 'true', 'false', 'asm', 'struct',
   'class', 'asset', 'interrupt', 'far', 'include', 'self', 'raster', 'frame',
+  'extends', 'super',
 ];
 
 const COLOURS = ['BLACK', 'BLUE', 'RED', 'MAGENTA', 'GREEN', 'CYAN', 'YELLOW', 'WHITE'];
@@ -143,6 +150,12 @@ for (const j of ['RIGHT', 'LEFT', 'DOWN', 'UP', 'FIRE']) CONSTANTS['JOY_' + j] =
 [3, 7, 14, 28].forEach((m, i) => (CONSTANTS['MHZ_' + m] = `CPU speed ${m} MHz (= ${i}) for \`cpu_speed()\`.`));
 CONSTANTS.NOT_FOUND = '255, returned by `find()`.';
 CONSTANTS.TRANSPARENT = '`$E3`, the transparent colour of Layer 2 and sprites.';
-for (const p of ['ULA', 'LAYER2', 'SPRITES', 'TEXT']) CONSTANTS['PAL_' + p] = 'Palette selector for `palette()` / `palette9()`.';
+for (const p of ['ULA', 'LAYER2', 'SPRITES', 'TEXT']) {
+  CONSTANTS['PAL_' + p] = 'Palette selector for `palette()` / `palette9()`.';
+  CONSTANTS['PAL_' + p + '_2'] = 'The second palette of the layer, for `palette()` / `palette9()`; shown with `palette_select()`.';
+}
+CONSTANTS.L2_256 = 'Layer 2 256x192, 256 colours, for `layer2_mode()`.';
+CONSTANTS.L2_320 = 'Layer 2 320x256, 256 colours, for `layer2_mode()`.';
+CONSTANTS.L2_640 = 'Layer 2 640x256, 16 colours, for `layer2_mode()`.';
 
 module.exports = { FUNCTIONS, ARRAYS, TYPES, KEYWORDS, CONSTANTS };

@@ -2645,3 +2645,85 @@ print(sample_playing())
     }
     assert!(err("asset x = \"ships.png\"\nsample_play(x)").contains("not a sample"));
 }
+
+fn tune_path() -> String {
+    format!("{}/../examples/assets/tune.pt3", env!("CARGO_MANIFEST_DIR")).replace('\\', "/")
+}
+
+#[test]
+fn pt3_render() {
+    let d = std::fs::read(tune_path()).unwrap();
+    let song = crate::pt3::render(&d).unwrap();
+    // 5 positions x 32 lines x 4 frames, looping to position 1
+    assert_eq!(song.frames.len(), 5 * 32 * 4);
+    assert_eq!(song.loop_frame, 32 * 4);
+    let f0 = song.frames[0];
+    // channel A silent in the intro; B plays A-3 (note 33) with the minor
+    // ornament: 0, 0, 3, 3 ... semitones
+    assert_eq!(f0.regs[8], 0);
+    let tone = |f: &crate::pt3::Frame, c: usize| f.regs[c * 2] as u16 | (f.regs[c * 2 + 1] as u16) << 8;
+    assert_eq!(tone(&f0, 1), 0x01ce);
+    assert_eq!(tone(&song.frames[2], 1), 0x0184); // + 3 semitones (C-4)
+    // the lead starts with E-5 (note 52) at the loop
+    let fl = song.frames[song.loop_frame];
+    assert_eq!(tone(&fl, 0), 0x009a);
+    assert!(fl.regs[8] > 0 && fl.regs[8] < 16);
+    // the kick: noise on, then off; the snare: tone off on channel C
+    assert_eq!(f0.regs[7] & 0x24, 0x00);
+    assert!(song.frames[16..20].iter().any(|f| f.regs[7] & 4 != 0), "snare: no tone on C");
+    // the buzzer bass in pattern 2: R13 written, envelope bit on channel C
+    let f = song.frames.iter().position(|f| f.env).expect("envelope written");
+    assert_eq!(song.frames[f].regs[13], 10);
+    assert_eq!(song.frames[f].regs[10] & 16, 16);
+    assert_eq!(song.frames[f].regs[11], 24);
+    // the portamento in pattern 2 line 27: the tone moves between the notes
+    let start = (2 * 32 + 27) * 4;
+    let t: Vec<u16> = (start..start + 12).map(|i| tone(&song.frames[i], 0)).collect();
+    assert!(t.windows(2).any(|w| w[0] != w[1]), "{t:?}");
+    assert!(t[0] > t[11] && t[11] >= 0x0082, "{t:?}");
+
+    let (bytes, loop_off) = crate::pt3::encode(&song);
+    assert_eq!(&bytes[bytes.len() - 2..], &[0, 0x80]);
+    assert_eq!(bytes[loop_off], 0xFF);
+    assert_eq!(bytes[loop_off + 1] & 0x1F, 0x1F);
+    assert!(crate::pt3::render(b"not a module").is_err());
+}
+
+#[test]
+fn run_music_player() {
+    let d = std::fs::read(tune_path()).unwrap();
+    let song = crate::pt3::render(&d).unwrap();
+    let src = format!(
+        "asset tune = \"{}\"
+music_play(tune, 1)
+for i = 1, 150 do vsync() end
+print(music_playing())
+",
+        tune_path()
+    );
+    let Some((out, cpu)) = run_with("mus_play", &src, |_| {}) else { return };
+    assert_eq!(out, "true\n");
+    // the chip holds one of the rendered frames from about frame 200
+    let ay = cpu.ay[1];
+    let hit = (140..160).find(|&k| song.frames[k].regs[..13] == ay[..13]);
+    assert!(hit.is_some(), "AY 1 = {:?}", &ay[..14]);
+    assert_eq!(cpu.ay[0][8], 0, "chip 0 untouched");
+
+    // played once: silent at the end
+    let src = format!(
+        "asset tune = \"{}\"
+cpu_speed(0)          -- 3.5 MHz: fewer emulated instructions
+music_once(tune)
+word t = frames()
+while music_playing() do vsync() end
+print(frames() - t)
+",
+        tune_path()
+    );
+    let Some((out, cpu)) = run_with("mus_once", &src, |_| {}) else { return };
+    let n: usize = out.trim().parse().unwrap();
+    assert!((640..650).contains(&n), "{n} frames");
+    assert_eq!(&cpu.ay[0][8..11], &[0, 0, 0]);
+    assert_eq!(cpu.ay[0][7] & 0x3F, 0x3F);
+    assert!(err("asset x = \"ships.png\"\nmusic_play(x)").contains("not music"));
+}

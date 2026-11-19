@@ -71,7 +71,8 @@ enum Sym {
     SConst(String),
     /// Embedded data; `patterns` is set for sprite pattern assets.
     /// `sample`: a .wav sound (descriptor at `label`)
-    Asset { label: String, patterns: Option<u32>, image: Option<(u32, u32)>, sample: bool },
+    /// `music`: a .pt3 module (descriptor at `label`)
+    Asset { label: String, patterns: Option<u32>, image: Option<(u32, u32)>, sample: bool, music: bool },
     /// `far` array: elements of `ty` from 8K page `page` on.
     Far { ty: Ty, len: u32, sub: [u32; 3], page: u32 },
 }
@@ -218,6 +219,8 @@ struct Gen {
     first_page: u32,
     /// sample playback (DAC) is used
     uses_samples: bool,
+    /// .pt3 music is used
+    uses_music: bool,
 }
 
 const INTRINSICS: &[&str] = &[
@@ -228,6 +231,7 @@ const INTRINSICS: &[&str] = &[
     "len", "sub", "find", "val", "asc", "chr", "str", "upper", "lower",
     "ay_write", "note_period", "draw_image", "image_width", "image_height",
     "sample_play", "sample_loop", "sample_stop", "sample_playing",
+    "music_play", "music_once", "music_stop", "music_playing",
 ];
 
 /// Built-in constants. Keys are encoded as `row * 8 + bit` of the
@@ -769,7 +773,25 @@ impl Gen {
             }
             let size = Some((img.width, img.height));
             self.images.push((label.clone(), img, first));
-            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: size, sample: false });
+            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: size, sample: false, music: false });
+            return Ok(());
+        }
+        if full.extension().is_some_and(|e| e.eq_ignore_ascii_case("pt3")) {
+            // music: AY registers for every frame, rendered now, in 8K pages
+            let song = crate::pt3::load(&full).map_err(|e| Diag::new(pos, e))?;
+            let (bytes, loop_off) = crate::pt3::encode(&song);
+            let pages: Vec<Vec<u8>> = bytes.chunks(8192).map(|c| c.to_vec()).collect();
+            let first = self.alloc_pages(pages.len() as u32, pos)?;
+            for (k, pg) in pages.into_iter().enumerate() {
+                self.far_pages.push((first + k as u32, pg, format!("music {name}")));
+            }
+            let _ = writeln!(
+                self.data,
+                "{label}: db {first}\n    dw {}\n    db {}",
+                0x2000 + loop_off % 8192,
+                first as usize + loop_off / 8192
+            );
+            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: None, sample: false, music: true });
             return Ok(());
         }
         if full.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
@@ -788,12 +810,12 @@ impl Gen {
                 n & 0xFFFF,
                 n >> 16
             );
-            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: None, sample: true });
+            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: None, sample: true, music: false });
             return Ok(());
         }
         let a = crate::assets::load(&full).map_err(|e| Diag::new(pos, e))?;
         self.assets.push((label.clone(), a.bytes));
-        self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns, image: None, sample: false });
+        self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns, image: None, sample: false, music: false });
         Ok(())
     }
 
@@ -1560,6 +1582,7 @@ impl Gen {
         // background sound driver of the sound module
         let driver = self.funcs.get("sound_tick").map(|f| f.label.clone());
         let samples = self.uses_samples;
+        let music = self.uses_music;
         let mut lines: Vec<(u16, String)> = self.irqs.iter().filter_map(|i| i.0.map(|n| (n, i.1.clone()))).collect();
         let mut isr = String::from("__isr:\n    push af\n    push bc\n    push de\n    push hl\n");
         // 32-bit arithmetic and recursive calls hold values in the shadow
@@ -1583,6 +1606,9 @@ impl Gen {
             }
             if samples {
                 isr.push_str("    call rt_smp_tick\n");
+            }
+            if music {
+                isr.push_str("    call rt_mus_tick\n");
             }
             if let Some(f) = &frame {
                 isr.push_str(&format!("    call {f}\n"));
@@ -2709,7 +2735,7 @@ impl Gen {
                     Some(Ty::Word)
                 } else if n == "point" {
                     Some(Ty::Byte)
-                } else if n == "sample_playing" {
+                } else if n == "sample_playing" || n == "music_playing" {
                     Some(Ty::Bool)
                 } else if matches!(n.as_str(), "addr" | "random" | "image_width" | "image_height" | "layer2_width" | "layer2_height") {
                     Some(Ty::Word)
@@ -4622,6 +4648,41 @@ impl Gen {
                 self.e("call rt_smp_play");
                 return Ok(None);
             }
+            "music_play" | "music_once" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(Diag::new(pos, format!("`{name}` takes a music asset and an optional AY chip (0-2)")));
+                }
+                let label = match &args[0].kind {
+                    ExprKind::Name(n) => match self.lookup(n) {
+                        Some(Sym::Asset { label, music: true, .. }) => label,
+                        _ => return Err(Diag::new(args[0].pos, format!("`{n}` is not music (`asset name = \"file.pt3\"`)"))),
+                    },
+                    _ => return Err(Diag::new(args[0].pos, "expected the name of a music asset")),
+                };
+                self.uses_music = true;
+                if let Some(chip) = args.get(1) {
+                    self.gen_expr(chip, Ty::Byte)?;
+                    self.e("ld d,a");
+                } else {
+                    self.e("ld d,0");
+                }
+                self.e(&format!("ld hl,{label}"));
+                self.e(if name == "music_play" { "ld a,1" } else { "xor a" });
+                self.e("call rt_mus_play");
+                return Ok(None);
+            }
+            "music_stop" => {
+                argc(0)?;
+                self.uses_music = true;
+                self.e("call rt_mus_stop");
+                return Ok(None);
+            }
+            "music_playing" => {
+                argc(0)?;
+                self.uses_music = true;
+                self.e("ld a,(rt_mus_on)");
+                return Ok(Some(Ty::Bool));
+            }
             "sample_stop" => {
                 argc(0)?;
                 self.uses_samples = true;
@@ -5023,6 +5084,9 @@ impl Gen {
         }
         if self.uses_samples {
             out.push_str(runtime::SAMPLES);
+        }
+        if self.uses_music {
+            out.push_str(runtime::MUSIC);
         }
         if self.uses_long {
             out.push_str(&runtime::long());

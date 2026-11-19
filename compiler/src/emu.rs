@@ -496,6 +496,7 @@ impl Cpu {
     fn inp(&mut self, port: u16) -> u8 {
         match port {
             p if p & 0xFF == 0x6B => self.dma_read.pop_front().unwrap_or(0),
+            0xFFFD => self.ay[self.ay_chip][self.ay_reg],
             0x253B => self.nextreg[self.nr_sel as usize],
             p if p & 0xFF == 0x1F => self.kempston,
             p if p & 1 == 0 => {
