@@ -2240,3 +2240,94 @@ fn recursion_stack_overflow_is_caught() {
     panic!("the stack overflow handler was not reached");
 }
 
+#[test]
+fn run_long() {
+    expect(
+        "long_basic",
+        "long a = 100000
+long b = -250000
+long big = 2147483647
+print(a, b, a + b, a - b)
+print(a * 3, a * -7, 123456 * 789)
+print(b / 7, b % 7, 1000000000 / 3)
+print(big, -big - 1, big + 1)
+word w = 60000
+byte k = 200
+long c = w * 1000 + k        -- word and byte widen to long
+print(c, long(w) * 30)
+print(a << 4, b >> 3, a & $FF00, a | 1)
+print(a ~ -1, ~a)
+print(a > b, a < b, a == 100000, b ~= -250000, a >= 100000, b <= -250001)
+print(abs(b), min(a, b), max(a, b), clamp(5000000, 0, 999999))
+print(word(a), byte(a), sword(b), long(-5))
+-- a long array, a long field, a long parameter and result
+long tab[] = {1, 70000, -3, 4000000000 - 4000000000}
+struct Acc
+    long total
+    byte n
+end
+Acc acc
+function add(Acc x, long v) -> long
+    x.total += v
+    x.n += 1
+    return x.total
+end
+for i = 0, 3 do
+    add(acc, tab[i])
+end
+print(acc.total, acc.n, \"total: \" .. str(acc.total * 2))
+long i = 0
+long sum = 0
+while i < 100000 do
+    sum += i
+    i += 1000
+end
+print(sum)
+",
+        "100000 -250000 -150000 350000\n300000 -700000 97406784\n-35714 -2 333333333\n2147483647 -2147483648 -2147483648\n60000200 1800000\n1600000 -31250 34304 100001\n-100001 -100001\ntrue false true false true false\n250000 -250000 100000 999999\n34464 160 12144 -5\n69998 4 total: 139996\n4950000\n",
+    );
+}
+
+#[test]
+fn run_fixed16() {
+    expect(
+        "fixed16_basic",
+        "fixed16 a = 1000.5
+fixed16 b = -2.25
+fixed16 tiny = 0.0001
+print(a, b, a + b, a - b)
+print(a * b, a / b)
+print(a * 3, a / 4, b * -2, fixed16(7), fixed16(-300))
+fixed f = 1.5
+fixed16 g = f                  -- fixed widens to fixed16
+print(g, g * g, g / 3, fixed(a / 100), long(a), word(a), sword(b))
+print(a > b, b < -2, a == 1000.5, tiny > 0)
+fixed16 pi = 3.14159
+fixed16 r = 12.5
+print(pi * r * r)
+fixed16 x = 0
+for k = 1, 10 do
+    x += 0.1
+end
+print(x, abs(b), -a, min(a, b), max(a, b))
+fixed16 v[] = {0.5, -1.25, 2}
+print(v[0] + v[1] + v[2])
+",
+        "1000.5 -2.25 998.25 1002.75
+-2251.125 -444.6666\n3001.5 250.125 4.5 7 -300\n1.5 2.25 0.5 10 1000 1000 -3\ntrue true true true\n490.8727\n1 2.25 -1000.5 -2.25 1000.5\n1.25\n",
+    );
+}
+
+#[test]
+fn long_errors() {
+    assert!(err("long a = 5\nword w = a").contains("narrow"));
+    assert!(err("fixed16 a = 1.5\nlong l = a").contains("long(x)"));
+    assert!(err("word w = 5\nfixed16 f = w").contains("fixed16(x)"));
+    assert!(err("fixed16 f = 1.5\nfixed16 g = f & 1").contains("bitwise"));
+    assert!(err("long a = 5\nlong b = a / 0").contains("division by zero"));
+    assert!(err("long a = 5000000000").contains("invalid number"));
+    assert!(err("for i = 0, 100000 do\nend").contains("`while`"));
+    assert!(err("far long x[10]").contains("not supported"));
+    assert!(err("fixed f = 200.5").contains("does not fit"));
+}
+

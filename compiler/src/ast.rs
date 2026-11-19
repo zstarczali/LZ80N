@@ -11,6 +11,10 @@ pub enum Ty {
     SWord,
     /// 8.8 signed fixed point (16 bits): -128 .. 127.996, step 1/256
     Fixed,
+    /// signed 32-bit integer
+    Long,
+    /// 16.16 signed fixed point (32 bits): -32768 .. 32767.99998
+    Fixed16,
 }
 
 impl Ty {
@@ -22,6 +26,8 @@ impl Ty {
             "word" => Ty::Word,
             "sword" => Ty::SWord,
             "fixed" => Ty::Fixed,
+            "long" => Ty::Long,
+            "fixed16" => Ty::Fixed16,
             _ => return None,
         })
     }
@@ -29,17 +35,23 @@ impl Ty {
         match self {
             Ty::Bool | Ty::Byte | Ty::SByte => 1,
             Ty::Word | Ty::SWord | Ty::Fixed => 2,
+            Ty::Long | Ty::Fixed16 => 4,
         }
     }
     pub fn signed(self) -> bool {
-        matches!(self, Ty::SByte | Ty::SWord | Ty::Fixed)
+        matches!(self, Ty::SByte | Ty::SWord | Ty::Fixed | Ty::Long | Ty::Fixed16)
+    }
+    /// 32-bit: computed in DE:HL with the runtime's 32-bit routines.
+    pub fn is_wide(self) -> bool {
+        self.size() == 4
     }
     pub fn int(size: u32, signed: bool) -> Ty {
         match (size, signed) {
             (1, false) => Ty::Byte,
             (1, true) => Ty::SByte,
-            (_, false) => Ty::Word,
-            (_, true) => Ty::SWord,
+            (2, false) => Ty::Word,
+            (2, true) => Ty::SWord,
+            _ => Ty::Long,
         }
     }
     /// Range of values representable (accepting both signed and unsigned
@@ -47,7 +59,8 @@ impl Ty {
     pub fn literal_fits(self, v: i64) -> bool {
         match self.size() {
             1 => (-128..=255).contains(&v),
-            _ => (-32768..=65535).contains(&v),
+            2 => (-32768..=65535).contains(&v),
+            _ => (-0x8000_0000..=0xFFFF_FFFF).contains(&v),
         }
     }
     pub fn name(self) -> &'static str {
@@ -58,6 +71,8 @@ impl Ty {
             Ty::Word => "word",
             Ty::SWord => "sword",
             Ty::Fixed => "fixed",
+            Ty::Long => "long",
+            Ty::Fixed16 => "fixed16",
         }
     }
 }
