@@ -145,7 +145,8 @@ pub enum StmtKind {
     Expr(Expr),
     Asm(String),
     /// `asset name = "file"` (top level only)
-    Asset { name: String, path: String },
+    /// `image`: `asset name = image("file.png")` (a Layer 2 picture).
+    Asset { name: String, path: String, image: bool },
 }
 
 #[derive(Debug, Clone)]

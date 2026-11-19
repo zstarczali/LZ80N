@@ -188,7 +188,7 @@ objektum a metóduson belül).
 
 **Beépített függvények** (a fordító valósítja meg őket)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height`
 
 **A szabványos könyvtár nevei** (LZ80N-ben írt függvények, típusok és
 konstansok). **Minden** programban foglaltak, akkor is, ha a program nem
@@ -198,13 +198,13 @@ hogy a program elkezdi használni a modult:
 | Modul | Nevek |
 |-------|-------|
 | sprite | `Sprite` `sprite` `sprites_visible` |
-| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `TRANSPARENT` |
+| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` |
 | paletta | `palette` `palette9` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
 | hang | `sound_reset` `sound_mix` `tone` `noise` `volume` `sound_off` `beep` `play` `play_loop` `playing` `sound_tick` |
 
-A **`snd_`** kezdetű nevek a hangmodul belső változóinak és függvényeinek
-vannak fenntartva.
+A **`snd_`** kezdetű nevek a hangmodul belső változóinak és függvényeinek,
+az **`l2_`** kezdetűek a Layer 2 modul segédfüggvényeinek vannak fenntartva.
 
 **Beépített konstansok** (már léteznek, ezért újra deklarálni hiba):
 `BLACK` … `WHITE`, `BRIGHT_BLACK` … `BRIGHT_WHITE`, `KEY_…`, `JOY_…`,
@@ -282,6 +282,27 @@ scores[i] += 10
   A konstans indexeket a fordító ellenőrzi.
 * Egy teljes tömböt nem lehet egyben értékül adni. Használj ciklust vagy
   `dma_copy`-t.
+
+A **többdimenziós tömböknek** dimenziónként egy méretük van (legfeljebb 4):
+
+```lua
+byte grid[24][32]                 -- 24 sor, soronként 32 elem
+grid[y][x] = 1
+grid[y][x + 1] += grid[y][x]
+word table[4][3] = {{1, 2, 3}, {4, 5, 6}}   -- a sorok beágyazott listák
+byte flat[2][3] = {1, 2, 3, 4, 5, 6}        -- vagy egy lapos lista, soronként
+string names[][2] = {{"Ann", "Bob"}, {"Cid"}}   -- [] : a sorok száma a listából
+Enemy wave[3][8]                  -- struktúrából is
+struct Map
+    byte cells[16][16]            -- és struktúramezőként is
+end
+```
+
+* Az elemek soronként követik egymást (az utolsó index változik a
+  leggyorsabban), így a `grid[y][x]` a `y * 32 + x` helyen van.
+* Önmagában a `grid[y]` egy sor, amit csak tovább lehet indexelni.
+* Csak az első méret lehet `[]`. A beágyazott lista rövidebb sorait nullák
+  egészítik ki.
 
 ### 4.5 Tömb-kezdőértékek
 
@@ -767,7 +788,18 @@ rétegeket.
 | `rect(x, y, w, h, c)` | téglalap körvonala |
 | `fill_rect(x, y, w, h, c)` | kitöltött téglalap |
 | `rgb(r, g, b)` → byte | szín összeállítása: r, g 0–7, b 0–3 |
+| `circle(x, y, r, c)` | kör körvonala |
+| `fill_circle(x, y, r, c)` | kitöltött kör |
+| `ellipse(x, y, rx, ry, c)` | ellipszis körvonala, `rx` és `ry` sugárral |
+| `fill_ellipse(x, y, rx, ry, c)` | kitöltött ellipszis |
+| `triangle(x0, y0, x1, y1, x2, y2, c)` | háromszög körvonala |
+| `fill_triangle(x0, y0, x1, y1, x2, y2, c)` | kitöltött háromszög (a csúcsok sorrendje tetszőleges) |
+| `draw_image(img, x, y)` | kép kirajzolása (lásd 16.1) |
 | `layer2_flip()` | dupla pufferelés: megjeleníti az eddig rajzolt képet, a rajzolás a másik pufferben folytatódik |
+
+A kör, az ellipszis és a kitöltött háromszög `sword` koordinátákat kap, és
+**vágja** az alakzatot: az bármelyik szélen kilóghat a képernyőről. A sugár
+0–255.
 
 ```lua
 layer2_visible(true)
@@ -794,7 +826,9 @@ A rétegek sorrendje **S-U-L**: felül a sprite-ok, alattuk a szöveg, legalul a
 Layer 2.
 
 A `plot` a 192. és az alatti sorokat figyelmen kívül hagyja. A pixelek az
-MMU 0. slotján (`$0000`–`$1FFF`) keresztül érhetők el. Ha a program már
+MMU 0. slotján (`$0000`–`$1FFF`) keresztül érhetők el. A `draw_image` másolás
+közben az 1. slotot (`$2000`–`$3FFF`) is használja, utána visszateszi oda a
+ROM-ot. Ha a program már
 rajzolt a Layer 2-re, a `memory[0]` … `memory[$1FFF]` az utoljára használt
 Layer 2 lapot mutatja, nem a ROM-ot.
 
@@ -846,6 +880,30 @@ Az `asset`-et a fordító fordításkor alakítja át és építi be a programba
   mintát. A színeket a Next `RRRGGGBB` formátumára alakítja. Az átlátszó
   pixelekből (alfa < 128) a sprite-átlátszósági szín (`$E3`) lesz.
 * `.spr`: nyers 8 bites sprite-minták (egyenként 256 bájt).
+
+**Képek a Layer 2-re**
+
+```lua
+asset title = image("assets/title.png")       -- legfeljebb 256 x 255 pixel
+asset logo = image("assets/logo.png")
+
+draw_image(title, 0, 0)                       -- teljes képernyős kép
+draw_image(logo, x, y)                        -- x, y: sword, lehet a képen kívül is
+const LOGO_W = image_width(logo)              -- a méret fordításkor ismert
+const LOGO_H = image_height(logo)
+```
+
+* A PNG-t a fordító `RRRGGGBB` formátumra alakítja. A pixelek **saját
+  memórialapokra** kerülnek (a 14. 16K-s banktól felfelé), nem a 31 KB-os
+  programterületre, így egy teljes 256 × 192-es kép (48 KB) a programban
+  csak 6 bájtot foglal. A képek együtt kb. 780 KB-ot használhatnak.
+* A `draw_image` a képet a Layer 2-re másolja (abba a pufferbe, amelyikbe
+  éppen rajzolunk), minden szélen vágva. A sorokat `LDIR` másolja: egy teljes
+  képernyő 28 MHz-en kb. 2 képkocka.
+* A PNG átlátszó pixeleit (alfa < 128) **kihagyja**, ott a képernyő
+  tartalma látszik, mint a sprite-oknál. Átlátszó pixel nélküli képnél a
+  gyorsabb, sima másolás fut.
+* Az `image_width` és az `image_height` konstans.
 
 ### 16.2 Sprite-ok
 
@@ -1136,6 +1194,7 @@ $0000..$1FFF  MMU 0. slot: Layer 2 rajzolóablak (rajzolás után)
 $4000..$5AFF  ULA képernyő (nem használt, törölve)
 $6000..$69FF  tilemap (szövegréteg)
 $6C00..$6FFF  betűkészlet
+$2000..$3FFF  MMU 1. slot: képlapok (csak a draw_image futása alatt)
 $8000..$FCFF  programkód és adatok (fordításkor ellenőrizve)
 $FDFC..       verem (lefelé nő)
 $FDFD..$FDFF  JP a megszakításkezelőre
@@ -1167,7 +1226,6 @@ Még nem támogatott:
 * rekurzió (statikus keretek)
 * `long` (32 bites), `fixed16` (16.16)
 * struktúra visszaadása, konstruktor, öröklődés, kezdőérték struktúratömbnek
-* többdimenziós tömbök (a következő lépés)
 * a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
 * kb. 31 KB-nál nagyobb programok (memóriabankok)
 * mintalejátszás a Next DAC-ján, PT3 zene importálása
@@ -1187,7 +1245,8 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `print`, `write`, `at`, `ink`, `cls`, `border` | 11 |
 | `key`, `kempston`, `any_key`, `wait_key` | 12 |
 | `vsync`, `pause`, `frames`, `random`, `seed`, `cpu_speed` | 13 |
-| `layer2_visible`, `layer2_clear`, `layer2_flip`, `plot`, `point`, `hline`, `vline`, `line`, `rect`, `fill_rect`, `rgb` | 14 |
+| `layer2_visible`, `layer2_clear`, `layer2_flip`, `plot`, `point`, `hline`, `vline`, `line`, `rect`, `fill_rect`, `circle`, `fill_circle`, `ellipse`, `fill_ellipse`, `triangle`, `fill_triangle`, `rgb` | 14 |
+| `draw_image`, `image_width`, `image_height` | 14, 16 |
 | `palette`, `palette9`, `rgb9` | 15 |
 | `sprite_load`, `sprites_visible`, `sprite[n]` | 16 |
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
@@ -1223,6 +1282,9 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `raster.lz80n` | copper, raster- és képkocka-megszakítás, `random` |
 | `strings.lz80n` | stringek és stringfüggvények, futószöveg |
 | `tables.lz80n` | tömb-kezdőértékek: menü, oszlopdiagram és színtáblák, `/=` `%=` |
+| `life.lz80n` | életjáték kétdimenziós tömbökkel, 2D kezdőértékek |
+| `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
+| `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |
