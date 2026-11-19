@@ -18,7 +18,7 @@ pub enum Tok {
     AsmBody(String),
     // keywords
     And, Or, Not, If, Then, Elseif, Else, End, While, Do, For,
-    Function, Return, Break, Const, Var, True, False, Asm, Struct, Class, Asset, Interrupt,
+    Function, Return, Break, Const, Var, True, False, Asm, Struct, Class, Asset, Interrupt, Far,
     // punctuation / operators
     Plus, Minus, Star, Slash, Percent, Amp, Pipe, Tilde, Shl, Shr,
     EqEq, NotEq, Lt, Le, Gt, Ge, Assign,
@@ -178,6 +178,7 @@ impl<'a> Lexer<'a> {
                 "struct" => Tok::Struct,
                 "class" => Tok::Class,
                 "asset" => Tok::Asset,
+                "far" => Tok::Far,
                 "interrupt" => Tok::Interrupt,
                 _ => Tok::Ident(w.to_string()),
             });

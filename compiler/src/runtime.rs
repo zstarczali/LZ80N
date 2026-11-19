@@ -1076,6 +1076,34 @@ rt_l2_init:
     ld (rt_l2page),a
     ret
 
+; ---- far memory: 8K pages through MMU slot 1 ($2000-$3FFF) ----
+; rt_farpage always holds the page in slot 1 ($FF = ROM); interrupts save
+; and restore it. A = first page of the data, HL = byte offset (< 64K) ->
+; the right page mapped, HL = address. Clobbers A, C.
+rt_far_map:
+    ld c,a
+    ld a,h
+    rlca
+    rlca
+    rlca
+    and 7                   ; offset / 8K
+    add a,c
+    ld c,a
+    ld a,(rt_farpage)
+    cp c
+    jr z,.same
+    ld a,c
+    ld (rt_farpage),a
+    nextreg $51,a
+.same:
+    ld a,h
+    and $1F
+    or $20
+    ld h,a
+    ret
+
+rt_farpage: db $FF
+
 ; double buffering: show the bank drawn so far, draw into the other one
 rt_l2_flip:
     ld a,(rt_l2bank)
@@ -1559,6 +1587,7 @@ rt_draw_image:
     call rt_l2_map          ; slot 0 = destination page, HL = address
     ex de,hl
     ld a,(rt_img_page)
+    ld (rt_farpage),a
     nextreg $51,a
     ld hl,(rt_img_ptr)
     ld bc,(rt_img_cw)
@@ -1573,7 +1602,9 @@ rt_draw_image:
     ld hl,rt_img_ch
     dec (hl)
     jr nz,.row
-    nextreg $51,$FF         ; ROM back in slot 1
+    ld a,$FF
+    ld (rt_farpage),a
+    nextreg $51,a           ; ROM back in slot 1
     ret
 ; copy BC pixels, leaving the screen where the picture is TRANSPARENT
 .masked:
@@ -1623,4 +1654,34 @@ rt_img_dx:   db 0
 rt_img_dy:   db 0
 rt_img_ch:   db 0
 rt_img_mask: db 0
+"#;
+
+/// Banked code: functions in 8K pages, called through `rt_bcall`.
+pub const BANKED: &str = r#"
+; ---- banked code: functions in 8K pages mapped into MMU slot 2 ($4000) ----
+; Every banked function has a stub in the resident area:
+;     f: ld hl,f_bank / ld a,page / jp rt_bcall
+; A = page, HL = address. The caller's page is mapped back afterwards; the
+; return value in A or HL is kept. rt_codepage mirrors NR $52 (interrupts
+; save and restore it, and rt_bret).
+rt_bcall:
+    ld c,a
+    ld a,(rt_codepage)
+    push af
+    ld a,c
+    ld (rt_codepage),a
+    nextreg $52,a
+    ld de,.back
+    push de
+    jp (hl)
+.back:
+    ld (rt_bret),a
+    pop af
+    ld (rt_codepage),a
+    nextreg $52,a
+    ld a,(rt_bret)
+    ret
+
+rt_codepage: db 10           ; bank 5, the normal contents of $4000
+rt_bret:     db 0
 "#;

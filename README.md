@@ -30,7 +30,7 @@
   <a href="docs/manual-en.md"><img alt="manual: English" src="https://img.shields.io/badge/manual-English-0a7bbb"></a>
   <a href="docs/manual-hu.md"><img alt="kézikönyv: Magyar" src="https://img.shields.io/badge/k%C3%A9zik%C3%B6nyv-Magyar-0a7bbb"></a>
   <a href="docs/spec-v0.md"><img alt="spec: v0" src="https://img.shields.io/badge/spec-v0-0a7bbb"></a>
-  <a href="examples/"><img alt="examples: 15 programs" src="https://img.shields.io/badge/examples-15%20programs-2ea44f"></a>
+  <a href="examples/"><img alt="examples: 16 programs" src="https://img.shields.io/badge/examples-16%20programs-2ea44f"></a>
   <a href="benchmarks/"><img alt="benchmark: LZ80N vs NextBASIC" src="https://img.shields.io/badge/benchmark-LZ80N%20vs%20NextBASIC-2ea44f"></a>
 </p>
 
@@ -90,6 +90,7 @@ Examples:
 | `life.lz80n` | Game of Life on 2-D arrays |
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2 with transparency |
+| `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
 | `strings.lz80n` | string values, `..`, `sub`/`find`/`upper`/`str`, user string functions, a ticker |
 | `sound.lz80n` | 3 × AY: background music (`play_loop`), `beep` piano, laser and noise effects |
 | `sprites.lz80n` | hardware sprites, PNG `asset` conversion, a class driving sprites |

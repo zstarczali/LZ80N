@@ -34,9 +34,14 @@ fn assembles(name: &str, src: &str) {
 
 /// Compile + assemble, returning (nex bytes, symbols). Panics on failure.
 fn build(name: &str, src: &str) -> Option<(Vec<u8>, HashMap<String, u16>)> {
+    build_opts(name, src, false)
+}
+
+/// `bank_all`: every function in its own code page.
+fn build_opts(name: &str, src: &str, bank_all: bool) -> Option<(Vec<u8>, HashMap<String, u16>)> {
     // relative asset paths resolve against examples/
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
-    let asm = match crate::compile_with(src, "t.nex", true, &base) {
+    let asm = match crate::compile_opts(src, "t.nex", true, &base, bank_all) {
         Ok(a) => a,
         Err(e) => panic!("unexpected errors: {:?}", e.iter().map(|d| d.to_string()).collect::<Vec<_>>()),
     };
@@ -69,7 +74,11 @@ fn build(name: &str, src: &str) -> Option<(Vec<u8>, HashMap<String, u16>)> {
 /// Run a program in the test emulator and return everything it printed.
 /// Returns None when sjasmplus is not available.
 fn run_with(name: &str, src: &str, setup: impl FnOnce(&mut Cpu)) -> Option<(String, Cpu)> {
-    let (nex, syms) = build(name, src)?;
+    run_opts(name, src, false, setup)
+}
+
+fn run_opts(name: &str, src: &str, bank_all: bool, setup: impl FnOnce(&mut Cpu)) -> Option<(String, Cpu)> {
+    let (nex, syms) = build_opts(name, src, bank_all)?;
     let mut cpu = load_nex(&nex).unwrap();
     setup(&mut cpu);
     let putc = syms["rt_putc"];
@@ -1854,4 +1863,205 @@ fn layer2_buffers_do_not_overlap_under_nextzxos() {
     assert_eq!(cpu.l2_pixel(10, 100), 2);
     assert_eq!(cpu.l2_pixel(10, 10), 0, "top third shows another frame");
     assert_eq!(cpu.l2_pixel(10, 150), 0);
+}
+
+#[test]
+fn run_far_arrays() {
+    let src = r#"
+far byte big[30000]
+far word w[10000]                       -- 20000 bytes: 3 pages
+far sbyte grid[100][100]
+far fixed speeds[] = {0.5, -1.25, 3}
+far byte table[4][3] = {{1, 2, 3}, {4, 5, 6}}
+for i = 0, 29999 do big[i] = byte(i & 255) end
+word sum = 0
+for i = 0, 29999 do sum += big[i] end
+print(sum, big[8191], big[8192], big[29999])
+w[0] = 1234
+w[4095] = 4095
+w[4096] = 4096                          -- first word of page 2
+w[9999] = 65535
+print(w[0], w[4095], w[4096], w[9999], w[5])
+grid[99][99] = -7
+grid[50][3] = 12
+grid[50][3] += grid[99][99]
+print(grid[50][3], grid[99][99], grid[0][0])
+print(speeds[1], speeds[2], table[1][2], table[3][0])
+byte j = 2
+table[j][j] = big[j * 100] + table[1][1]   -- one far element into another
+print(table[2][2])
+"#;
+    expect("r_far", src, "18920 255 0 47\n1234 4095 4096 65535 0\n5 -7 0\n-1.25 3 6 0\n205\n");
+}
+
+#[test]
+fn far_array_pages_survive_interrupts() {
+    // the frame handler reads another far array while the main loop works
+    let src = r#"
+far byte a[20000]
+far byte b[20000]
+byte seen = 0
+interrupt frame
+    seen = b[19999]
+end
+b[19999] = 9
+for i = 0, 19999 do a[i] = 1 end
+word s = 0
+for i = 0, 19999 do s += a[i] end
+print(s, seen)
+"#;
+    expect("r_far_irq", src, "20000 9\n");
+}
+
+#[test]
+fn far_array_errors() {
+    assert!(err("far byte a[10]\nprint(addr(a[1]))").contains("only be read or assigned"));
+    assert!(err("far string s[3]").contains("numbers or `bool`"));
+    assert!(err("far byte a[70000]").contains("64 KB") || err("far byte a[70000]").contains("array"));
+    assert!(err("far byte x = 3").contains("array declaration"));
+    assert!(err("function f()\n far byte a[3]\nend").contains("top level"));
+    assert!(err("far byte g[2][3]\nprint(g[1])").contains("without an index"));
+    assert!(err("far byte a[10]\na[10] = 1").contains("out of bounds"));
+}
+
+/// Pages that are not in the .nex hold garbage on real hardware: the
+/// zero pages of far arrays must be cleared at startup.
+#[test]
+fn far_zero_pages_are_cleared() {
+    let src = "far byte z[20000]\nfar byte t[3] = {7, 8, 9}\nprint(z[0], z[12345], z[19999], t[1])";
+    let out = run_with("r_far_zero", src, |c| {
+        for p in 28..40u8 {
+            c.pages.entry(p).or_insert_with(|| vec![0xAA; 8192]);
+        }
+    });
+    if let Some((out, _)) = out {
+        assert_eq!(out, "0 0 0 8\n");
+    }
+}
+
+
+/// Every function in its own code page gives the same results.
+#[test]
+fn run_banked_code() {
+    let src = r#"
+struct P
+    byte x
+    word y
+end
+class Counter
+    word n
+    function add(word k) -> word
+        self.n += k
+        return self.n
+    end
+end
+function twice(word v) -> word
+    return v * 2
+end
+function is_big(word v) -> bool
+    return v > 100
+end
+function name(byte k) -> string
+    if k == 0 then return "zero" end
+    return "n" .. str(k)
+end
+function fill(P p, byte v)
+    p.x = v
+    p.y = twice(v) + 1
+end
+function deep(byte k) -> word
+    -- calls through three pages
+    return twice(word(k)) + twice(twice(word(k)))
+end
+word ticks = 0
+function on_frame()
+    ticks += 1
+end
+interrupt frame
+    on_frame()
+end
+Counter c
+P p
+fill(p, 21)
+print(twice(21), is_big(50), is_big(500), name(0), name(7))
+print(p.x, p.y, deep(5), c.add(3), c.add(4))
+if is_big(twice(60)) then print("big") else print("small") end
+byte i = 0
+while not is_big(word(i) * 10) do i += 1 end
+print(i)
+vsync()
+vsync()
+print(ticks >= 2)
+"#;
+    let want = "42 false true zero n7
+21 43 30 3 7
+big
+11
+true
+";
+    expect("r_unbanked", src, want);
+    let Some((out, cpu)) = run_opts("r_banked", src, true, |_| {}) else { return };
+    assert_eq!(out, want);
+    assert!(cpu.slot2 == 10, "the main program runs with bank 5 at $4000");
+}
+
+/// Banked versions of the examples assemble, and the size estimate is close.
+#[test]
+fn examples_assemble_banked_and_estimate_sizes() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lz80n") {
+            continue;
+        }
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(&path).unwrap();
+        // the estimate never undercounts by much
+        let asm = crate::compile_opts(&src, "t.nex", true, &dir, false).unwrap();
+        if let Some((_, syms)) = build_opts(&format!("est_{name}"), &src, false) {
+            let real = (syms["__program_end"] - 0x8000) as usize;
+            let est = crate::codegen::resident_size(&asm);
+            assert!(est + 64 >= real && est <= real + real / 8, "{name}: estimate {est}, real {real}");
+        }
+        build_opts(&format!("bank_{name}"), &src, true);
+    }
+}
+
+/// A program far larger than the resident area: functions move into code
+/// pages automatically and the program still runs.
+#[test]
+fn run_auto_banked_large_program() {
+    let (nfun, nline) = (60u16, 60u16);
+    let mut src = String::new();
+    for f in 0..nfun {
+        src += &format!("function f{f}(word v) -> word
+");
+        for j in 0..nline {
+            src += &format!("    v = v * 3 + {}
+", f * 7 + j);
+        }
+        src += "    return v
+end
+";
+    }
+    src += "word s = 1
+";
+    for f in 0..nfun {
+        src += &format!("s = f{f}(s)
+");
+    }
+    src += "print(s)
+";
+    let mut v: u16 = 1;
+    for f in 0..nfun {
+        for j in 0..nline {
+            v = v.wrapping_mul(3).wrapping_add(f * 7 + j);
+        }
+    }
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let asm = crate::compile_with(&src, "t.nex", true, &base).unwrap();
+    let pages = asm.matches("    MMU 2 e,").count();
+    assert!(pages >= 2, "expected code pages, got {pages}");
+    expect("r_auto_bank", &src, &format!("{v}
+"));
 }
