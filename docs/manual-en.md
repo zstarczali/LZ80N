@@ -179,7 +179,7 @@ inside a method).
 
 **Built-in functions** (implemented by the compiler)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing`
 
 **Standard library names** (functions, types and constants written in LZ80N).
 They are reserved in **every** program, even one that does not use the
@@ -188,8 +188,8 @@ module, so a name never changes meaning when a program starts to use it:
 | Module | Names |
 |--------|-------|
 | sprite | `Sprite` `sprite` `sprites_visible` |
-| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` |
-| palette | `palette` `palette9` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` |
+| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` `L2_256` `L2_320` `L2_640` |
+| palette | `palette` `palette9` `palette_select` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` `PAL_ULA_2` `PAL_LAYER2_2` `PAL_SPRITES_2` `PAL_TEXT_2` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
 | sound | `sound_reset` `sound_mix` `tone` `noise` `volume` `sound_off` `beep` `play` `play_loop` `playing` `sound_tick` |
 
@@ -937,7 +937,8 @@ print("took", (frames() - t) * 20, "ms")
 
 ## 14. Layer 2 graphics
 
-Layer 2 is the Next's 256 × 192 bitmap layer with one byte per pixel. A colour
+Layer 2 is the Next's bitmap layer: 256 × 192 with one byte per pixel by
+default, 320 × 256 or 640 × 256 on request (14.1). A colour
 is an 8-bit `RRRGGGBB` value. `TRANSPARENT` (`$E3`) lets lower layers show
 through.
 
@@ -961,6 +962,8 @@ through.
 | `fill_triangle(x0, y0, x1, y1, x2, y2, c)` | filled triangle (corners in any order) |
 | `draw_image(img, x, y)` | draw a picture (see 16.1) |
 | `layer2_flip()` | double buffering: show the image drawn so far, draw into the other buffer |
+| `layer2_mode(m)` | `L2_256`, `L2_320` or `L2_640` (14.1) |
+| `layer2_width()` / `layer2_height()` → word | size of the current mode |
 
 Circles, ellipses and filled triangles take `sword` coordinates and are
 **clipped**: a shape may hang off any edge of the screen. Radii are 0–255.
@@ -988,10 +991,35 @@ end
 
 Layer order is **S-U-L**: sprites on top, then text, then Layer 2.
 
-Rows 192 and below are ignored by `plot`. Pixels are accessed through MMU
+Pixels outside the screen (in 256 × 192: rows 192 and below) are ignored by `plot`. Pixels are accessed through MMU
 slot 0 (`$0000`–`$1FFF`); `draw_image` also uses slot 1 (`$2000`–`$3FFF`)
 while it copies and puts the ROM back there afterwards. Once Layer 2 drawing has been used, `memory[0]` …
 `memory[$1FFF]` show the last Layer 2 page used, not the ROM.
+
+### 14.1 320 × 256 and 640 × 256
+
+```lua
+layer2_mode(L2_320)        -- 320 x 256, 256 colours: the whole display, border included
+layer2_mode(L2_640)        -- 640 x 256, 16 colours (palette indices 0..15)
+layer2_mode(L2_256)        -- back to 256 x 192 (the default)
+word w = layer2_width()    -- 256, 320 or 640
+word h = layer2_height()   -- 192 or 256
+```
+
+* Every drawing call works in every mode: x goes up to 639, y up to 255.
+  Shapes are clipped to the current size; `layer2_clear`, `layer2_flip`
+  and `draw_image` follow the mode too.
+* In 640 × 256 a pixel is a palette index 0–15 and is half as wide as it is
+  tall: a round circle needs twice the radius across
+  (`fill_ellipse(x, y, 2 * r, r, c)`). Load the 16 colours with
+  `palette(PAL_LAYER2, i, colour)`.
+* The wide modes store pixels by columns: vertical lines and
+  `hline`/`fill_rect` in 320 × 256 are fast, 640 × 256 draws pixel by pixel.
+* The two buffers then take 16K banks 8–17 (instead of 8–13), and pictures
+  and `far` arrays start above them. The compiler arranges this when the
+  program calls `layer2_mode`.
+
+The example `hires.lz80n` switches between the two modes.
 
 ---
 
@@ -1005,9 +1033,23 @@ redrawing anything. This is useful for colour cycling, fades and flashes.
 | `palette(layer, index, colour)` | 8-bit `RRRGGGBB` colour |
 | `palette9(layer, index, colour)` | 9-bit `RRRGGGBBB` colour |
 | `rgb9(r, g, b)` → word | 9-bit colour: r, g, b 0–7 |
+| `palette_select(layer, second)` | show the first (`false`) or second (`true`) palette |
 
 `layer`: `PAL_ULA`, `PAL_LAYER2`, `PAL_SPRITES`, `PAL_TEXT`.
 Text colour `k` is entry `2k+1` of `PAL_TEXT`.
+
+Every layer has a **second palette** too: `PAL_ULA_2`, `PAL_LAYER2_2`,
+`PAL_SPRITES_2`, `PAL_TEXT_2`. `palette_select(layer, second)` chooses which
+of the two a layer shows, so a whole prepared set of colours (a night
+version, a flash, a fade step) appears at once:
+
+```lua
+for i = 0, 255 do
+    palette(PAL_LAYER2_2, byte(i), dim(byte(i)))   -- prepare the second palette
+end
+palette_select(PAL_LAYER2, true)                   -- show it
+palette_select(PAL_LAYER2, false)                  -- and back
+```
 
 ```lua
 -- colour cycling: rewrite 16 Layer 2 palette entries every frame
@@ -1041,6 +1083,7 @@ is relative to the source file.
   Colours are converted to the Next's `RRRGGGBB` format. Transparent pixels
   (alpha < 128) become the sprite transparency colour `$E3`.
 * `.spr`: raw 8-bit sprite patterns (256 bytes each).
+* `.wav`: a sound sample (17.3).
 
 **Pictures for Layer 2**
 
@@ -1180,6 +1223,34 @@ runs in the frame interrupt and steps all channels. The game keeps running
 while the music plays.
 
 See `examples/sound.lz80n`.
+
+### 17.3 Samples (digital sound)
+
+```lua
+asset boom = "assets/boom.wav"
+asset engine = "assets/engine.wav"
+
+sample_play(boom)            -- once
+sample_loop(engine)          -- over and over
+if sample_playing() then ... end
+sample_stop()
+```
+
+* `.wav` files with 8 or 16 bit PCM, mono or stereo, are converted to 8-bit
+  mono when compiling. Rates from 4 kHz to 31.25 kHz are kept; others are
+  converted to 15.6 kHz. Like pictures, samples live in their own memory
+  pages, not in the 31 KB program area: one second at 15.6 kHz is about
+  15 KB.
+* Playback runs **in the background**: the zxnDMA sends the bytes to the
+  DAC (port `$DF`) at the sample's rate, through a 4 KB buffer at
+  `$7000`–`$7FFF` that the frame interrupt refills. The program goes on,
+  and the AY sound (17.1, 17.2) keeps working.
+* One sample sounds at a time; a new `sample_play` replaces the current one.
+* While a sample plays, the DMA is busy: `dma_copy`, `dma_fill` and
+  `layer2_clear` then do their work with the CPU (correct, but slower:
+  clearing Layer 2 takes about 2 frames).
+
+See `examples/samples.lz80n`.
 
 ---
 
@@ -1422,12 +1493,17 @@ automatically, largest first. Nothing changes in the source.
 * Code pages come after the pictures and `far` arrays (from 16K bank 14
   up). Interrupt handlers stay resident; functions they call may be banked
   (the mapping is saved and restored).
-* What stays resident: the main program (top-level code), global
-  variables, strings and other data, the runtime. If those alone are too
-  large, the assembler reports it; move top-level code into functions and
-  big tables into `far` arrays (19.1).
-* `lz80nc --bank-all game.lz80n` puts every function into its own page, to
-  try banking with a small program.
+* The main program can be large too. If it does not fit even with all its
+  functions banked, the compiler moves its big statements (loops, `if`
+  blocks, long statements, innermost first) into hidden functions, which
+  are banked the same way. A `break` that leaves such a statement, or
+  inline `asm`, keeps it in place.
+* What always stays resident: global variables, strings and other data, the
+  runtime, and the main program's small statements. If those alone are too
+  large, the assembler reports it; move big tables into `far` arrays (19.1).
+* `lz80nc --bank-all game.lz80n` puts every function, and the bigger
+  statements of the main program, into code pages, to try banking with a
+  small program (for example `examples/banks.lz80n`).
 
 ---
 
@@ -1435,10 +1511,9 @@ automatically, largest first. Nothing changes in the source.
 
 Not supported yet:
 
-* Layer 2 320 × 256 and 640 × 256 modes, second palettes
-* a main program (top-level code, globals and data) larger than about
-  31 KB; functions are banked automatically (22.5)
-* sample playback through the Next's DAC, PT3 music import
+* more than about 31 KB of global variables and data in the program area
+  (big tables belong in `far` arrays, 19.1)
+* PT3 music import
 
 Planned order: benchmarks against NextBASIC on real hardware →
 `long`/`fixed16`/Layer 2 modes → constructors and inheritance → memory banks
@@ -1477,7 +1552,9 @@ register allocation.
 | `MHZ_3 MHZ_7 MHZ_14 MHZ_28` | 0–3 |
 | `NOT_FOUND` | 255 |
 | `TRANSPARENT` | `$E3` |
-| `PAL_ULA PAL_LAYER2 PAL_SPRITES PAL_TEXT` | palette selectors |
+| `PAL_ULA PAL_LAYER2 PAL_SPRITES PAL_TEXT` | palette selectors (first palettes) |
+| `PAL_ULA_2 PAL_LAYER2_2 PAL_SPRITES_2 PAL_TEXT_2` | second palettes |
+| `L2_256 L2_320 L2_640` | Layer 2 modes |
 
 ### 24.3 Example programs
 
@@ -1491,6 +1568,7 @@ register allocation.
 | `layer2.lz80n` | Layer 2 drawing, layering with text and sprites |
 | `math.lz80n` | `fixed`, `sin`/`cos`/`atan2`/`sqrt`, double buffering |
 | `palette.lz80n` | colour cycling, `dma_copy`, `addr` |
+| `hires.lz80n` | Layer 2 320 × 256 and 640 × 256, second palettes |
 | `raster.lz80n` | copper, raster and frame interrupts, `random` |
 | `strings.lz80n` | strings and string functions, a scrolling ticker |
 | `tables.lz80n` | array initialisers: menu, bar chart and colour tables, `/=` `%=` |
@@ -1503,5 +1581,6 @@ register allocation.
 | `modules.lz80n` | a program in three files: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
+| `samples.lz80n` | `.wav` samples on the DAC in the background |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |

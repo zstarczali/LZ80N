@@ -179,7 +179,7 @@ objektum a metóduson belül).
 
 **Beépített függvények** (a fordító valósítja meg őket)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing`
 
 **A szabványos könyvtár nevei** (LZ80N-ben írt függvények, típusok és
 konstansok). **Minden** programban foglaltak, akkor is, ha a program nem
@@ -189,8 +189,8 @@ hogy a program elkezdi használni a modult:
 | Modul | Nevek |
 |-------|-------|
 | sprite | `Sprite` `sprite` `sprites_visible` |
-| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` |
-| paletta | `palette` `palette9` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` |
+| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` `L2_256` `L2_320` `L2_640` |
+| paletta | `palette` `palette9` `palette_select` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` `PAL_ULA_2` `PAL_LAYER2_2` `PAL_SPRITES_2` `PAL_TEXT_2` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
 | hang | `sound_reset` `sound_mix` `tone` `noise` `volume` `sound_off` `beep` `play` `play_loop` `playing` `sound_tick` |
 
@@ -970,6 +970,8 @@ rétegeket.
 | `fill_triangle(x0, y0, x1, y1, x2, y2, c)` | kitöltött háromszög (a csúcsok sorrendje tetszőleges) |
 | `draw_image(img, x, y)` | kép kirajzolása (lásd 16.1) |
 | `layer2_flip()` | dupla pufferelés: megjeleníti az eddig rajzolt képet, a rajzolás a másik pufferben folytatódik |
+| `layer2_mode(m)` | `L2_256`, `L2_320` vagy `L2_640` (14.1) |
+| `layer2_width()` / `layer2_height()` → word | a pillanatnyi mód mérete |
 
 A kör, az ellipszis és a kitöltött háromszög `sword` koordinátákat kap, és
 **vágja** az alakzatot: az bármelyik szélen kilóghat a képernyőről. A sugár
@@ -999,12 +1001,37 @@ end
 A rétegek sorrendje **S-U-L**: felül a sprite-ok, alattuk a szöveg, legalul a
 Layer 2.
 
-A `plot` a 192. és az alatti sorokat figyelmen kívül hagyja. A pixelek az
+A `plot` a képernyőn kívüli pixeleket (256 × 192-ben a 192. és az alatti sorokat) figyelmen kívül hagyja. A pixelek az
 MMU 0. slotján (`$0000`–`$1FFF`) keresztül érhetők el. A `draw_image` másolás
 közben az 1. slotot (`$2000`–`$3FFF`) is használja, utána visszateszi oda a
 ROM-ot. Ha a program már
 rajzolt a Layer 2-re, a `memory[0]` … `memory[$1FFF]` az utoljára használt
 Layer 2 lapot mutatja, nem a ROM-ot.
+
+### 14.1 320 × 256 és 640 × 256
+
+```lua
+layer2_mode(L2_320)        -- 320 x 256, 256 szín: a teljes kép, a kerettel együtt
+layer2_mode(L2_640)        -- 640 x 256, 16 szín (palettaindex 0..15)
+layer2_mode(L2_256)        -- vissza 256 x 192-re (ez az alapértelmezés)
+word w = layer2_width()    -- 256, 320 vagy 640
+word h = layer2_height()   -- 192 vagy 256
+```
+
+* Minden rajzoló hívás minden módban működik: x legfeljebb 639, y
+  legfeljebb 255 lehet. Az alakzatokat a pillanatnyi méretre vágja; a
+  `layer2_clear`, a `layer2_flip` és a `draw_image` is követi a módot.
+* 640 × 256-ban egy pixel 0–15 palettaindex, és fele olyan széles, mint
+  amilyen magas: kerek körhöz vízszintesen dupla sugár kell
+  (`fill_ellipse(x, y, 2 * r, r, c)`). A 16 színt a
+  `palette(PAL_LAYER2, i, szín)` tölti be.
+* A széles módok oszloponként tárolják a pixeleket: a függőleges vonal és a
+  `hline`/`fill_rect` 320 × 256-ban gyors, 640 × 256-ban pixelenként rajzol.
+* A két puffer ekkor a 8–17. 16K-s bankot foglalja (a 8–13. helyett), a képek
+  és a `far` tömbök fölöttük kezdődnek. Ezt a fordító intézi, ha a program
+  hívja a `layer2_mode`-ot.
+
+A `hires.lz80n` példa a két mód között vált.
 
 ---
 
@@ -1018,9 +1045,23 @@ változtathatók. Ez hasznos színciklushoz, áttűnéshez és villantáshoz.
 | `palette(layer, index, colour)` | 8 bites `RRRGGGBB` szín |
 | `palette9(layer, index, colour)` | 9 bites `RRRGGGBBB` szín |
 | `rgb9(r, g, b)` → word | 9 bites szín: r, g, b 0–7 |
+| `palette_select(layer, second)` | az első (`false`) vagy a második (`true`) paletta látszik |
 
 `layer`: `PAL_ULA`, `PAL_LAYER2`, `PAL_SPRITES`, `PAL_TEXT`.
 A `k` szövegszín a `PAL_TEXT` paletta `2k+1`. bejegyzése.
+
+Minden rétegnek van **második palettája** is: `PAL_ULA_2`, `PAL_LAYER2_2`,
+`PAL_SPRITES_2`, `PAL_TEXT_2`. A `palette_select(layer, second)` választja ki,
+melyiket mutassa a réteg, így egy előre elkészített színkészlet (éjszakai
+változat, villanás, áttűnés egy lépése) egyszerre jelenik meg:
+
+```lua
+for i = 0, 255 do
+    palette(PAL_LAYER2_2, byte(i), dim(byte(i)))   -- a második paletta előkészítése
+end
+palette_select(PAL_LAYER2, true)                   -- megjelenítés
+palette_select(PAL_LAYER2, false)                  -- és vissza
+```
 
 ```lua
 -- színciklus: minden képkockában 16 Layer 2 palettabejegyzés újraírása
@@ -1054,6 +1095,7 @@ Az `asset`-et a fordító fordításkor alakítja át és építi be a programba
   mintát. A színeket a Next `RRRGGGBB` formátumára alakítja. Az átlátszó
   pixelekből (alfa < 128) a sprite-átlátszósági szín (`$E3`) lesz.
 * `.spr`: nyers 8 bites sprite-minták (egyenként 256 bájt).
+* `.wav`: hangminta (17.3).
 
 **Képek a Layer 2-re**
 
@@ -1193,6 +1235,34 @@ hangmeghajtó fut a képkocka-megszakításban, és lépteti az összes csatorn�
 játék közben tovább fut, miközben a zene szól.
 
 Lásd: `examples/sound.lz80n`.
+
+### 17.3 Minták (digitális hang)
+
+```lua
+asset boom = "assets/boom.wav"
+asset engine = "assets/engine.wav"
+
+sample_play(boom)            -- egyszer
+sample_loop(engine)          -- újra meg újra
+if sample_playing() then ... end
+sample_stop()
+```
+
+* A 8 vagy 16 bites PCM `.wav` fájlokat (mono vagy sztereó) a fordító 8 bites
+  monóvá alakítja. A 4 kHz és 31,25 kHz közötti mintavételezés megmarad, a
+  többit 15,6 kHz-re alakítja. A minták a képekhez hasonlóan saját
+  memórialapokon vannak, nem a 31 KB-os programterületen: egy másodperc
+  15,6 kHz-en kb. 15 KB.
+* A lejátszás **a háttérben** fut: a zxnDMA a minta ütemében küldi a
+  bájtokat a DAC-ra (`$DF` port), egy `$7000`–`$7FFF`-en lévő 4 KB-os
+  pufferen át, amelyet a képkocka-megszakítás tölt újra. A program tovább
+  fut, és az AY hang (17.1, 17.2) is működik.
+* Egyszerre egy minta szól; egy új `sample_play` lecseréli az előzőt.
+* Amíg minta szól, a DMA foglalt: a `dma_copy`, a `dma_fill` és a
+  `layer2_clear` ilyenkor a CPU-val dolgozik (helyesen, de lassabban: a
+  Layer 2 törlése kb. 2 képkocka).
+
+Lásd: `examples/samples.lz80n`.
 
 ---
 
@@ -1442,12 +1512,17 @@ változtatni.
   banktól felfelé). A megszakításkezelők rezidensek maradnak; az általuk
   hívott függvények lehetnek bankoltak (a lapozást a kezelő elmenti és
   visszaállítja).
-* Ami rezidens marad: a főprogram (a legfelső szintű kód), a globális
-  változók, a stringek és a többi adat, a futtatórendszer. Ha ezek
-  önmagukban túl nagyok, az assembler jelzi; ilyenkor tedd a legfelső
-  szintű kódot függvényekbe, a nagy táblákat `far` tömbökbe (19.1).
-* Az `lz80nc --bank-all game.lz80n` minden függvényt külön lapra tesz, így
-  kis programmal is kipróbálható a bankolás.
+* A főprogram is lehet nagy. Ha még az összes függvénye bankolásával sem
+  fér el, a fordító a nagy utasításait (ciklusokat, `if` blokkokat, hosszú
+  utasításokat, a legbelsőkkel kezdve) rejtett függvényekbe emeli ki, és
+  ezeket ugyanígy bankolja. Ha egy `break` kilép az utasításból, vagy
+  `asm` van benne, az utasítás a helyén marad.
+* Ami mindig rezidens marad: a globális változók, a stringek és a többi
+  adat, a futtatórendszer és a főprogram kis utasításai. Ha ezek önmagukban
+  túl nagyok, az assembler jelzi; a nagy táblákat tedd `far` tömbökbe (19.1).
+* Az `lz80nc --bank-all game.lz80n` minden függvényt és a főprogram
+  nagyobb utasításait kódlapokra teszi, így kis programmal is kipróbálható
+  a bankolás (például az `examples/banks.lz80n`-nel).
 
 ---
 
@@ -1455,10 +1530,9 @@ változtatni.
 
 Még nem támogatott:
 
-* a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
-* kb. 31 KB-nál nagyobb főprogram (legfelső szintű kód, globálisok és
-  adatok); a függvényeket a fordító automatikusan bankolja (22.5)
-* mintalejátszás a Next DAC-ján, PT3 zene importálása
+* kb. 31 KB-nál több globális változó és adat a programterületen (a nagy
+  táblák helye a `far` tömb, 19.1)
+* PT3 zene importálása
 
 Tervezett sorrend: sebességmérés a NextBASIC ellen valódi gépen →
 `long`/`fixed16`/Layer 2 módok → konstruktorok és öröklődés → memóriabankok →
@@ -1496,7 +1570,9 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `MHZ_3 MHZ_7 MHZ_14 MHZ_28` | 0–3 |
 | `NOT_FOUND` | 255 |
 | `TRANSPARENT` | `$E3` |
-| `PAL_ULA PAL_LAYER2 PAL_SPRITES PAL_TEXT` | palettaválasztók |
+| `PAL_ULA PAL_LAYER2 PAL_SPRITES PAL_TEXT` | palettaválasztók (első paletták) |
+| `PAL_ULA_2 PAL_LAYER2_2 PAL_SPRITES_2 PAL_TEXT_2` | második paletták |
+| `L2_256 L2_320 L2_640` | Layer 2 módok |
 
 ### 24.3 Példaprogramok
 
@@ -1510,6 +1586,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `layer2.lz80n` | Layer 2 rajzolás, rétegezés szöveggel és sprite-okkal |
 | `math.lz80n` | `fixed`, `sin`/`cos`/`atan2`/`sqrt`, dupla pufferelés |
 | `palette.lz80n` | színciklus, `dma_copy`, `addr` |
+| `hires.lz80n` | Layer 2 320 × 256 és 640 × 256, második paletták |
 | `raster.lz80n` | copper, raster- és képkocka-megszakítás, `random` |
 | `strings.lz80n` | stringek és stringfüggvények, futószöveg |
 | `tables.lz80n` | tömb-kezdőértékek: menü, oszlopdiagram és színtáblák, `/=` `%=` |
@@ -1522,5 +1599,6 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `modules.lz80n` | program három fájlban: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
+| `samples.lz80n` | `.wav` minták a DAC-on, a háttérben |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |

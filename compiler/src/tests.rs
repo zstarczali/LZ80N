@@ -852,12 +852,36 @@ fn render(cpu: &Cpu) -> Vec<u8> {
         p[3] = 255;
     }
     if cpu.l2_port & 2 != 0 {
-        for y in 0..192 {
-            let pal = state(32 + y).1;
-            for x in 0..256 {
-                let c = pal[1][cpu.l2_pixel(x, y) as usize];
-                if c != 0xE3 {
-                    put(&mut img, 32 + x, 32 + y, c);
+        // NR $70: 256x192 by rows, 320x256 / 640x256 by columns (640: the
+        // left pixel of each pair is shown); NR $43 bit 2: second palette
+        let l2pal = |row: usize| if state(row).0[0x43] & 4 != 0 { 5 } else { 1 };
+        let base = cpu.nextreg[0x12] as usize * 2;
+        let byte = |page: usize, off: usize| cpu.pages.get(&(page as u8)).map_or(0, |p| p[off]);
+        match (cpu.nextreg[0x70] >> 4) & 3 {
+            0 => {
+                for y in 0..192 {
+                    let pal = state(32 + y).1;
+                    for x in 0..256 {
+                        let c = pal[l2pal(32 + y)][cpu.l2_pixel(x, y) as usize];
+                        if c != 0xE3 {
+                            put(&mut img, 32 + x, 32 + y, c);
+                        }
+                    }
+                }
+            }
+            mode => {
+                for y in 0..256 {
+                    let pal = state(y).1;
+                    for x in 0..320 {
+                        let mut v = byte(base + x / 32, (x % 32) * 256 + y);
+                        if mode == 2 {
+                            v >>= 4;
+                        }
+                        let c = pal[l2pal(y)][v as usize];
+                        if c != 0xE3 {
+                            put(&mut img, x, y, c);
+                        }
+                    }
                 }
             }
         }
@@ -874,7 +898,8 @@ fn render(cpu: &Cpu) -> Vec<u8> {
                     for px in 0..8 {
                         let bit = (bits >> (7 - px)) & 1;
                         let idx = (attr & 0xFE) | bit;
-                        let c = state(row * 8 + py).1[3][idx as usize];
+                        let tpal = if cpu.nextreg[0x6B] & 0x10 != 0 { 7 } else { 3 };
+                        let c = state(row * 8 + py).1[tpal][idx as usize];
                         if c != 0xE3 {
                             put(&mut img, col * 8 + px, row * 8 + py, c);
                         }
@@ -900,7 +925,8 @@ fn render(cpu: &Cpu) -> Vec<u8> {
                     let px = if mirror { 15 - px } else { px };
                     let c = cpu.patterns[pat * 256 + py * 16 + px];
                     if c != 0xE3 {
-                        put(&mut img, x + sx, y + sy, state(y + sy).1[2][c as usize]);
+                        let spal = if state(y + sy).0[0x43] & 8 != 0 { 6 } else { 2 };
+                        put(&mut img, x + sx, y + sy, state(y + sy).1[spal][c as usize]);
                     }
                 }
             }
@@ -2482,4 +2508,140 @@ print(d.x, d.y, b.who(), A.who(b))
         "4 6 101 1\n",
     );
     assert!(err("struct V\n byte x\nend\nfunction f() -> V\n return {1}\nend\nbyte k = f().x").contains("in a variable first"));
+}
+
+#[test]
+fn run_layer2_hires() {
+    expect(
+        "l2_hires",
+        "layer2_mode(L2_320)
+hline(250, 10, 20, 7)
+print(point(249, 10), point(250, 10), point(256, 10), point(269, 10), point(270, 10))
+hline(300, 11, 100, 8)
+print(point(299, 11), point(300, 11), point(319, 11), point(320, 11))
+fill_circle(224, 110, 36, 5)
+print(point(224, 110), point(190, 110), point(258, 110), point(224, 80))
+fill_circle(288, 110, 36, 6)
+print(point(288, 110), point(300, 120))
+plot(300, 255, 9)
+print(point(300, 255), layer2_width(), layer2_height())
+layer2_mode(L2_640)
+layer2_clear(3)
+plot(639, 255, 12)
+plot(638, 255, 21)
+hline(600, 3, 50, 9)
+print(point(0, 0), point(639, 255), point(638, 255), point(599, 3), point(600, 3), point(639, 3))
+print(layer2_width(), layer2_height())
+layer2_mode(L2_256)
+print(layer2_width(), layer2_height(), point(0, 192))
+palette_select(PAL_LAYER2, true)
+palette_select(PAL_SPRITES, true)
+palette(PAL_LAYER2_2, 1, 2)
+print(nextreg[0x43] & 0x0E, nextreg[0x43] >> 4)
+palette_select(PAL_LAYER2, false)
+print(nextreg[0x43] & 0x0E)
+",
+        "0 7 7 7 0
+0 8 8 0
+5 5 5 5
+6 6
+9 320 256
+3 12 5 3 9 9
+640 256
+256 192 0
+12 5
+8
+",
+    );
+}
+
+/// A main program (no functions at all) far larger than the resident area:
+/// its big statements become hidden functions, which are banked.
+#[test]
+fn run_large_main_program() {
+    let (nblock, nline) = (60u16, 60u16);
+    let mut src = String::from("word s = 1\nbyte pass = 0\nwhile true do\n    pass += 1\n    if pass > 2 then break end\n");
+    for b in 0..nblock {
+        src += &format!("    if s ~= {} or pass > 0 then\n", 70000 % 65536 + b as u32);
+        for j in 0..nline {
+            src += &format!("        s = s * 3 + {}\n", b * 7 + j);
+        }
+        src += "    end\n";
+    }
+    src += "end\nprint(s, pass)\n";
+    let mut v: u16 = 1;
+    for _ in 0..2 {
+        for b in 0..nblock {
+            for j in 0..nline {
+                v = v.wrapping_mul(3).wrapping_add(b * 7 + j);
+            }
+        }
+    }
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let asm = crate::compile_with(&src, "t.nex", true, &base).unwrap();
+    let pages = asm.matches("    MMU 2 e,").count();
+    assert!(pages >= 2, "expected code pages, got {pages}");
+    assert!(asm.contains("mp_1:"), "parts of the main program moved out");
+    expect("r_big_main", &src, &format!("{v} 3\n"));
+}
+
+/// A .wav file in a temp folder, for `asset` declarations in tests.
+fn temp_wav(name: &str, rate: u32, samples: &[u8]) -> String {
+    let dir = std::env::temp_dir().join("lz80nc_wav");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(format!("{name}.wav"));
+    std::fs::write(&p, crate::assets::encode_wav(rate, samples)).unwrap();
+    p.display().to_string().replace('\\', "/")
+}
+
+#[test]
+fn run_sample_playback() {
+    // 5000 bytes: more than the 4K ring buffer, so it is refilled
+    let s: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let path = temp_wav("ramp", 15625, &s);
+    let src = format!(
+        "asset boom = \"{path}\"
+layer2_visible(true)
+sample_play(boom)
+print(sample_playing())
+word n = 0
+word t0 = frames()
+while sample_playing() do
+    layer2_clear(byte(n))      -- the DMA is busy: done by the CPU
+    vsync()
+    n += 1
+end
+word t = frames() - t0
+print(t > 15, t < 40, point(10, 10) == byte(n - 1))
+"
+    );
+    let Some((out, cpu)) = run_with("smp_play", &src, |_| {}) else { return };
+    assert_eq!(out, "true\ntrue true true\n");
+    assert!(cpu.dac.len() >= 5000 + 100, "{} bytes reached the DAC", cpu.dac.len());
+    assert_eq!(&cpu.dac[..5000], &s[..], "the sample, in order");
+    assert!(cpu.dac[5000..5100].iter().all(|&b| b == 0x80), "then silence");
+    assert_eq!(cpu.nextreg[8] & 8, 8, "DACs enabled");
+}
+
+#[test]
+fn run_sample_loop_and_stop() {
+    let s: Vec<u8> = (0..300u32).map(|i| (i % 200 + 20) as u8).collect();
+    let path = temp_wav("short", 8000, &s);
+    let src = format!(
+        "asset hum = \"{path}\"
+sample_loop(hum)
+for i = 1, 20 do vsync() end
+print(sample_playing())
+sample_stop()
+print(sample_playing())
+"
+    );
+    let Some((out, cpu)) = run_with("smp_loop", &src, |_| {}) else { return };
+    assert_eq!(out, "true\nfalse\n");
+    // 8 kHz for 20 frames: ~3200 bytes, the 300-byte sample over and over
+    assert!(cpu.dac.len() > 2500, "{} bytes", cpu.dac.len());
+    for (i, &b) in cpu.dac.iter().take(2400).enumerate() {
+        assert_eq!(b, s[i % 300], "byte {i}");
+    }
+    assert!(err("asset x = \"ships.png\"\nsample_play(x)").contains("not a sample"));
 }
