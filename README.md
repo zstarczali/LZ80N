@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/LZ80N Neon Rainbow Logo.png" alt="LZ80N logo" width="260">
+  <img src="assets/LZ80N Neon Rainbow Logo.png" alt="LZ80N logo" width="360">
 </p>
 
 <h1 align="center">LZ80N - The Next Language</h1>
