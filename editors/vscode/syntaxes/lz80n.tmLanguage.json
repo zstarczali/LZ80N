@@ -126,7 +126,7 @@
         { "name": "keyword.operator.logical.lz80n", "match": "\\b(and|or|not)\\b" },
         { "name": "constant.language.boolean.lz80n", "match": "\\b(true|false)\\b" },
         { "name": "storage.modifier.lz80n", "match": "\\b(const|var|far)\\b" },
-        { "name": "storage.type.lz80n", "match": "\\b(function|class|struct|asset|interrupt|asm)\\b" }
+        { "name": "storage.type.lz80n", "match": "\\b(function|class|struct|extends|asset|interrupt|asm)\\b" }
       ]
     },
 
@@ -137,7 +137,7 @@
 
     "self": {
       "name": "variable.language.self.lz80n",
-      "match": "\\bself\\b"
+      "match": "\\b(self|super)\\b"
     },
 
     "builtins": {

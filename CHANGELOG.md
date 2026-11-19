@@ -16,6 +16,9 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
   return values (also strings); structs and classes with methods.
 * `interrupt frame` and `interrupt raster(n)` handlers; inline `asm`.
 * `long` (32-bit) and `fixed16` (16.16 fixed point).
+* Struct values: `{...}` lists (also for arrays of structs), constructors
+  `Type(args)` with an optional `init` method, functions returning structs,
+  `class B extends A` with `super`.
 * Recursion, direct and mutual (the caller's frame is saved on the stack
   only around calls that can come back; stack overflow is caught).
 * `include "file.lz80n"`: programs in several source files (paths relative
@@ -41,5 +44,5 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
   code pages automatically; big data goes into `far` arrays.
 * Test suite running the compiled programs in a built-in Z80N emulator.
 
-**Examples**: 20 programs in `examples/`, from `hello.lz80n` to the
+**Examples**: 21 programs in `examples/`, from `hello.lz80n` to the
 `shooter.lz80n` space shooter.

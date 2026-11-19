@@ -633,7 +633,7 @@ fn struct_errors() {
     assert!(err("struct P\n P inner\nend").contains("itself"));
     assert!(err("Foo f").contains("unknown type"));
     assert!(err("class C\n function f()\n end\nend\nC c\nc.g()").contains("no method"));
-    assert!(err("struct A\n byte x\nend\nstruct B\n byte x\nend\nA a\nB b\na = b").contains("expected a `A`"));
+    assert!(err("struct A\n byte x\nend\nstruct B\n byte x\nend\nA a\nB b\na = b").contains("not a `A`"));
 }
 
 /// Every example must compile, assemble and run (they loop forever, so we
@@ -1667,7 +1667,7 @@ fn array_initializer_errors() {
     assert!(err("byte t = {1}").contains("needs an array"));
     assert!(err("byte t[3] = 5").contains("initialised with a list"));
     assert!(err("var t[] = {1}").len() > 0);
-    assert!(err("struct P\n byte x\nend\nP ps[] = {1}").contains("arrays of structs"));
+    assert!(err("struct P\n byte x\nend\nP ps[] = {1}").contains("`{...}` list"));
     assert!(err("string s[] = {5}").contains("string constants"));
     assert!(err("print({1, 2})").len() > 0);
 }
@@ -2331,3 +2331,155 @@ fn long_errors() {
     assert!(err("fixed f = 200.5").contains("does not fit"));
 }
 
+
+#[test]
+fn run_struct_values() {
+    expect(
+        "struct_values",
+        "struct Point
+    sword x
+    sword y
+end
+class Ship
+    Point pos
+    byte hp = 3
+    string name
+    function init(sword x, sword y)
+        self.pos = Point(x, y)
+        self.name = \"ship\"
+    end
+    function hit() -> byte
+        self.hp -= 1
+        return self.hp
+    end
+    function describe() -> string
+        return self.name .. \" \" .. str(self.pos.x) .. \",\" .. str(self.pos.y) .. \" hp\" .. str(self.hp)
+    end
+end
+class Boss extends Ship
+    byte shield = 2
+    function init(sword x, sword y)
+        super.init(x, y)
+        self.name = \"boss\"
+        self.hp = 9
+    end
+    function hit() -> byte
+        if self.shield > 0 then
+            self.shield -= 1
+            return self.hp
+        end
+        return super.hit()
+    end
+end
+function add(Point a, Point b) -> Point
+    return Point(a.x + b.x, a.y + b.y)
+end
+function mid(Point a, Point b) -> Point
+    Point m = add(a, b)
+    m.x /= 2
+    m.y /= 2
+    return m
+end
+function show(Ship s)
+    print(s.describe())
+end
+Point p = Point(3, -4)
+Point q = {10, 20}
+Point r = add(p, q)
+print(r.x, r.y)
+r = mid(Point(0, 0), {8, 6})
+print(r.x, r.y)
+var z = add(r, r)
+print(z.x, z.y)
+p = Point(p.y, p.x)
+print(p.x, p.y)
+Point pts[] = {{1, 2}, {3, 4}, {5}}
+print(pts[0].x, pts[1].y, pts[2].x, pts[2].y)
+Ship s = Ship(1, 2)
+Boss b = Boss(7, 8)
+print(s.describe())
+print(b.describe(), b.shield)
+print(b.hit(), b.hit(), b.hit(), s.hit())
+show(b)
+Ship copy = b
+print(copy.describe())
+Ship fleet[] = {{{1, 1}, 5, \"a\"}, {{2, 2}}}
+print(fleet[0].describe(), fleet[1].hp, fleet[1].name == \"\")
+function local_test()
+    Point a = {100, 200}
+    Point c = Point(1)
+    print(a.x + a.y, c.x, c.y)
+    a.x = 0
+end
+local_test()
+local_test()
+",
+        "13 16\n4 3\n8 6\n-4 3\n1 4 5 0\nship 1,2 hp3\nboss 7,8 hp9 2\n9 9 8 2\nboss 7,8 hp8\nboss 7,8 hp8\na 1,1 hp5 3 true\n300 1 0\n300 1 0\n",
+    );
+}
+
+#[test]
+fn struct_value_errors() {
+    assert!(err("struct P\n byte x\nend\nbyte n = P(1)").contains("makes a `P`"));
+    assert!(err("struct P\n byte x\nend\nP p = {1, 2}").contains("2 values"));
+    assert!(err("struct P\n byte x\nend\nstruct Q\n byte x\nend\nQ q\nP p = q").contains("not a `P`"));
+    assert!(err("class A extends B\nend").contains("unknown parent"));
+    assert!(err("class A\n function f()\n  super.f()\n end\nend").contains("`super`"));
+    assert!(err("struct P\n byte x\nend\nP p = P(1, 2)").contains("has 1 fields"));
+}
+
+#[test]
+fn run_struct_lists_at_run_time() {
+    expect(
+        "struct_lists",
+        "struct V
+    sword x
+    sword y
+end
+struct Pix
+    V at
+    byte c
+end
+V v = {3, 4}
+v = {v.y, v.x}
+print(v.x, v.y)
+sword k = 7
+V w = {k, k * 2}
+Pix p = {{1, 2}, rgb(7, 0, 0)}
+Pix q = {w, rgb(0, 7, 0)}
+print(w.x, w.y, p.at.y, p.c, q.at.y, q.c)
+",
+        "4 3\n7 14 2 224 14 28\n",
+    );
+}
+
+#[test]
+fn run_struct_var_and_explicit_method() {
+    expect(
+        "struct_var",
+        "struct Vec
+    sword x
+    sword y
+end
+function add(Vec p, Vec q) -> Vec
+    return Vec(p.x + q.x, p.y + q.y)
+end
+class A
+    byte n = 1
+    function who() -> byte
+        return self.n
+    end
+end
+class B extends A
+    function who() -> byte
+        return 100 + A.who(self)
+    end
+end
+var d = add({1, 2}, {3, 4})
+B b
+print(d.x, d.y, b.who(), A.who(b))
+",
+        "4 6 101 1\n",
+    );
+    assert!(err("struct V\n byte x\nend\nfunction f() -> V\n return {1}\nend\nbyte k = f().x").contains("in a variable first"));
+}

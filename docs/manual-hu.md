@@ -491,7 +491,7 @@ clear_line(5)
 * **A struktúrák, osztályok és stringek hivatkozás szerint adódnak át**: a
   függvény a hívó változóján dolgozik, és meg is változtathatja (mint a
   táblák a Luában).
-* Függvény visszaadhat `string`-et (`-> string`), struktúrát egyelőre nem.
+* Függvény visszaadhat `string`-et (`-> string`) és struktúrát (`-> Vec`, 8.3).
 
 ### 7.1 Rekurzió
 
@@ -595,7 +595,88 @@ balls[0].draw()
   `self.mező` alakban kell hivatkozni.
 * Az `obj.method(...)` hívás közvetlen `CALL`: nincs virtuális függvény és
   nincs többletköltség.
-* Öröklődés és konstruktor még nincs.
+
+### 8.3 Struktúraértékek: listák, konstruktorok, visszatérési értékek
+
+Egy struktúraérték megadható a mezői `{...}` listájával, deklarációs
+sorrendben, vagy **konstruktorral**, amikor a típus nevét függvényként
+hívjuk:
+
+```lua
+struct Vec
+    sword x
+    sword y
+end
+
+Vec a = {3, 4}                  -- mezők sorrendben; ami hiányzik: alapérték / 0
+Vec b = Vec(10, 20)             -- konstruktor
+a = {a.y, a.x}                  -- az értékek tetszőleges kifejezések lehetnek
+Vec pts[] = {{1, 2}, {3, 4}, {5}}   -- struktúratömb: elemenként egy lista
+
+function add(Vec p, Vec q) -> Vec    -- függvény visszaadhat struktúrát
+    return Vec(p.x + q.x, p.y + q.y)
+end
+
+Vec c = add(a, {1, 1})          -- lista és konstruktor argumentumként is jó
+var d = add(c, c)               -- a `var` az értékből veszi a típust
+```
+
+* Ha az osztálynak van `init` metódusa, az építi fel: a `Ship(10, 20)`
+  először beírja a mezők alapértékeit, aztán meghívja az új objektumon az
+  `init(10, 20)`-at. `init` nélkül az argumentumok sorban a mezőkbe kerülnek.
+* Beágyazott struktúrához és tömbmezőhöz beágyazott lista kell:
+  `Pix p = {{1, 2}, rgb(7, 0, 0)}`.
+* A csak konstansokból álló lista betöltéskor semmibe sem kerül
+  (globális), illetve egy `LDIR` (lokális); a többi lista és a konstruktor
+  mezőnként épül fel.
+* A struktúrát visszaadó függvény egy statikus pufferbe ír, amit a hívó
+  azonnal átmásol, így az eredmény önálló érték.
+* Struktúraérték tárolható, visszaadható és átadható; kifejezésben
+  közvetlenül (`add(a, b).x`) előbb változóba kell tenni.
+
+### 8.4 Öröklődés
+
+```lua
+class Shape
+    Vec pos
+    byte colour = 255
+    function init(sword x, sword y)
+        self.pos = Vec(x, y)
+    end
+    function move() ... end
+    function draw() ... end
+end
+
+class Ball extends Shape
+    byte radius = 6                 -- az új mezők a szülőéi után jönnek
+    function init(sword x, sword y, byte r)
+        super.init(x, y)            -- a szülő változata
+        self.radius = r
+    end
+    function draw()                 -- felülírja a Shape.draw-t
+        fill_circle(self.pos.x, self.pos.y, self.radius, self.colour)
+    end
+end
+
+Ball b = Ball(100, 50, 8)
+b.move()                            -- örökölt
+b.draw()                            -- a Ball saját metódusa
+```
+
+* A leszármazott osztályban elöl, ugyanazokon az eltolásokon vannak a
+  szülő mezői, utánuk a sajátok; a metódusokat örökli, hacsak nem írja
+  felül őket.
+* A `super.m(...)` a szülő metódusát hívja a `self`-en; a
+  `Shape.m(obj, ...)` egy adott osztály metódusát hívja kifejezetten.
+* `Ball` átadható ott, ahol `Shape` kell, és értékül adható `Shape`
+  változónak (csak a `Shape` rész másolódik).
+* A metódusok fordításkor kötődnek (**nincs virtuális hívás**): a `Shape`-et
+  váró függvény a `Shape` metódusait hívja akkor is, ha `Ball`-t kap. A
+  `Ball` saját metódusaiban a `self.draw()` a `Ball.draw`. Így minden hívás
+  közvetlen `CALL` marad.
+* A szülőt a leszármazott előtt kell deklarálni.
+
+Az `inherit.lz80n` példa mindezt bemutatja.
 
 ---
 
@@ -1374,7 +1455,6 @@ változtatni.
 
 Még nem támogatott:
 
-* struktúra visszaadása, konstruktor, öröklődés, kezdőérték struktúratömbnek
 * a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
 * kb. 31 KB-nál nagyobb főprogram (legfelső szintű kód, globálisok és
   adatok); a függvényeket a fordító automatikusan bankolja (22.5)
@@ -1425,6 +1505,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `hello.lz80n` | számok, függvények, `for`, színek |
 | `move.lz80n` | billentyűzet és Kempston joystick, `at` |
 | `classes.lz80n` | struktúrák, osztályok, metódusok, objektumtömbök |
+| `inherit.lz80n` | konstruktorok, öröklődés, struktúra visszaadása, struktúralisták |
 | `text.lz80n` | a szövegréteg, 16 szín |
 | `layer2.lz80n` | Layer 2 rajzolás, rétegezés szöveggel és sprite-okkal |
 | `math.lz80n` | `fixed`, `sin`/`cos`/`atan2`/`sqrt`, dupla pufferelés |

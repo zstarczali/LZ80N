@@ -98,11 +98,6 @@ impl Parser {
         }
     }
     /// Primitive type (return types).
-    fn ty(&mut self) -> Result<Ty, Diag> {
-        let pos = self.pos();
-        let n = self.ident()?;
-        Ty::from_name(&n).ok_or_else(|| Diag::new(pos, format!("expected a primitive type, found `{n}`")))
-    }
     /// Primitive or named (struct/class) type.
     fn type_ref(&mut self) -> Result<TypeRef, Diag> {
         let n = self.ident()?;
@@ -162,6 +157,12 @@ impl Parser {
         let pos = self.pos();
         self.next(); // struct / class
         let name = self.ident()?;
+        let parent = if matches!(self.peek(), Tok::Ident(n) if n == "extends") {
+            self.next();
+            Some(self.ident()?)
+        } else {
+            None
+        };
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         loop {
@@ -184,7 +185,7 @@ impl Parser {
                 }
             }
         }
-        Ok(StructDecl { name, fields, methods, pos })
+        Ok(StructDecl { name, parent, fields, methods, pos })
     }
 
     fn func(&mut self) -> Result<Func, Diag> {
@@ -205,20 +206,25 @@ impl Parser {
         }
         self.expect(&Tok::RParen, "`)`")?;
         let mut ret_str = false;
+        let mut ret_named = None;
         let ret = if self.eat(&Tok::Arrow) {
-            if matches!(self.peek(), Tok::Ident(n) if n == "string") {
-                self.next();
-                ret_str = true;
-                None
-            } else {
-                Some(self.ty()?)
+            match self.type_ref()? {
+                TypeRef::Prim(t) => Some(t),
+                TypeRef::Named(n) if n == "string" => {
+                    ret_str = true;
+                    None
+                }
+                TypeRef::Named(n) => {
+                    ret_named = Some(n);
+                    None
+                }
             }
         } else {
             None
         };
         let body = self.block(&[Tok::End])?;
         self.expect(&Tok::End, "`end`")?;
-        Ok(Func { name, params, ret, ret_str, body, pos })
+        Ok(Func { name, params, ret, ret_str, ret_named, body, pos })
     }
 
     /// Parse statements until one of `terms` (not consumed).
@@ -338,7 +344,7 @@ impl Parser {
                     (Some(_), Some(_)) => {
                         return Err(Diag::new(pos, "an array is initialised with a list: `= {1, 2, 3}`"));
                     }
-                    (None, Some(Expr { kind: ExprKind::List(_), pos })) => {
+                    (None, Some(Expr { kind: ExprKind::List(_), pos })) if matches!(ty, TypeRef::Prim(_)) => {
                         return Err(Diag::new(*pos, "a `{...}` list needs an array: `name[] = {...}`"));
                     }
                     (Some(Expr { kind: ExprKind::List(v), pos }), None)
@@ -520,6 +526,10 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr, Diag> {
         let pos = self.pos();
+        if self.at(&Tok::LBrace) {
+            // `{...}`: a struct value (`p = {1, 2}`, `draw({1, 2})`)
+            return self.list();
+        }
         let kind = match self.next() {
             Tok::Int(v) => ExprKind::Int(v),
             Tok::Fixed(v) => ExprKind::Fixed(v),

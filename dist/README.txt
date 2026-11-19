@@ -34,7 +34,7 @@ CONTENTS
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
                              as Markdown text
-  examples/                  20 example programs, their pictures and
+  examples/                  21 example programs, their pictures and
                              the include files of modules.lz80n (lib/)
   benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
@@ -244,6 +244,7 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     hello      numbers, functions, for loops, colours
     move       keyboard and joystick
     classes    structs, classes, methods, arrays of objects
+    inherit    constructors, inheritance, functions returning structs
     text       the text layer and its 16 colours
     strings    string functions, a scrolling ticker
     math       fixed point, sin/cos/atan2/sqrt, double buffering

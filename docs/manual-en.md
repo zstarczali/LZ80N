@@ -486,7 +486,7 @@ clear_line(5)
 * Numbers and `bool` values are passed **by value**.
 * **Structs, classes and strings are passed by reference**: the function
   works on the caller's variable and can change it (like tables in Lua).
-* A function can return a `string` (`-> string`) but not a struct yet.
+* A function can return a `string` (`-> string`) or a struct (`-> Vec`, 8.3).
 
 ### 7.1 Recursion
 
@@ -588,7 +588,86 @@ balls[0].draw()
   `self.field`.
 * A method call `obj.method(...)` is a direct `CALL`: there are no virtual
   functions and no extra cost.
-* Inheritance and constructors are not implemented yet.
+
+### 8.3 Struct values: lists, constructors, results
+
+A struct value can be written as a `{...}` list of its fields, in
+declaration order, or made by a **constructor**, the type name called like
+a function:
+
+```lua
+struct Vec
+    sword x
+    sword y
+end
+
+Vec a = {3, 4}                  -- fields in order; missing ones: default / 0
+Vec b = Vec(10, 20)             -- constructor
+a = {a.y, a.x}                  -- values may be any expressions
+Vec pts[] = {{1, 2}, {3, 4}, {5}}   -- arrays of structs: one list per element
+
+function add(Vec p, Vec q) -> Vec    -- functions return struct values
+    return Vec(p.x + q.x, p.y + q.y)
+end
+
+Vec c = add(a, {1, 1})          -- lists and constructors work as arguments
+var d = add(c, c)               -- `var` takes the type from the value
+```
+
+* A class with an `init` method is built by it: `Ship(10, 20)` first stores
+  the field defaults, then calls `init(10, 20)` on the new object. Without
+  `init`, the arguments go to the fields in order.
+* Nested structs and array fields take nested lists:
+  `Pix p = {{1, 2}, rgb(7, 0, 0)}`.
+* A list made of constants costs nothing at load time (globals) or one
+  `LDIR` (locals); other lists and constructors are built field by field.
+* A function returning a struct fills a static buffer and the caller copies
+  it at once, so the result is a value of its own.
+* A struct value can be stored, returned and passed; using one directly
+  in an expression (`add(a, b).x`) needs a variable first.
+
+### 8.4 Inheritance
+
+```lua
+class Shape
+    Vec pos
+    byte colour = 255
+    function init(sword x, sword y)
+        self.pos = Vec(x, y)
+    end
+    function move() ... end
+    function draw() ... end
+end
+
+class Ball extends Shape
+    byte radius = 6                 -- new fields come after the parent's
+    function init(sword x, sword y, byte r)
+        super.init(x, y)            -- the parent's version
+        self.radius = r
+    end
+    function draw()                 -- overrides Shape.draw
+        fill_circle(self.pos.x, self.pos.y, self.radius, self.colour)
+    end
+end
+
+Ball b = Ball(100, 50, 8)
+b.move()                            -- inherited
+b.draw()                            -- Ball's own
+```
+
+* A derived class has all the fields of its parent first, at the same
+  offsets, then its own; methods are inherited unless redefined.
+* `super.m(...)` calls the parent's method on `self`; `Shape.m(obj, ...)`
+  calls a given class's method explicitly.
+* A `Ball` can be passed where a `Shape` is expected and assigned to a
+  `Shape` variable (only the `Shape` part is copied).
+* Methods are bound when compiling (**no virtual dispatch**): a function
+  taking a `Shape` calls `Shape`'s methods even when it is given a `Ball`.
+  Inside `Ball`'s own methods, `self.draw()` is `Ball.draw`. This keeps
+  every call a direct `CALL`.
+* The parent must be declared before the derived class.
+
+The example `inherit.lz80n` shows all of these.
 
 ---
 
@@ -1356,7 +1435,6 @@ automatically, largest first. Nothing changes in the source.
 
 Not supported yet:
 
-* returning structs, constructors, inheritance, initialisers for arrays of structs
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
 * a main program (top-level code, globals and data) larger than about
   31 KB; functions are banked automatically (22.5)
@@ -1408,6 +1486,7 @@ register allocation.
 | `hello.lz80n` | numbers, functions, `for`, colours |
 | `move.lz80n` | keyboard and Kempston joystick, `at` |
 | `classes.lz80n` | structs, classes, methods, arrays of objects |
+| `inherit.lz80n` | constructors, inheritance, struct results, struct lists |
 | `text.lz80n` | the text layer, 16 colours |
 | `layer2.lz80n` | Layer 2 drawing, layering with text and sprites |
 | `math.lz80n` | `fixed`, `sin`/`cos`/`atan2`/`sqrt`, double buffering |

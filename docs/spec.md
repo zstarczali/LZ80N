@@ -130,7 +130,8 @@ asm ... end             -- raw Z80N assembly lines
   (strings: literals / string constants). Missing values are 0 / `""`.
   Globals: the values are emitted as data (no code). Locals: copied from a
   constant table with `LDIR` each time the declaration runs. `name[]`
-  takes the size from the list. Not for arrays of structs yet.
+  takes the size from the list. Arrays of structs: one `{...}` per
+  element (fields in order, nested lists for nested structs / array fields).
   Multi-dimensional: nested lists are rows (`{{1,2},{3,4}}`) or one flat
   list; only the first size may be `[]`.
 * `asset name = image("file.png")`: a Layer 2 picture (<= 256 x 255) stored
@@ -197,12 +198,20 @@ if balls[i].move() then ... end
   `a = b` copies the whole struct (`LDIR`).
 * **Reference semantics for parameters**: struct/class parameters, and
   `self`, are passed by address (2 bytes), so a function can modify the
-  caller's object (like Lua tables). Struct values cannot be returned yet.
+  caller's object (like Lua tables). Struct values are returned through a
+  static buffer per function (`r_<fn>`, HL = its address); the caller copies it.
+* **Struct values**: `{...}` lists (constant: an image in the data, else
+  field by field) and constructors `T(args)`: the default image `sd_T` is
+  copied in, then `init(args)` is called if `T` has one, else the args go
+  to the fields in order. Temporaries are hidden static (frame) variables.
 * Field defaults are stored each time the declaration executes (globals at
   their place in the main program, locals on every entry to the block).
   Without defaults, globals start at zero.
 * Methods are ordinary functions with a hidden first parameter `self`;
-  `obj.m(args)` is a direct `CALL`. No inheritance or virtual dispatch yet.
+  `obj.m(args)` is a direct `CALL`. `class B extends A`: A's fields come
+  first at the same offsets, methods are inherited unless redefined;
+  `super.m()` / `A.m(obj)` call a given version. A `B` is accepted where an
+  `A` is expected. Binding is static: no virtual dispatch.
   Inside a method, fields are always accessed via `self.`.
 * Address computation picks the cheapest form: constant offsets fold
   into the address at assembly time; a `byte` index into an array of
