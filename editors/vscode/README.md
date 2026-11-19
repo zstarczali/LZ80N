@@ -54,14 +54,3 @@ Lua-inspired compiled language for the ZX Spectrum Next.
 | `lz80n.emulatorArgs` | `["-zxnext", "-w3", "${file}"]` | `${file}` = the `.nex` path |
 | `lz80n.checkOnSave` | `true` | compile on save and show errors |
 | `lz80n.checkOnOpen` | `true` | also check when a file is opened |
-
-## Install from source
-
-```powershell
-cd editors\vscode
-npx @vscode/vsce package
-code --install-extension lz80n-0.1.0.vsix
-```
-
-or copy the `editors/vscode` folder to
-`%USERPROFILE%\.vscode\extensions\lz80n` and restart VS Code.

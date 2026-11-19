@@ -3,3 +3,4 @@ compiler/target/
 *.lst
 *.nex
 tools/sjasmplus/
+*.vsix
