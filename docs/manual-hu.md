@@ -179,7 +179,7 @@ jelzi: `` `név` is a reserved name ``.
 
 `and` `or` `not` `if` `then` `elseif` `else` `end` `while` `do` `for`
 `function` `return` `break` `const` `var` `true` `false` `asm` `struct`
-`class` `asset` `interrupt`
+`class` `asset` `interrupt` `far`
 
 **Típusnevek és a `self`**
 
@@ -896,7 +896,8 @@ const LOGO_H = image_height(logo)
 * A PNG-t a fordító `RRRGGGBB` formátumra alakítja. A pixelek **saját
   memórialapokra** kerülnek (a 14. 16K-s banktól felfelé), nem a 31 KB-os
   programterületre, így egy teljes 256 × 192-es kép (48 KB) a programban
-  csak 6 bájtot foglal. A képek együtt kb. 780 KB-ot használhatnak.
+  csak 6 bájtot foglal. A képek és a `far` tömbök (19.1) együtt kb. 780
+  KB-ot használhatnak.
 * A `draw_image` a képet a Layer 2-re másolja (abba a pufferbe, amelyikbe
   éppen rajzolunk), minden szélen vágva. A sorokat `LDIR` másolja: egy teljes
   képernyő 28 MHz-en kb. 2 képkocka.
@@ -1108,6 +1109,36 @@ memórialeképezés érvényes rájuk.
 
 ---
 
+### 19.1 `far` tömbök: adatok memóriabankokban
+
+A programterület (kód és közönséges változók) kb. 31 KB. A nagy adatok a
+Next többi memóriájában is lakhatnak:
+
+```lua
+far byte level[22][720]                 -- 15840 bájt, a programterületen kívül
+far word scores[10000]
+far fixed curve[] = {0.5, 1, 1.5, 2}    -- kezdőérték is lehet
+far byte map[64][64] = {{1, 1, 1}, {1, 0, 1}}
+
+level[y][x] = 3
+level[y][x + 1] += level[y][x]
+scores[i] = scores[i - 1] + 10
+```
+
+* Elemtípus: `byte`, `sbyte`, `word`, `sword`, `fixed`, `bool`; egy vagy
+  több dimenzió; tömbönként legfeljebb 64 KB. Csak a legfelső szinten
+  deklarálható.
+* Az adatok 8K-s lapokon vannak a 14. 16K-s banktól felfelé, a képekkel
+  (`image(...)`) közös területen: együtt kb. 780 KB. A kezdőérték a `.nex`
+  fájl része; a kezdőérték nélküli tömböket induláskor nullázza a program.
+* Egy elem ugyanúgy olvasható és írható, mint bármely tömbelem. Hozzáféréskor
+  a megfelelő lap az MMU 1. slotjába (`$2000`–`$3FFF`) kerül, ezért kicsit
+  drágább egy közönséges tömbnél (kb. 60–80 T-ciklus, ha a lap már be van
+  lapozva). Megszakításkezelő is használhat `far` tömböt: a lapozást a
+  kezelő előtt elmenti, utána visszaállítja.
+* `far` elem nem adható át referenciaként és nem használható `addr()`-ral;
+  egy teljes sor (`level[y]`) önmagában nem használható.
+
 ## 20. Beépített assembly
 
 ```lua
@@ -1194,9 +1225,9 @@ $0000..$1FFF  MMU 0. slot: Layer 2 rajzolóablak (rajzolás után)
 $4000..$5AFF  ULA képernyő (nem használt, törölve)
 $6000..$69FF  tilemap (szövegréteg)
 $6C00..$6FFF  betűkészlet
-$2000..$3FFF  MMU 1. slot: képlapok (csak a draw_image futása alatt)
+$2000..$3FFF  MMU 1. slot: far adat- és képlapok, hozzáféréskor lapozva
 8-10. bank    Layer 2 1. puffer, 11-13. bank: 2. puffer (induláskor beállítva)
-14. banktól   képek (asset ... = image(...))
+14. banktól   képek és far tömbök
 $8000..$FCFF  programkód és adatok (fordításkor ellenőrizve)
 $FDFC..       verem (lefelé nő)
 $FDFD..$FDFF  JP a megszakításkezelőre
@@ -1229,7 +1260,8 @@ Még nem támogatott:
 * `long` (32 bites), `fixed16` (16.16)
 * struktúra visszaadása, konstruktor, öröklődés, kezdőérték struktúratömbnek
 * a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
-* kb. 31 KB-nál nagyobb programok (memóriabankok)
+* kb. 31 KB-nál több kód (kódbankolás: a következő lépés; a nagy adatok
+  már elférnek `far` tömbökben)
 * mintalejátszás a Next DAC-ján, PT3 zene importálása
 
 Tervezett sorrend: sebességmérés a NextBASIC ellen valódi gépen →
@@ -1253,7 +1285,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `sprite_load`, `sprites_visible`, `sprite[n]` | 16 |
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
 | `copper_begin`, `copper_wait`, `copper_move`, `copper_start`, `copper_stop` | 18 |
-| `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill` | 19 |
+| `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill`, `far` tömbök | 19 |
 | `len`, `sub`, `find`, `val`, `str`, `asc`, `chr`, `upper`, `lower` | 9 |
 | `abs`, `min`, `max`, `clamp`, `sqrt`, `sin`, `cos`, `atan2`, `round` | 10 |
 
@@ -1287,6 +1319,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `life.lz80n` | életjáték kétdimenziós tömbökkel, 2D kezdőértékek |
 | `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
 | `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
+| `banks.lz80n` | `far` tömbök: 16 KB-os barlangtérkép memóriabankokban |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |

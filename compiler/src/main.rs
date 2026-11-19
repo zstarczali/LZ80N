@@ -21,6 +21,17 @@ pub fn compile_source(src: &str, nex_name: &str) -> Result<String, Vec<diag::Dia
 }
 
 pub fn compile_with(src: &str, nex_name: &str, optimize: bool, base_dir: &Path) -> Result<String, Vec<diag::Diag>> {
+    compile_opts(src, nex_name, optimize, base_dir, false)
+}
+
+/// `bank_all`: put every function into its own code page (tests).
+pub fn compile_opts(
+    src: &str,
+    nex_name: &str,
+    optimize: bool,
+    base_dir: &Path,
+    bank_all: bool,
+) -> Result<String, Vec<diag::Diag>> {
     let toks = lexer::lex(src).map_err(|d| vec![d])?;
     let mut prog = parser::parse(toks).map_err(|d| vec![d])?;
     let reserved = library_name_errors(&prog);
@@ -40,7 +51,7 @@ pub fn compile_with(src: &str, nex_name: &str, optimize: bool, base_dir: &Path) 
             prog.items.splice(0..0, lib.items);
         }
     }
-    let opts = codegen::Options { nex_name: nex_name.to_string(), optimize, base_dir: base_dir.to_path_buf() };
+    let opts = codegen::Options { nex_name: nex_name.to_string(), optimize, base_dir: base_dir.to_path_buf(), bank_all };
     let out = codegen::compile(&prog, &opts)?;
     Ok(out.asm)
 }
@@ -62,6 +73,7 @@ fn library_name_errors(prog: &ast::Program) -> Vec<diag::Diag> {
                     stmts(body, out);
                 }
                 StmtKind::While { body, .. } => stmts(body, out),
+                StmtKind::Far(inner) => stmts(std::slice::from_ref(inner), out),
                 StmtKind::If { arms, otherwise } => {
                     for (_, b) in arms {
                         stmts(b, out);
@@ -125,14 +137,16 @@ fn main() -> ExitCode {
     let mut asm_only = false;
     let mut sjasm = None;
     let mut optimize = true;
+    let mut bank_all = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => output = args.next().map(PathBuf::from),
             "-S" => asm_only = true,
             "-O0" => optimize = false,
+            "--bank-all" => bank_all = true,
             "--sjasmplus" => sjasm = args.next().map(PathBuf::from),
             "-h" | "--help" => {
-                println!("lz80nc <input.lz80n> [-o out.nex] [-S (assembly only)] [-O0 (no peephole)] [--sjasmplus PATH]");
+                println!("lz80nc <input.lz80n> [-o out.nex] [-S (assembly only)] [-O0 (no peephole)] [--bank-all (every function in a code page)] [--sjasmplus PATH]");
                 return ExitCode::SUCCESS;
             }
             _ if input.is_none() => input = Some(PathBuf::from(a)),
@@ -157,7 +171,7 @@ fn main() -> ExitCode {
     let asm_path = nex.with_extension("asm");
     let nex_file = nex.file_name().unwrap().to_string_lossy().to_string();
     let base_dir = input.parent().map(Path::to_path_buf).unwrap_or_default();
-    let asm = match compile_with(&src, &nex_file, optimize, &base_dir) {
+    let asm = match compile_opts(&src, &nex_file, optimize, &base_dir, bank_all) {
         Ok(a) => a,
         Err(errs) => {
             for d in &errs {

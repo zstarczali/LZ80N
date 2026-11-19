@@ -111,6 +111,7 @@ const SPEED = 2         -- compile-time constant (folded)
 byte buf[64]            -- fixed-size array
 byte t[] = {1, 2, 3}    -- initialised array (size from the list)
 byte m[4][8]            -- multi-dimensional (up to 4), m[y][x], row-major
+far byte big[20000]     -- banked array (8K pages via MMU slot 1)
 
 x = x + 1               -- also += -= *= /= %= &= |= <<= >>=
 if c then ... elseif d then ... else ... end
@@ -136,6 +137,14 @@ asm ... end             -- raw Z80N assembly lines
   in 8K pages from page 28 (no row crosses a page), drawn with
   `draw_image(name, x, y)` (clipped, TRANSPARENT pixels skipped);
   `image_width` / `image_height` are compile-time constants.
+* `far` arrays (top level, numeric/bool elements, <= 64 KB): pages from the
+  same pool as pictures (page 28 up). Element access = byte offset in HL,
+  `rt_far_map` (A = first page) maps page + (offset >> 13) into slot 1 and
+  returns $2000 + (offset & $1FFF). `rt_farpage` mirrors NR $51; the ISR
+  saves/restores it when any banked page exists. Values are evaluated
+  before the target is mapped. All-zero pages are not stored in the .nex
+  (SAVENEX AUTO skips empty banks) and are cleared at startup
+  (`rt_far_zero`). No place()/by-ref/addr() for far elements.
 * Reserved names: keywords, type names, `self`, built-in functions, built-in
   constants, and the public names of the standard modules (always, even
   when the module is not used) plus the `snd_` prefix

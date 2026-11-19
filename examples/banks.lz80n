@@ -1,0 +1,71 @@
+-- banks.lz80n -- far arrays: big data in its own memory banks
+--
+--  * far byte cave[22][720]: a 16 KB map that does not use the 31 KB
+--    program area (it lives in 8K pages above the Layer 2 buffers)
+--  * far byte roof[720], floor[720]: the cave's outline per column
+--  * the map is generated once, then a 32-column window is shown as 8x8 tiles
+--  * O / P scroll the window (hold SPACE for fast scrolling)
+
+const W = 720
+const H = 22
+far byte cave[H][W]
+far byte roof[W]
+far byte floor[W]
+
+-- generate a winding cave: random walk of the roof and the floor
+seed(1234)
+byte r = 3
+byte f = 17
+for x = 0, W - 1 do
+    r = byte(clamp(sword(r) + sword(random(3)) - 1, 1, 9))
+    f = byte(clamp(sword(f) + sword(random(3)) - 1, r + 7, 20))
+    roof[x] = r
+    floor[x] = f
+    for y = 0, H - 1 do
+        byte t = 0                          -- 0 = air
+        if y < r or y > f then t = 1 end    -- 1 = rock
+        if y == r or y == f then t = 2 end  -- 2 = edge
+        cave[y][x] = t
+    end
+    -- crystals here and there
+    if random(8) == 0 then cave[f - 1][x] = 3 end
+end
+
+byte colours[] = {0, 0x49, 0x6D, 0x1F}
+
+function draw(word left)
+    for ty = 0, H - 1 do
+        for tx = 0, 31 do
+            fill_rect(tx * 8, 16 + ty * 8, 8, 8, colours[cave[ty][left + tx]])
+        end
+    end
+end
+
+ink(BRIGHT_WHITE)
+at(0, 1)
+write("far arrays: 16K map in banks  O/P")
+layer2_visible(true)
+layer2_clear(0)
+
+word left = 0
+bool dirty = true
+while true do
+    if dirty then
+        draw(left)
+        layer2_flip()
+        at(1, 1)
+        write("x = ", left, "   ")
+        dirty = false
+    end
+    word step = 1
+    if key(KEY_SPACE) then step = 8 end
+    if key(KEY_P) and left <= W - 32 - step then
+        left += step
+        dirty = true
+    end
+    if key(KEY_O) and left >= step then
+        left -= step
+        dirty = true
+    end
+    vsync()
+end
