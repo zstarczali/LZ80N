@@ -283,6 +283,17 @@ impl Parser {
                 self.expect(&Tok::End, "`end`")?;
                 StmtKind::Asm(body)
             }
+            Tok::Far => {
+                self.next();
+                let inner = self.stmt()?;
+                match &inner.kind {
+                    StmtKind::VarDecl { ty: Some(_), array: Some(_), is_const: false, .. } => {}
+                    _ => {
+                        return Err(Diag::new(pos, "`far` needs an array declaration: `far byte name[1000]`"));
+                    }
+                }
+                StmtKind::Far(Box::new(inner))
+            }
             Tok::Asset => {
                 self.next();
                 let name = self.ident()?;

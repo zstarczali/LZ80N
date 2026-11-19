@@ -128,6 +128,8 @@ pub struct Stmt {
 
 #[derive(Debug, Clone)]
 pub enum StmtKind {
+    /// `far byte name[n]`: an array in its own memory pages (a VarDecl inside)
+    Far(Box<Stmt>),
     /// `byte x = 1`, `word buf[10]`, `var x = 5`, `const k = 3`
     VarDecl {
         ty: Option<TypeRef>,

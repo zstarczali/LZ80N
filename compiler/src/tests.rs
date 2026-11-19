@@ -1855,3 +1855,83 @@ fn layer2_buffers_do_not_overlap_under_nextzxos() {
     assert_eq!(cpu.l2_pixel(10, 10), 0, "top third shows another frame");
     assert_eq!(cpu.l2_pixel(10, 150), 0);
 }
+
+#[test]
+fn run_far_arrays() {
+    let src = r#"
+far byte big[30000]
+far word w[10000]                       -- 20000 bytes: 3 pages
+far sbyte grid[100][100]
+far fixed speeds[] = {0.5, -1.25, 3}
+far byte table[4][3] = {{1, 2, 3}, {4, 5, 6}}
+for i = 0, 29999 do big[i] = byte(i & 255) end
+word sum = 0
+for i = 0, 29999 do sum += big[i] end
+print(sum, big[8191], big[8192], big[29999])
+w[0] = 1234
+w[4095] = 4095
+w[4096] = 4096                          -- first word of page 2
+w[9999] = 65535
+print(w[0], w[4095], w[4096], w[9999], w[5])
+grid[99][99] = -7
+grid[50][3] = 12
+grid[50][3] += grid[99][99]
+print(grid[50][3], grid[99][99], grid[0][0])
+print(speeds[1], speeds[2], table[1][2], table[3][0])
+byte j = 2
+table[j][j] = big[j * 100] + table[1][1]   -- one far element into another
+print(table[2][2])
+"#;
+    expect("r_far", src, "18920 255 0 47\n1234 4095 4096 65535 0\n5 -7 0\n-1.25 3 6 0\n205\n");
+}
+
+#[test]
+fn far_array_pages_survive_interrupts() {
+    // the frame handler reads another far array while the main loop works
+    let src = r#"
+far byte a[20000]
+far byte b[20000]
+byte seen = 0
+interrupt frame
+    seen = b[19999]
+end
+b[19999] = 9
+for i = 0, 19999 do a[i] = 1 end
+word s = 0
+for i = 0, 19999 do s += a[i] end
+print(s, seen)
+"#;
+    expect("r_far_irq", src, "20000 9\n");
+}
+
+#[test]
+fn far_array_errors() {
+    assert!(err("far byte a[10]\nprint(addr(a[1]))").contains("only be read or assigned"));
+    assert!(err("far string s[3]").contains("numbers or `bool`"));
+    assert!(err("far byte a[70000]").contains("64 KB") || err("far byte a[70000]").contains("array"));
+    assert!(err("far byte x = 3").contains("array declaration"));
+    assert!(err("function f()\n far byte a[3]\nend").contains("top level"));
+    assert!(err("far byte g[2][3]\nprint(g[1])").contains("without an index"));
+    assert!(err("far byte a[10]\na[10] = 1").contains("out of bounds"));
+}
+
+/// Pages that are not in the .nex hold garbage on real hardware: the
+/// zero pages of far arrays must be cleared at startup.
+#[test]
+fn far_zero_pages_are_cleared() {
+    let src = "far byte z[20000]\nfar byte t[3] = {7, 8, 9}\nprint(z[0], z[12345], z[19999], t[1])";
+    let out = run_with("r_far_zero", src, |c| {
+        for p in 28..40u8 {
+            c.pages.entry(p).or_insert_with(|| vec![0xAA; 8192]);
+        }
+    });
+    if let Some((out, _)) = out {
+        assert_eq!(out, "0 0 0 8\n");
+    }
+}
+
+#[test]
+fn far_debug_tmp() {
+    let src = "far byte cave[64][256]\nfar byte roof[256]\nbyte c[] = {0, 5, 6, 7}\nfor x = 0, 3 do\n roof[x] = 9\n for y = 0, 63 do\n  cave[y][x] = 1\n end\nend\ncave[10][2] = 2\nprint(cave[0][0], cave[10][2], roof[3], c[cave[10][2]])\nfill_rect(0, 0, 8, 8, c[cave[10][2]])\nprint(point(1, 1))";
+    expect("r_far_dbg", src, "1 2 9 6\n6\n");
+}

@@ -69,6 +69,8 @@ enum Sym {
     SConst(String),
     /// Embedded data; `patterns` is set for sprite pattern assets.
     Asset { label: String, patterns: Option<u32>, image: Option<(u32, u32)> },
+    /// `far` array: elements of `ty` from 8K page `page` on.
+    Far { ty: Ty, len: u32, sub: [u32; 3], page: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +171,8 @@ struct Gen {
     assets: Vec<(String, Vec<u8>)>,
     /// Layer 2 pictures: (label, image, first 8K page).
     images: Vec<(String, crate::assets::Image, u32)>,
+    /// Contents of the banked 8K pages (pictures, far arrays): (page, bytes, note).
+    far_pages: Vec<(u32, Vec<u8>, String)>,
     base_dir: std::path::PathBuf,
 }
 
@@ -387,6 +391,28 @@ impl Gen {
     }
 
     /// `db` / `dw` lines for an array initializer (missing values are 0 / "").
+    /// Initializer values of a numeric/bool array, masked to the type, padded with 0.
+    fn prim_values(&self, t: Ty, len: u32, items: &[Expr], pos: Pos) -> R<Vec<i64>> {
+        if items.len() as u32 > len {
+            return Err(Diag::new(pos, format!("{} values for an array of {len}", items.len())));
+        }
+        let mut vals = Vec::new();
+        for e in items {
+            let v = match t {
+                Ty::Fixed => self.fixed_const(e).filter(|v| (-32768..=32767).contains(v)),
+                Ty::Bool => match &e.kind {
+                    ExprKind::Bool(b) => Some(*b as i64),
+                    _ => None,
+                },
+                _ => self.const_eval(e).filter(|&v| t.literal_fits(v)),
+            }
+            .ok_or_else(|| Diag::new(e.pos, format!("initializer values must be `{}` constants that fit", t.name())))?;
+            vals.push(mask(v, t));
+        }
+        vals.resize(len as usize, 0);
+        Ok(vals)
+    }
+
     fn array_data(&self, lay: Lay, len: u32, items: &[Expr], pos: Pos) -> R<String> {
         if items.len() as u32 > len {
             return Err(Diag::new(pos, format!("{} values for an array of {len}", items.len())));
@@ -541,6 +567,7 @@ impl Gen {
             if let Item::Stmt(s) = item {
                 let r = match &s.kind {
                     StmtKind::VarDecl { is_const: false, .. } => self.declare_global(s),
+                    StmtKind::Far(inner) => self.declare_far(inner),
                     _ => Ok(()),
                 };
                 if let Err(d) = r {
@@ -552,11 +579,14 @@ impl Gen {
         self.cur_fn = "main".into();
         self.cur_ret = None;
         self.cur_ret_str = None;
+        if !self.zero_pages().is_empty() {
+            self.e("call rt_far_zero");
+        }
         for item in &prog.items {
             if let Item::Stmt(s) = item {
                 let r = match &s.kind {
                     StmtKind::VarDecl { name, init, is_const: false, .. } => self.init_global(name, init, s.pos),
-                    StmtKind::VarDecl { .. } | StmtKind::Asset { .. } => Ok(()),
+                    StmtKind::VarDecl { .. } | StmtKind::Asset { .. } | StmtKind::Far(_) => Ok(()),
                     _ => self.stmt(s),
                 };
                 if let Err(d) = r {
@@ -597,9 +627,9 @@ impl Gen {
             let img = crate::assets::load_image(&full).map_err(|e| Diag::new(pos, e))?;
             // pictures live in 8K pages from 28 (16K bank 14) upwards, above
             // the two Layer 2 buffers (banks 8-13)
-            let first = self.images.last().map_or(28, |(_, i, p)| p + i.pages.len() as u32);
-            if first + img.pages.len() as u32 > 224 {
-                return Err(Diag::new(pos, "images use more than the Next's 1 MB of memory"));
+            let first = self.alloc_pages(img.pages.len() as u32, pos)?;
+            for (k, p) in img.pages.iter().enumerate() {
+                self.far_pages.push((first + k as u32, p.clone(), format!("picture {name}")));
             }
             let size = Some((img.width, img.height));
             self.images.push((label.clone(), img, first));
@@ -610,6 +640,113 @@ impl Gen {
         self.assets.push((label.clone(), a.bytes));
         self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns, image: None });
         Ok(())
+    }
+
+    /// `n` consecutive 8K pages from the pool above the Layer 2 buffers
+    /// (page 28 = 16K bank 14 up to the 1 MB limit).
+    fn alloc_pages(&mut self, n: u32, pos: Pos) -> R<u32> {
+        let first = self.far_pages.iter().map(|(p, _, _)| p + 1).max().unwrap_or(28);
+        if first + n > 224 {
+            return Err(Diag::new(pos, "pictures and `far` arrays need more than the Next's 1 MB of memory"));
+        }
+        Ok(first)
+    }
+
+    fn declare_far(&mut self, s: &Stmt) -> R<()> {
+        let StmtKind::VarDecl { ty: Some(tr), name, array, init, .. } = &s.kind else { unreachable!() };
+        self.check_new_name(name, s.pos)?;
+        let ty = match self.resolve_type(tr, s.pos)? {
+            Lay::Prim(t) => t,
+            _ => return Err(Diag::new(s.pos, "`far` arrays hold numbers or `bool` (not strings or structs yet)")),
+        };
+        let (len, sub) = self.decl_dims(array, init)?.unwrap();
+        let total = Self::mk_obj(Lay::Prim(ty), Some((len, sub))).total().unwrap();
+        let bytes_len = total as usize * ty.size() as usize;
+        if bytes_len > 65536 {
+            return Err(Diag::new(s.pos, format!("`far` arrays can be at most 64 KB ({bytes_len} bytes)")));
+        }
+        let mut bytes = vec![0u8; bytes_len];
+        if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
+            let mut all = vec![len];
+            all.extend(sub.iter().filter(|&&d| d > 0));
+            let flat = self.flat_init(items, &all, Lay::Prim(ty))?;
+            let vals = self.prim_values(ty, total, &flat, s.pos)?;
+            for (k, v) in vals.iter().enumerate() {
+                if ty.size() == 1 {
+                    bytes[k] = *v as u8;
+                } else {
+                    bytes[2 * k] = *v as u8;
+                    bytes[2 * k + 1] = (*v >> 8) as u8;
+                }
+            }
+        } else if init.is_some() {
+            return Err(Diag::new(s.pos, "a `far` array is initialised with a list: `= {1, 2, 3}`"));
+        }
+        let pages = bytes_len.div_ceil(8192).max(1) as u32;
+        let first = self.alloc_pages(pages, s.pos)?;
+        for k in 0..pages as usize {
+            let chunk = bytes[k * 8192..((k + 1) * 8192).min(bytes_len)].to_vec();
+            self.far_pages.push((first + k as u32, chunk, format!("far {name}")));
+        }
+        self.globals.insert(name.clone(), Sym::Far { ty, len, sub, page: first });
+        Ok(())
+    }
+
+    /// The `far` array an element expression belongs to: (element type, first page, dims).
+    fn far_root(&self, e: &Expr) -> Option<(Ty, u32, Vec<u32>)> {
+        let mut b = e;
+        while let ExprKind::Index(inner, _) = &b.kind {
+            b = inner;
+        }
+        let ExprKind::Name(n) = &b.kind else { return None };
+        match self.lookup(n) {
+            Some(Sym::Far { ty, len, sub, page }) => {
+                let mut dims = vec![len];
+                dims.extend(sub.iter().filter(|&&d| d > 0));
+                Some((ty, page, dims))
+            }
+            _ => None,
+        }
+    }
+
+    /// HL = byte offset of a `far` element, then map it: HL = address in slot 1.
+    fn far_element(&mut self, e: &Expr) -> R<Ty> {
+        let (ty, page, dims) = self.far_root(e).unwrap();
+        let mut idx = Vec::new();
+        let mut b = e;
+        while let ExprKind::Index(inner, i) = &b.kind {
+            idx.push(i.as_ref());
+            b = inner;
+        }
+        idx.reverse();
+        if idx.len() != dims.len() {
+            return Err(Diag::new(e.pos, "use every index of a `far` array: one element at a time"));
+        }
+        let mut first = true;
+        for (k, i) in idx.iter().enumerate() {
+            let stride: u32 = dims[k + 1..].iter().product::<u32>() * ty.size() as u32;
+            if !first {
+                self.e("push hl");
+            }
+            match self.const_eval(i) {
+                Some(c) => {
+                    Self::check_index(Some(dims[k]), c, i.pos)?;
+                    self.e(&format!("ld hl,{}", (c * stride as i64) & 0xFFFF));
+                }
+                None => {
+                    self.gen_expr(i, Ty::Word)?;
+                    self.mul_const(stride as i64);
+                }
+            }
+            if !first {
+                self.e("pop de");
+                self.e("add hl,de");
+            }
+            first = false;
+        }
+        self.e(&format!("ld a,{page}"));
+        self.e("call rt_far_map");
+        Ok(ty)
     }
 
     /// The image asset named by an argument: (label, width, height).
@@ -921,6 +1058,11 @@ impl Gen {
         let driver = self.funcs.get("sound_tick").map(|f| f.label.clone());
         let mut lines: Vec<(u16, String)> = self.irqs.iter().filter_map(|i| i.0.map(|n| (n, i.1.clone()))).collect();
         let mut isr = String::from("__isr:\n    push af\n    push bc\n    push de\n    push hl\n");
+        // slot 1 (far data, pictures) may be remapped by the handler
+        let slot1 = !self.far_pages.is_empty();
+        if slot1 {
+            isr.push_str("    ld a,(rt_farpage)\n    push af\n");
+        }
         let tick = |isr: &mut String| {
             isr.push_str("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n");
             if let Some(d) = &driver {
@@ -972,6 +1114,9 @@ impl Gen {
                 first & 0xFF,
                 0b110 | (first >> 8)
             );
+        }
+        if slot1 {
+            isr.push_str("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n");
         }
         isr.push_str("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n");
         (isr, init)
@@ -1191,6 +1336,7 @@ impl Gen {
             }
             StmtKind::For { var, start, end, step, body } => self.for_loop(s.pos, var, start, end, step, body),
             StmtKind::Asset { .. } => Err(Diag::new(s.pos, "`asset` declarations must be at the top level")),
+            StmtKind::Far(_) => Err(Diag::new(s.pos, "`far` arrays must be declared at the top level")),
             StmtKind::Return(e) => {
                 if let Some(buf) = self.cur_ret_str.clone() {
                     let Some(e) = e else { return Err(Diag::new(s.pos, "missing return value")) };
@@ -1406,6 +1552,7 @@ impl Gen {
         match &e.kind {
             ExprKind::Name(n) => match self.lookup(n) {
                 Some(Sym::Var { obj, .. }) => Ok(obj),
+                Some(Sym::Far { ty, len, sub, .. }) => Ok(Obj { lay: Lay::Prim(ty), len: Some(len), sub }),
                 Some(Sym::Const(_) | Sym::FConst(_) | Sym::SConst(_)) => {
                     Err(Diag::new(e.pos, format!("`{n}` is a constant")))
                 }
@@ -1533,6 +1680,9 @@ impl Gen {
 
     /// Locate a storage expression: static address, or address in HL.
     fn place(&mut self, e: &Expr) -> R<Place> {
+        if self.far_root(e).is_some() {
+            return Err(Diag::new(e.pos, "a `far` array element can only be read or assigned"));
+        }
         if let Some(a) = self.static_addr(e)? {
             return Ok(Place::Static(a));
         }
@@ -1616,6 +1766,16 @@ impl Gen {
         let Obj { lay: Lay::Prim(ty), len: None, .. } = self.obj_of(e)? else {
             return Err(Diag::new(e.pos, "not a simple value"));
         };
+        if self.far_root(e).is_some() {
+            self.far_element(e)?;
+            self.e("ld a,(hl)");
+            if ty.size() == 2 {
+                self.e("inc hl");
+                self.e("ld h,(hl)");
+                self.e("ld l,a");
+            }
+            return Ok(ty);
+        }
         match self.place(e)? {
             Place::Static(a) => self.load(&a, ty),
             Place::Dyn if ty.size() == 1 => self.e("ld a,(hl)"),
@@ -1652,6 +1812,22 @@ impl Gen {
         let obj = self.obj_of(target)?;
         if obj.len.is_some() {
             return Err(Diag::new(target.pos, "cannot assign to a whole array"));
+        }
+        if self.far_root(target).is_some() {
+            let Lay::Prim(ty) = obj.lay else { unreachable!() };
+            self.gen_expr(value, ty)?;
+            self.push(ty);
+            self.far_element(target)?;
+            if ty.size() == 1 {
+                self.e("pop af");
+                self.e("ld (hl),a");
+            } else {
+                self.e("pop de");
+                self.e("ld (hl),e");
+                self.e("inc hl");
+                self.e("ld (hl),d");
+            }
+            return Ok(());
         }
         match obj.lay {
             Lay::Prim(ty) => {
@@ -3646,6 +3822,14 @@ impl Gen {
                 let _ = writeln!(out, "    dw {}", c.join(","));
             }
         }
+        let zero = self.zero_pages();
+        if !zero.is_empty() {
+            out.push_str(
+                "; clear the banked pages that are not stored in the .nex\nrt_far_zero:\n    ld hl,rt_far_zero_tab\n.p:\n    ld a,(hl)\n    or a\n    ret z\n    push hl\n    ld (rt_farpage),a\n    nextreg $51,a\n    xor a\n    ld de,$2000\n    ld bc,8192\n    call rt_dma_fill\n    pop hl\n    inc hl\n    jr .p\n",
+            );
+            let list: Vec<String> = zero.iter().map(|p| p.to_string()).collect();
+            let _ = writeln!(out, "rt_far_zero_tab: db {},0", list.join(","));
+        }
         if !self.images.is_empty() {
             out.push_str(runtime::IMAGES);
             for (label, img, first) in &self.images {
@@ -3693,20 +3877,31 @@ impl Gen {
 }
 
 impl Gen {
-    /// Picture data: each 8K page assembled into MMU slot 1 at $2000.
+    /// Banked data: each 8K page assembled into MMU slot 1 at $2000.
+    /// All-zero pages are not stored (SAVENEX skips empty banks, which then
+    /// hold whatever was in memory); `rt_far_zero` clears them at startup.
     fn image_pages(&self) -> String {
         let mut out = String::new();
-        for (label, img, first) in &self.images {
-            let _ = writeln!(out, "; picture {label}: {}x{}", img.width, img.height);
-            for (k, page) in img.pages.iter().enumerate() {
-                let _ = writeln!(out, "    MMU 1 e, {}\n    ORG $2000", first + k as u32);
-                for chunk in page.chunks(32) {
-                    let row: Vec<String> = chunk.iter().map(|b| b.to_string()).collect();
-                    let _ = writeln!(out, "    db {}", row.join(","));
-                }
+        for (page, bytes, note) in &self.far_pages {
+            if Self::zero_page(bytes) {
+                continue;
+            }
+            let _ = writeln!(out, "; {note}\n    MMU 1 e, {page}\n    ORG $2000");
+            for chunk in bytes.chunks(32) {
+                let row: Vec<String> = chunk.iter().map(|b| b.to_string()).collect();
+                let _ = writeln!(out, "    db {}", row.join(","));
             }
         }
         out
+    }
+
+    fn zero_page(bytes: &[u8]) -> bool {
+        bytes.iter().all(|&b| b == 0)
+    }
+
+    /// Pages cleared at startup.
+    fn zero_pages(&self) -> Vec<u32> {
+        self.far_pages.iter().filter(|(_, b, _)| Self::zero_page(b)).map(|(p, _, _)| *p).collect()
     }
 }
 
