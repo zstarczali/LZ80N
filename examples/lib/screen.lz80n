@@ -1,0 +1,16 @@
+-- lib/screen.lz80n -- text helpers for modules.lz80n
+
+-- a title in the middle of the top row
+function title(string s)
+    cls()
+    at(0, (40 - len(s)) / 2)
+    ink(BRIGHT_YELLOW)
+    write(s)
+end
+
+-- the status line at the bottom
+function status(word bounces)
+    at(31, 1)
+    ink(BRIGHT_CYAN)
+    write("bounces: ", bounces, "    ")
+end

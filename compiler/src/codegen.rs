@@ -123,6 +123,8 @@ pub struct Options {
     pub optimize: bool,
     /// Directory that relative asset paths are resolved against.
     pub base_dir: std::path::PathBuf,
+    /// Directory of every source file (by `Pos::file`) for relative paths.
+    pub file_dirs: Vec<std::path::PathBuf>,
     /// Put every function into its own code page (tests of code banking).
     pub bank_all: bool,
 }
@@ -178,6 +180,7 @@ struct Gen {
     /// Compiled functions, kept apart so they can be banked: (key, label, code).
     fn_chunks: Vec<(String, String, String)>,
     base_dir: std::path::PathBuf,
+    file_dirs: Vec<std::path::PathBuf>,
 }
 
 const INTRINSICS: &[&str] = &[
@@ -527,6 +530,7 @@ impl Gen {
     // ----------------------------------------------------------- top level
     fn run(&mut self, prog: &Program, opts: &Options) {
         self.base_dir = opts.base_dir.clone();
+        self.file_dirs = opts.file_dirs.clone();
         for (n, v) in builtin_consts() {
             self.globals.insert(n, Sym::Const(v));
         }
@@ -625,7 +629,8 @@ impl Gen {
 
     fn declare_asset(&mut self, name: &str, path: &str, image: bool, pos: Pos) -> R<()> {
         self.check_new_name(name, pos)?;
-        let full = self.base_dir.join(path);
+        // relative to the file that declares the asset
+        let full = self.file_dirs.get(pos.file as usize).unwrap_or(&self.base_dir).join(path);
         let label = format!("a_{name}");
         if image {
             let img = crate::assets::load_image(&full).map_err(|e| Diag::new(pos, e))?;
