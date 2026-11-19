@@ -565,3 +565,14 @@ $FDFC..       stack (grows down)
 4. `bank` blocks, far pointers, banked calls, larger programs (MMU).
 5. Sound: 8-bit DAC sample playback, music import (PT3 / Vortex Tracker).
 6. An IR between the AST and the backend, register allocation.
+
+## Source files
+
+* `include "path"` (top level only) is expanded on the token stream before
+  parsing (`include.rs`). Paths are relative to the including file; each
+  canonical path is included once (the main file counts). Tokens carry
+  `Pos::file` (0 = main); diagnostics in other files get `Diag::file`.
+  Asset paths resolve against the declaring file's directory
+  (`Options::file_dirs`). The standard library detection scans the text of
+  all files.
+

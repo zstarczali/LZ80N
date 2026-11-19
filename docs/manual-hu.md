@@ -47,27 +47,17 @@ specifikáció: [`spec.md`](spec.md).
 
 ### 1.1 Amire szükséged van
 
-* **Rust** (stable) a fordító lefordításához.
-* **SjASMPlus 1.24.0**: az assembler, amely a generált kódból `.nex` fájlt
-  készít. Egy példány a `tools/sjasmplus` mappában van, a fordító ott
-  megtalálja.
+* Az **lz80nc** fordító és az **SjASMPlus 1.24.0** assembler, amely a
+  generált kódból `.nex` fájlt készít. A Windows, macOS és Linux release
+  csomagok mindkettőt tartalmazzák; a fordító a saját mappájában megtalálja
+  az assemblert. (Forrásból fordítás: lásd `README.md`.)
 * Egy **ZX Spectrum Next** (3.0-s vagy újabb core) vagy a **CSpect** emulátor.
 
 Az LZ80N kizárólag a Nextet célozza. Nincs 48K-s vagy 128K-s kompatibilitási
 mód. A program 28 MHz-re kapcsolja a processzort, és közvetlenül használja a
 Next hardverét (tilemap, Layer 2, sprite-ok, zxnDMA, copper).
 
-### 1.2 A fordító lefordítása
-
-```powershell
-cd compiler
-cargo build --release
-cargo test                 # nem kötelező: lefuttatja a teszteket (sjasmplus kell hozzá)
-```
-
-A fordító helye: `compiler/target/release/lz80nc` (Windowson `lz80nc.exe`).
-
-### 1.3 Egy program fordítása
+### 1.2 Egy program fordítása
 
 ```powershell
 lz80nc examples/hello.lz80n            # hello.asm és hello.nex készül
@@ -81,12 +71,12 @@ lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
 A hibák formája `fájl:sor:oszlop: error: üzenet`. A fordító egy futásban annyi
 hibát jelez, amennyit csak talál.
 
-### 1.4 Futtatás
+### 1.3 Futtatás
 
 * **CSpect**: `CSpect.exe -zxnext -w3 hello.nex`
 * **Next**: másold a `.nex` fájlt az SD-kártyára, és nyisd meg a Browserben.
 
-### 1.5 A projekt felépítése
+### 1.4 A projekt felépítése
 
 ```
 compiler/      a Rust fordító (lexer, parser, kódgenerátor, runtime, tesztek)
@@ -180,7 +170,7 @@ jelzi: `` `név` is a reserved name ``.
 
 `and` `or` `not` `if` `then` `elseif` `else` `end` `while` `do` `for`
 `function` `return` `break` `const` `var` `true` `false` `asm` `struct`
-`class` `asset` `interrupt` `far`
+`class` `asset` `interrupt` `far` `include`
 
 **Típusnevek és a `self`**
 
@@ -217,6 +207,38 @@ egy változó nem kaphatja egy függvény vagy típus nevét.
 **Struktúrán és osztályon belül szabad.** A mező- és metódusnevek a saját
 típusukhoz tartoznak, így a kulcsszavakon kívül bármi lehet a nevük: egy
 osztálynak lehet `line` mezője vagy `update()` metódusa.
+
+### 3.6 Több forrásfájl: `include`
+
+A program több fájlra bontható. Az `include "fájl"` egy másik forrásfájlt
+illeszt be a beillesztő fájl legfelső szintjén:
+
+```lua
+-- game.lz80n
+include "lib/screen.lz80n"     -- title(), status()
+include "lib/enemies.lz80n"    -- az Enemy osztály
+
+title("My game")
+```
+
+* Az útvonal az `include`-ot tartalmazó fájlhoz képest relatív (a `lib/`
+  mappában lévő fájl a szomszédjait így éri el: `include "other.lz80n"`).
+* Minden fájl **egyszer** kerül be: ugyanannak a fájlnak a második
+  `include`-ja kimarad. A fájlok így maguk is beilleszthetik, amire
+  szükségük van, és akár kölcsönösen is hivatkozhatnak egymásra.
+* Az `include` csak a fájl legfelső szintjén állhat, függvényen, osztályon
+  vagy blokkon belül nem. A beillesztett fájlban bármi lehet, ami egy
+  programban: függvények, osztályok, globális változók, konstansok,
+  erőforrások és legfelső szintű utasítások (ezek ott futnak le, ahol az
+  `include` áll).
+* Az erőforrások útvonala (`asset x = "..."`) az erőforrást deklaráló
+  fájlhoz képest relatív.
+* Minden egyetlen programmá áll össze, egyetlen névtérrel: az egyik fájlban
+  deklarált név az utána következő összes fájlban látszik, és ugyanaz a név
+  két fájlban hiba. A hibaüzenet megnevezi a fájlt:
+  `lib/enemies.lz80n:12:5: error: ...`
+* A `modules.lz80n` példa a `lib/screen.lz80n` és `lib/ball.lz80n` fájlokat
+  használja.
 
 ---
 
@@ -1346,6 +1368,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
 | `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
 | `banks.lz80n` | `far` tömbök: 16 KB-os barlangtérkép memóriabankokban |
+| `modules.lz80n` | program három fájlban: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |

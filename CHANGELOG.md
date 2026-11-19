@@ -15,6 +15,8 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
 * `if / elseif / else`, `while`, `for` with step, `break`; functions with
   return values (also strings); structs and classes with methods.
 * `interrupt frame` and `interrupt raster(n)` handlers; inline `asm`.
+* `include "file.lz80n"`: programs in several source files (paths relative
+  to the including file, every file included once).
 * Reserved words and standard library names are reserved in every program.
 
 **Libraries**
@@ -36,5 +38,5 @@ compiles to native Z80N code for the ZX Spectrum Next (`.nex` files).
   code pages automatically; big data goes into `far` arrays.
 * Test suite running the compiled programs in a built-in Z80N emulator.
 
-**Examples**: 17 programs in `examples/`, from `hello.lz80n` to the
+**Examples**: 18 programs in `examples/`, from `hello.lz80n` to the
 `shooter.lz80n` space shooter.

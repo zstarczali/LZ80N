@@ -47,26 +47,17 @@ The compact technical specification is [`spec.md`](spec.md).
 
 ### 1.1 What you need
 
-* **Rust** (stable) to build the compiler.
-* **SjASMPlus 1.24.0**: the assembler that turns the generated code into a
-  `.nex` file. A copy is in `tools/sjasmplus`, and the compiler finds it there.
+* **lz80nc**, the compiler, and **SjASMPlus 1.24.0**, the assembler that
+  turns the generated code into a `.nex` file. The release packages for
+  Windows, macOS and Linux contain both; the compiler finds the assembler
+  next to itself. (Building from source: see `README.md`.)
 * A **ZX Spectrum Next** (core 3.0 or later) or the **CSpect** emulator.
 
 LZ80N targets the Next only. There is no 48K or 128K compatibility mode. The
 program switches the CPU to 28 MHz and uses Next hardware (tilemap, Layer 2,
 sprites, zxnDMA, copper) directly.
 
-### 1.2 Building the compiler
-
-```powershell
-cd compiler
-cargo build --release
-cargo test                 # optional: runs the test suite (needs sjasmplus)
-```
-
-The compiler is `compiler/target/release/lz80nc` (`lz80nc.exe` on Windows).
-
-### 1.3 Compiling a program
+### 1.2 Compiling a program
 
 ```powershell
 lz80nc examples/hello.lz80n            # writes hello.asm and hello.nex
@@ -80,12 +71,12 @@ lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
 Errors are reported as `file:line:column: error: message`. The compiler
 reports as many errors as it can find in one run.
 
-### 1.4 Running
+### 1.3 Running
 
 * **CSpect**: `CSpect.exe -zxnext -w3 hello.nex`
 * **Next**: copy the `.nex` file to the SD card and open it in the Browser.
 
-### 1.5 Project layout
+### 1.4 Project layout
 
 ```
 compiler/      the Rust compiler (lexer, parser, code generator, runtime, tests)
@@ -179,7 +170,7 @@ parameters, loop variables, types or assets. The compiler reports
 
 `and` `or` `not` `if` `then` `elseif` `else` `end` `while` `do` `for`
 `function` `return` `break` `const` `var` `true` `false` `asm` `struct`
-`class` `asset` `interrupt` `far`
+`class` `asset` `interrupt` `far` `include`
 
 **Type names and `self`**
 
@@ -216,6 +207,36 @@ names: a variable cannot have the name of a function or a type.
 **Free inside a struct or class.** Field and method names belong to their
 type, so they may be any name except keywords: a class can have a field
 `line` or a method `update()`.
+
+### 3.6 Several source files: `include`
+
+A program can be split into several files. `include "file"` pastes another
+source file in, at the top level of the including file:
+
+```lua
+-- game.lz80n
+include "lib/screen.lz80n"     -- title(), status()
+include "lib/enemies.lz80n"    -- the Enemy class
+
+title("My game")
+```
+
+* The path is relative to the file that contains the `include` (so a file
+  in `lib/` includes its neighbours as `include "other.lz80n"`).
+* Every file is included **once**: a second `include` of the same file is
+  skipped. Files can therefore include what they need themselves, and two
+  files may even include each other.
+* `include` is allowed only at the top level of a file, not inside a
+  function, class or block. The included file may contain anything a
+  program can: functions, classes, globals, constants, assets and top-level
+  statements (these run where the `include` stands).
+* Asset paths (`asset x = "..."`) are relative to the file that declares
+  the asset.
+* Everything ends up in one program with one namespace: a name declared in
+  one file is visible in all files after it, and the same name declared in
+  two files is an error. Errors name the file they are in:
+  `lib/enemies.lz80n:12:5: error: ...`
+* The example `modules.lz80n` uses `lib/screen.lz80n` and `lib/ball.lz80n`.
 
 ---
 
@@ -1331,6 +1352,7 @@ register allocation.
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2, transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `modules.lz80n` | a program in three files: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `sprites.lz80n` | hardware sprites, PNG assets |

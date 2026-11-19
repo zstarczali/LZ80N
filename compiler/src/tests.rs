@@ -2065,3 +2065,81 @@ end
     expect("r_auto_bank", &src, &format!("{v}
 "));
 }
+
+/// Write `files` into a fresh temp folder and compile its `main.lz80n`.
+fn include_compile(name: &str, files: &[(&str, &str)]) -> (PathBuf, Result<String, Vec<crate::diag::Diag>>) {
+    let dir = std::env::temp_dir().join(format!("lz80nc_inc_{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in files {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, text).unwrap();
+    }
+    let main = dir.join("main.lz80n");
+    let src = std::fs::read_to_string(&main).unwrap();
+    let r = crate::compile_main(&src, Some(&main), "t.nex", true, &dir, false);
+    (dir, r)
+}
+
+#[test]
+fn include_files_once_relative_paths() {
+    // lib/b includes "a.lz80n" relative to lib/; a is included only once;
+    // including main.lz80n again is ignored
+    let (_, r) = include_compile(
+        "once",
+        &[
+            ("main.lz80n", "include \"lib/a.lz80n\"\ninclude \"lib/b.lz80n\"\ninclude \"main.lz80n\"\nprint(twice(add(2, 3)))\n"),
+            ("lib/a.lz80n", "function add(byte x, byte y) -> byte\n    return x + y\nend\n"),
+            ("lib/b.lz80n", "include \"a.lz80n\"\nfunction twice(byte x) -> byte\n    return add(x, x)\nend\n"),
+        ],
+    );
+    let asm = r.unwrap_or_else(|e| panic!("{:?}", e.iter().map(|d| d.to_string()).collect::<Vec<_>>()));
+    assert!(asm.contains("f_twice") || asm.contains("twice"));
+    // the program runs: same code through the normal test path
+    expect(
+        "include_run",
+        "function add(byte x, byte y) -> byte\n    return x + y\nend\nfunction twice(byte x) -> byte\n    return add(x, x)\nend\nprint(twice(add(2, 3)))\n",
+        "10\n",
+    );
+}
+
+#[test]
+fn include_errors_name_the_file() {
+    // an error inside an included file reports that file
+    let (_, r) = include_compile(
+        "err",
+        &[("main.lz80n", "include \"part.lz80n\"\nprint(1)\n"), ("part.lz80n", "byte a = 1\n\nbyte a = 2\n")],
+    );
+    let e = r.unwrap_err();
+    assert!(e[0].file.as_deref().unwrap().ends_with("part.lz80n"), "{:?}", e[0].file);
+    assert_eq!(e[0].pos.line, 3);
+    // a missing file
+    let (_, r) = include_compile("missing", &[("main.lz80n", "include \"nope.lz80n\"\n")]);
+    let e = r.unwrap_err();
+    assert!(e[0].msg.contains("cannot open") && e[0].file.is_none() && e[0].pos.line == 1, "{}", e[0]);
+    // only at the top level
+    let (_, r) = include_compile(
+        "nested",
+        &[("main.lz80n", "function f()\n    include \"x.lz80n\"\nend\n"), ("x.lz80n", "print(1)\n")],
+    );
+    assert!(r.unwrap_err()[0].msg.contains("top level"));
+    // a syntax error in an included file
+    let (_, r) = include_compile("syntax", &[("main.lz80n", "include \"s.lz80n\"\n"), ("s.lz80n", "print(1\n")]);
+    let e = r.unwrap_err();
+    assert!(e[0].file.as_deref().unwrap().ends_with("s.lz80n"));
+}
+
+#[test]
+fn include_assets_relative_to_their_file() {
+    let png = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/assets/badge.png");
+    let dir = std::env::temp_dir().join("lz80nc_inc_asset_src");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("gfx/pics")).unwrap();
+    std::fs::copy(&png, dir.join("gfx/pics/badge.png")).unwrap();
+    std::fs::write(dir.join("gfx/pictures.lz80n"), "asset badge = image(\"pics/badge.png\")\n").unwrap();
+    std::fs::write(dir.join("main.lz80n"), "include \"gfx/pictures.lz80n\"\nlayer2_visible(true)\ndraw_image(badge, 10, 10)\n").unwrap();
+    let main = dir.join("main.lz80n");
+    let src = std::fs::read_to_string(&main).unwrap();
+    let r = crate::compile_main(&src, Some(&main), "t.nex", true, &dir, false);
+    assert!(r.is_ok(), "{:?}", r.err().map(|e| e.iter().map(|d| d.to_string()).collect::<Vec<_>>()));
+}

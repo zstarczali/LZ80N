@@ -9,8 +9,6 @@ Z80N machine code and packs it into a .nex file that runs on the Next or in
 an emulator. No interpreter, no virtual machine, no garbage collector.
 
 Home page and source code:  https://github.com/zstarczali/LZ80N
-(A short Hungarian guide is at the end of this file -- magyar leírás a
-fájl végén.)
 
 
 CONTENTS
@@ -24,7 +22,6 @@ CONTENTS
   7. Examples
   8. Troubleshooting
   9. Licences
- 10. Magyar leírás
 
 
 1. WHAT IS IN THIS PACKAGE
@@ -37,7 +34,8 @@ CONTENTS
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
                              as Markdown text
-  examples/                  17 example programs and their pictures
+  examples/                  18 example programs, their pictures and
+                             the include files of modules.lz80n (lib/)
   benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
   CHANGELOG.md               what is new in each version
@@ -186,6 +184,7 @@ environment variable, sjasmplus next to lz80nc, sjasmplus on the PATH.
     byte map[24][32]               -- arrays, up to 4 dimensions
     byte table[] = {1, 2, 4, 8}    -- with an initialiser list
     far byte level[40000]          -- big data in the Next's memory banks
+    include "lib/enemies.lz80n"    -- another source file (top level, once)
 
     if score > 100 and alive then ... elseif ... else ... end
     while lives > 0 do ... end
@@ -251,6 +250,7 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     tables     array initialisers
     life       Game of Life on a 2-D array
     banks      far arrays: a 16 KB cave map in memory banks
+    modules    a program in several files (include)
     shooter    a little space shooter (O/P/Q/A or joystick, SPACE to fire)
 
 
@@ -277,43 +277,3 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
 LZ80N is free software under the MIT licence (see LICENSE).
 SjASMPlus is (c) its authors, BSD licence (see licenses/).
 https://github.com/z00m128/sjasmplus
-
-
-10. MAGYAR LEÍRÁS
------------------
-
-Az LZ80N egy statikusan típusos, Lua-ihletésű programozási nyelv a
-ZX Spectrum Nextre. Az lz80nc fordító a forráskódot natív Z80N gépi kóddá
-fordítja, és .nex fájlba csomagolja, ami a Nexten vagy emulátorban fut.
-
-A csomag tartalma: a fordító (lz80nc), az assembler (sjasmplus, a fordító
-magától megtalálja ugyanabban a mappában), a kézikönyvek PDF-ben
-(docs/manual-hu.pdf a magyar), 17 példaprogram és ez a leírás.
-
-Telepítés: csomagold ki bárhová.
-  * Windows: kicsomagolás után  .\lz80nc --version  (SmartScreen
-    figyelmeztetésnél: "További információ" -> "Futtatás mindenképp").
-    ARM-os Windowson az sjasmplus.exe x64-es, a Windows 11 emulálja.
-  * macOS: egyszer futtasd a csomag mappájában:
-        xattr -dr com.apple.quarantine .
-    Apple Silicon (M1-M4) gépen a macos-arm64, Intel Macen a macos-x64
-    csomag kell.
-  * Linux: tar xzf ...; ./lz80nc --version  (x86_64 = x64, aarch64 = arm64;
-    glibc 2.35 vagy újabb kell).
-
-Első program: mentsd el hello.lz80n néven:
-
-    ink(BRIGHT_YELLOW)
-    print("Szia, Next!")
-
-majd:  lz80nc hello.lz80n   -> hello.nex
-
-Futtatás: másold a .nex fájlt az SD-kártyára és indítsd a Browserből, vagy
-CSpectben:  CSpect.exe -w3 -zxnext -mmc=./ hello.nex
-
-Parancssor: -o kimenet, -S csak assembly, -O0 optimalizálás nélkül,
---bank-all minden függvény külön kódlapon, --sjasmplus ÚTVONAL,
---version verzió.
-
-Részletes leírás: docs/manual-hu.pdf. Hibák, kérdések:
-https://github.com/zstarczali/LZ80N
