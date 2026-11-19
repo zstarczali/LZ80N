@@ -70,7 +70,8 @@ enum Sym {
     /// string constant
     SConst(String),
     /// Embedded data; `patterns` is set for sprite pattern assets.
-    Asset { label: String, patterns: Option<u32>, image: Option<(u32, u32)> },
+    /// `sample`: a .wav sound (descriptor at `label`)
+    Asset { label: String, patterns: Option<u32>, image: Option<(u32, u32)>, sample: bool },
     /// `far` array: elements of `ty` from 8K page `page` on.
     Far { ty: Ty, len: u32, sub: [u32; 3], page: u32 },
 }
@@ -215,6 +216,8 @@ struct Gen {
     uses_long: bool,
     /// first 8K page above the Layer 2 buffers (28, or 36 for 320/640 modes)
     first_page: u32,
+    /// sample playback (DAC) is used
+    uses_samples: bool,
 }
 
 const INTRINSICS: &[&str] = &[
@@ -224,6 +227,7 @@ const INTRINSICS: &[&str] = &[
     "abs", "min", "max", "clamp", "sqrt", "sin", "cos", "atan2", "round",
     "len", "sub", "find", "val", "asc", "chr", "str", "upper", "lower",
     "ay_write", "note_period", "draw_image", "image_width", "image_height",
+    "sample_play", "sample_loop", "sample_stop", "sample_playing",
 ];
 
 /// Built-in constants. Keys are encoded as `row * 8 + bit` of the
@@ -765,12 +769,31 @@ impl Gen {
             }
             let size = Some((img.width, img.height));
             self.images.push((label.clone(), img, first));
-            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: size });
+            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: size, sample: false });
+            return Ok(());
+        }
+        if full.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+            // a sound: its bytes in 8K pages, a small descriptor in the program
+            let smp = crate::assets::load_wav(&full).map_err(|e| Diag::new(pos, e))?;
+            let pages: Vec<Vec<u8>> = smp.bytes.chunks(8192).map(|c| c.to_vec()).collect();
+            let first = self.alloc_pages(pages.len() as u32, pos)?;
+            for (k, pg) in pages.into_iter().enumerate() {
+                self.far_pages.push((first + k as u32, pg, format!("sample {name}")));
+            }
+            let n = smp.bytes.len();
+            let _ = writeln!(
+                self.data,
+                "{label}: db {first},{}\n    dw {}\n    db {}",
+                smp.prescaler,
+                n & 0xFFFF,
+                n >> 16
+            );
+            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: None, sample: true });
             return Ok(());
         }
         let a = crate::assets::load(&full).map_err(|e| Diag::new(pos, e))?;
         self.assets.push((label.clone(), a.bytes));
-        self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns, image: None });
+        self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns, image: None, sample: false });
         Ok(())
     }
 
@@ -1536,6 +1559,7 @@ impl Gen {
         let frame = self.irqs.iter().find(|i| i.0.is_none()).map(|i| i.1.clone());
         // background sound driver of the sound module
         let driver = self.funcs.get("sound_tick").map(|f| f.label.clone());
+        let samples = self.uses_samples;
         let mut lines: Vec<(u16, String)> = self.irqs.iter().filter_map(|i| i.0.map(|n| (n, i.1.clone()))).collect();
         let mut isr = String::from("__isr:\n    push af\n    push bc\n    push de\n    push hl\n");
         // 32-bit arithmetic and recursive calls hold values in the shadow
@@ -1556,6 +1580,9 @@ impl Gen {
             isr.push_str("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n");
             if let Some(d) = &driver {
                 isr.push_str(&format!("    call {d}\n"));
+            }
+            if samples {
+                isr.push_str("    call rt_smp_tick\n");
             }
             if let Some(f) = &frame {
                 isr.push_str(&format!("    call {f}\n"));
@@ -2682,6 +2709,8 @@ impl Gen {
                     Some(Ty::Word)
                 } else if n == "point" {
                     Some(Ty::Byte)
+                } else if n == "sample_playing" {
+                    Some(Ty::Bool)
                 } else if matches!(n.as_str(), "addr" | "random" | "image_width" | "image_height" | "layer2_width" | "layer2_height") {
                     Some(Ty::Word)
                 } else if n == "any_key" {
@@ -4578,6 +4607,33 @@ impl Gen {
                 self.e("call rt_sprite_upload");
                 return Ok(None);
             }
+            "sample_play" | "sample_loop" => {
+                argc(1)?;
+                let label = match &args[0].kind {
+                    ExprKind::Name(n) => match self.lookup(n) {
+                        Some(Sym::Asset { label, sample: true, .. }) => label,
+                        _ => return Err(Diag::new(args[0].pos, format!("`{n}` is not a sample (`asset name = \"file.wav\"`)"))),
+                    },
+                    _ => return Err(Diag::new(args[0].pos, "expected the name of a sample asset")),
+                };
+                self.uses_samples = true;
+                self.e(&format!("ld hl,{label}"));
+                self.e(if name == "sample_loop" { "ld a,1" } else { "xor a" });
+                self.e("call rt_smp_play");
+                return Ok(None);
+            }
+            "sample_stop" => {
+                argc(0)?;
+                self.uses_samples = true;
+                self.e("call rt_smp_stop");
+                return Ok(None);
+            }
+            "sample_playing" => {
+                argc(0)?;
+                self.uses_samples = true;
+                self.e("ld a,(rt_smp_on)");
+                return Ok(Some(Ty::Bool));
+            }
             "draw_image" => {
                 argc(3)?;
                 let (label, _, _) = self.image_arg(&args[0])?;
@@ -4964,6 +5020,9 @@ impl Gen {
         }
         if self.uses_recursion {
             out.push_str(runtime::RECURSION);
+        }
+        if self.uses_samples {
+            out.push_str(runtime::SAMPLES);
         }
         if self.uses_long {
             out.push_str(&runtime::long());

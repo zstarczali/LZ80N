@@ -2584,3 +2584,64 @@ fn run_large_main_program() {
     assert!(asm.contains("mp_1:"), "parts of the main program moved out");
     expect("r_big_main", &src, &format!("{v} 3\n"));
 }
+
+/// A .wav file in a temp folder, for `asset` declarations in tests.
+fn temp_wav(name: &str, rate: u32, samples: &[u8]) -> String {
+    let dir = std::env::temp_dir().join("lz80nc_wav");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(format!("{name}.wav"));
+    std::fs::write(&p, crate::assets::encode_wav(rate, samples)).unwrap();
+    p.display().to_string().replace('\\', "/")
+}
+
+#[test]
+fn run_sample_playback() {
+    // 5000 bytes: more than the 4K ring buffer, so it is refilled
+    let s: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let path = temp_wav("ramp", 15625, &s);
+    let src = format!(
+        "asset boom = \"{path}\"
+layer2_visible(true)
+sample_play(boom)
+print(sample_playing())
+word n = 0
+word t0 = frames()
+while sample_playing() do
+    layer2_clear(byte(n))      -- the DMA is busy: done by the CPU
+    vsync()
+    n += 1
+end
+word t = frames() - t0
+print(t > 15, t < 40, point(10, 10) == byte(n - 1))
+"
+    );
+    let Some((out, cpu)) = run_with("smp_play", &src, |_| {}) else { return };
+    assert_eq!(out, "true\ntrue true true\n");
+    assert!(cpu.dac.len() >= 5000 + 100, "{} bytes reached the DAC", cpu.dac.len());
+    assert_eq!(&cpu.dac[..5000], &s[..], "the sample, in order");
+    assert!(cpu.dac[5000..5100].iter().all(|&b| b == 0x80), "then silence");
+    assert_eq!(cpu.nextreg[8] & 8, 8, "DACs enabled");
+}
+
+#[test]
+fn run_sample_loop_and_stop() {
+    let s: Vec<u8> = (0..300u32).map(|i| (i % 200 + 20) as u8).collect();
+    let path = temp_wav("short", 8000, &s);
+    let src = format!(
+        "asset hum = \"{path}\"
+sample_loop(hum)
+for i = 1, 20 do vsync() end
+print(sample_playing())
+sample_stop()
+print(sample_playing())
+"
+    );
+    let Some((out, cpu)) = run_with("smp_loop", &src, |_| {}) else { return };
+    assert_eq!(out, "true\nfalse\n");
+    // 8 kHz for 20 frames: ~3200 bytes, the 300-byte sample over and over
+    assert!(cpu.dac.len() > 2500, "{} bytes", cpu.dac.len());
+    for (i, &b) in cpu.dac.iter().take(2400).enumerate() {
+        assert_eq!(b, s[i % 300], "byte {i}");
+    }
+    assert!(err("asset x = \"ships.png\"\nsample_play(x)").contains("not a sample"));
+}

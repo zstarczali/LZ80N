@@ -1553,10 +1553,35 @@ rt_dma_go:
     ld (rt_dma_wr1),a
     ld (rt_dma_len),bc
     ld (rt_dma_dst),de
+    ld a,(rt_smp_on)
+    or a
+    jr nz,.cpu
     ld hl,rt_dma_prog
     ld bc,(rt_dma_prog_len << 8) | $6B
     otir
     ret
+
+; the DMA is playing a sample: copy / fill with the CPU instead
+.cpu:
+    ld hl,(rt_dma_src)
+    ld a,(rt_dma_wr1)
+    cp %01010100            ; incrementing source: a copy
+    jr z,.copy
+    ld a,(hl)               ; fill: the value
+    ex de,hl
+    ld (hl),a
+    dec bc
+    ld a,b
+    or c
+    ret z
+    ld d,h
+    ld e,l
+    inc de
+.copy:
+    ldir
+    ret
+
+rt_smp_on:  db 0            ; a sample is playing (the DMA is busy)
 
 rt_dma_prog:
     db %10000011            ; WR6: disable DMA
@@ -2533,4 +2558,245 @@ rt_print_fixed16:
     dec c
     jr nz,.d2
     ret
+"#;
+
+/// Sample playback: the zxnDMA plays a 4K ring buffer at $7000 (two 2K
+/// halves, bank 5) to the Specdrum DAC (port $DF) at 875 kHz / prescaler,
+/// restarting at its end; the frame interrupt refills the half that has
+/// just been played from the sample's 8K pages.
+pub const SAMPLES: &str = r#"
+; ---- samples ----
+SMP_BUF equ $7000
+
+; HL = descriptor (db first page, prescaler; dw length bits 0-15;
+; db length bits 16-23), A = 1: loop
+rt_smp_play:
+    push af
+    push hl
+    call rt_smp_stop
+    pop hl
+    pop af
+    ld (rt_smp_loop),a
+    ld (rt_smp_desc),hl
+    inc hl
+    ld a,(hl)
+    ld (rt_smp_presc),a
+    call rt_smp_load
+    xor a
+    ld (rt_smp_silent),a
+    ld (rt_smp_next),a
+    call rt_smp_fill        ; half 0
+    ld a,1
+    call rt_smp_fill        ; half 1
+    ; NR $08 bit 3: the 8-bit DACs on
+    ld bc,$243B
+    ld a,8
+    out (c),a
+    inc b
+    in a,(c)
+    or 8
+    nextreg $08,a
+    ld hl,rt_smp_prog
+    ld bc,(rt_smp_prog_len << 8) | $6B
+    otir
+    ld a,1
+    ld (rt_smp_on),a
+    ret
+
+rt_smp_stop:
+    xor a
+    ld (rt_smp_on),a
+    ld a,%10000011          ; WR6: disable DMA
+    out ($6B),a
+    ret
+
+; source position = start of the sample
+rt_smp_load:
+    ld hl,(rt_smp_desc)
+    ld a,(hl)
+    ld (rt_smp_page),a
+    inc hl
+    inc hl
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld a,(hl)
+    ld (rt_smp_left),de
+    ld (rt_smp_left+2),a
+    ld hl,0
+    ld (rt_smp_off),hl
+    ret
+
+; HL = min(HL, DE), unsigned
+rt_smp_min:
+    or a
+    sbc hl,de
+    add hl,de
+    ret c
+    ex de,hl
+    ret
+
+; A = half (0 / 1): fill it with the next 2K of the sample (the rest of
+; it with silence once the sample has ended and does not loop)
+rt_smp_fill:
+    ld de,SMP_BUF
+    or a
+    jr z,.h0
+    ld de,SMP_BUF+2048
+.h0:
+    ld bc,2048
+    ld a,(rt_farpage)
+    push af
+.loop:
+    ld a,b
+    or c
+    jp z,.done
+    ld hl,(rt_smp_left)
+    ld a,(rt_smp_left+2)
+    or h
+    or l
+    jr nz,.data
+    ld a,(rt_smp_loop)
+    or a
+    jr z,.silence
+    push bc
+    push de
+    call rt_smp_load
+    pop de
+    pop bc
+    jp .loop
+.silence:
+    ld h,d
+    ld l,e
+    ld (hl),$80
+    dec bc
+    ld a,b
+    or c
+    jr z,.quiet
+    inc de
+    ldir
+.quiet:
+    ld hl,rt_smp_silent
+    inc (hl)
+    jp .done
+.data:
+    ld (rt_smp_need),bc
+    ld (rt_smp_dst),de
+    ld hl,8192
+    ld de,(rt_smp_off)
+    or a
+    sbc hl,de               ; room left in the page
+    ld de,(rt_smp_need)
+    call rt_smp_min
+    ld a,(rt_smp_left+2)
+    or a
+    jr nz,.nok
+    ld de,(rt_smp_left)
+    call rt_smp_min
+.nok:
+    ld b,h
+    ld c,l                  ; BC = bytes in this step
+    ld a,(rt_smp_page)
+    ld (rt_farpage),a       ; (an interrupt restores this page)
+    nextreg $51,a
+    ld hl,(rt_smp_off)
+    ld de,$2000
+    add hl,de
+    ld de,(rt_smp_dst)
+    push bc
+    ldir
+    pop bc
+    ld (rt_smp_dst),de
+    ld hl,(rt_smp_off)
+    add hl,bc
+    ld a,h
+    cp $20
+    jr nz,.same
+    ld hl,0
+    ld a,(rt_smp_page)
+    inc a
+    ld (rt_smp_page),a
+.same:
+    ld (rt_smp_off),hl
+    ld hl,(rt_smp_left)     ; left -= BC (24 bits)
+    or a
+    sbc hl,bc
+    ld (rt_smp_left),hl
+    jr nc,.nb
+    ld hl,rt_smp_left+2
+    dec (hl)
+.nb:
+    ld hl,(rt_smp_need)
+    or a
+    sbc hl,bc
+    ld b,h
+    ld c,l
+    ld de,(rt_smp_dst)
+    xor a
+    ld (rt_smp_silent),a
+    jp .loop
+.done:
+    pop af
+    ld (rt_farpage),a
+    nextreg $51,a
+    ret
+
+; frame interrupt: refill the half the DMA has left
+rt_smp_tick:
+    ld a,(rt_smp_on)
+    or a
+    ret z
+    ld a,$BB                ; WR6: read mask follows
+    out ($6B),a
+    ld a,%00011000          ;   port A address
+    out ($6B),a
+    ld a,$A7                ; WR6: initiate read sequence
+    out ($6B),a
+    in a,($6B)              ; low byte
+    in a,($6B)              ; high byte
+    cp high(SMP_BUF+2048)
+    ld a,0
+    jr c,.h
+    inc a
+.h:
+    ld hl,rt_smp_next
+    cp (hl)
+    ret z                   ; the half to refill is still playing
+    ld a,(rt_smp_silent)
+    cp 2
+    jp nc,rt_smp_stop       ; the end has been played
+    ld a,(hl)
+    xor 1
+    ld (hl),a
+    xor 1
+    jp rt_smp_fill
+
+rt_smp_prog:
+    db %10000011            ; WR6: disable DMA
+    db %01111101            ; WR0: A->B, port A address + length follow
+    dw SMP_BUF
+    dw 4096
+    db %01010100            ; WR1: port A = memory, incrementing, timing follows
+    db %00000010            ;   2 cycles
+    db %01101000            ; WR2: port B = I/O, fixed, timing follows
+    db %00100010            ;   2 cycles, prescaler follows
+rt_smp_presc:
+    db 56                   ;   875 kHz / prescaler
+    db %11001101            ; WR4: burst mode, port B address follows
+    dw $00DF                ;   Specdrum DAC
+    db %10100010            ; WR5: restart at the end of the block
+    db %11001111            ; WR6: load
+    db %10000111            ; WR6: enable DMA
+rt_smp_prog_len equ $ - rt_smp_prog
+
+rt_smp_desc:   dw 0
+rt_smp_loop:   db 0
+rt_smp_page:   db 0
+rt_smp_off:    dw 0
+rt_smp_left:   ds 3
+rt_smp_need:   dw 0
+rt_smp_dst:    dw 0
+rt_smp_next:   db 0
+rt_smp_silent: db 0
 "#;

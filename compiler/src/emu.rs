@@ -61,6 +61,17 @@ pub struct Cpu {
     pub l2_port: u8,
     /// Bytes written to the zxnDMA port since the last "enable".
     dma_buf: Vec<u8>,
+    /// an /INT raised during the current instruction (a long block
+    /// instruction spans several lines; real hardware would interrupt it)
+    int_fresh: bool,
+    /// Bytes sent to the DAC (port $DF, by the CPU or the DMA).
+    pub dac: Vec<u8>,
+    /// A prescaled DMA transfer to the DAC: (start, length, position,
+    /// prescaler, restart at the end, T-state of the next byte)
+    smp: Option<(u16, u16, u16, u8, bool, u64)>,
+    /// zxnDMA read-back: a mask byte follows / bytes to be read
+    dma_mask_next: bool,
+    dma_read: std::collections::VecDeque<u8>,
     pub dma_transfers: u32,
     nr44_second: bool,
     /// AY chips: registers, selected chip and register.
@@ -124,6 +135,7 @@ impl Cpu {
             palettes: [[0; 256]; 8], pal_idx: 0,
             pages: std::collections::HashMap::new(), slot0: 0xFF, slot1: 0xFF, slot2: 10, l2_port: 0,
             dma_buf: Vec::new(), dma_transfers: 0, nr44_second: false,
+            dac: Vec::new(), smp: None, int_fresh: false, dma_mask_next: false, dma_read: std::collections::VecDeque::new(),
             iff: false, ei_delay: false, int_pending: false,
             ay: [[0; 16]; 3], ay_chip: 0, ay_reg: 0,
             t_states: 0, marks: Vec::new(), dma_bytes: 0, line_t: 0,
@@ -378,6 +390,7 @@ impl Cpu {
             0x243B => self.nr_sel = v,
             0x253B => self.write_nextreg(self.nr_sel, v),
             0x123B => self.l2_port = v,
+            p if p & 0xFF == 0xDF => self.dac.push(v),
             0xFFFD => {
                 if v & 0xFC == 0xFC {
                     if v & 3 != 0 {
@@ -401,15 +414,46 @@ impl Cpu {
     /// zxnDMA: understands the memory-to-memory program the runtime sends
     /// (WR6 disable, WR0 with address+length, WR1, WR2, WR4, WR5, load, enable).
     fn dma_write(&mut self, v: u8) {
+        if self.dma_mask_next {
+            self.dma_mask_next = false;
+            return;
+        }
         // parse by position (data bytes may equal command codes such as $87)
-        if self.dma_buf.is_empty() && v != 0x83 {
+        if self.dma_buf.is_empty() {
+            match v {
+                0xBB => self.dma_mask_next = true,
+                0xA7 => {
+                    // read sequence: the port A address (the only mask used)
+                    let a = self.smp.map_or(0, |(start, _, pos, ..)| start.wrapping_add(pos));
+                    self.dma_read.clear();
+                    self.dma_read.extend([a as u8, (a >> 8) as u8]);
+                }
+                0x83 => {
+                    self.smp = None;
+                    self.dma_buf.push(v);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.dma_buf.len() == 1 && v == 0x83 {
             return;
         }
         self.dma_buf.push(v);
-        if self.dma_buf.len() < 16 {
+        let n = self.dma_buf.len();
+        if n < 16 || (n == 16 && self.dma_buf[8] == 0x68) {
             return;
         }
         let b = std::mem::take(&mut self.dma_buf);
+        if n == 17 {
+            // memory -> I/O port (the DAC), burst mode with a prescaler
+            if b[1] == 0x7D && b[8] == 0x68 && b[16] == 0x87 && u16::from_le_bytes([b[12], b[13]]) & 0xFF == 0xDF {
+                let presc = b[10].max(1);
+                let next = self.t_states + self.dma_byte_t(presc);
+                self.smp = Some((u16::from_le_bytes([b[2], b[3]]), u16::from_le_bytes([b[4], b[5]]), 0, presc, b[14] & 0x20 != 0, next));
+            }
+            return;
+        }
         if b[1] != 0x7D || b[15] != 0x87 {
             return;
         }
@@ -426,8 +470,32 @@ impl Cpu {
         self.dma_transfers += 1;
     }
 
+    /// T-states per byte of a prescaled DMA transfer (875 kHz / prescaler).
+    fn dma_byte_t(&self, presc: u8) -> u64 {
+        presc as u64 * (4u64 << (self.nextreg[0x07] & 3))
+    }
+
+    /// Advance a prescaled DMA transfer to the DAC up to the current time.
+    fn run_sample_dma(&mut self) {
+        while let Some((start, len, pos, presc, restart, next)) = self.smp {
+            if self.t_states < next {
+                break;
+            }
+            let v = self.rd(start.wrapping_add(pos));
+            self.dac.push(v);
+            let pos = pos + 1;
+            let step = self.dma_byte_t(presc);
+            self.smp = match (pos >= len, restart) {
+                (false, _) => Some((start, len, pos, presc, restart, next + step)),
+                (true, true) => Some((start, len, 0, presc, restart, next + step)),
+                (true, false) => None,
+            };
+        }
+    }
+
     fn inp(&mut self, port: u16) -> u8 {
         match port {
+            p if p & 0xFF == 0x6B => self.dma_read.pop_front().unwrap_or(0),
             0x253B => self.nextreg[self.nr_sel as usize],
             p if p & 0xFF == 0x1F => self.kempston,
             p if p & 1 == 0 => {
@@ -456,11 +524,13 @@ impl Cpu {
             self.t_states += 19;
         }
         self.ei_delay = false;
+        self.int_fresh = false;
         if !self.halted {
             self.step()?;
         } else {
             self.t_states += 4;
         }
+        self.run_sample_dma();
         // a raster line is 224 T-states at 3.5 MHz, doubled per speed step
         self.line_t += self.t_states - t0;
         let per_line = 224u64 << (self.nextreg[0x07] & 3);
@@ -479,7 +549,9 @@ impl Cpu {
         self.line_state[l].0 = self.nextreg;
         self.line_state[l].1 = self.palettes;
         // an /INT not taken during its line is lost
-        self.int_pending = false;
+        if !self.int_fresh {
+            self.int_pending = false;
+        }
         self.line = (self.line + 1) % LINES;
         if self.line == FRAME_START_LINE {
             self.frame_count += 1;
@@ -488,11 +560,13 @@ impl Cpu {
             }
             if self.nextreg[0x22] & 4 == 0 {
                 self.int_pending = true;
+                self.int_fresh = true;
             }
         }
         let target = (((self.nextreg[0x22] & 1) as u16) << 8) | self.nextreg[0x23] as u16;
         if self.nextreg[0x22] & 2 != 0 && self.line == target {
             self.int_pending = true;
+            self.int_fresh = true;
         }
         self.run_copper();
     }

@@ -155,3 +155,115 @@ pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+/// A sound sample for the DAC: unsigned 8-bit mono, played at
+/// 875 kHz / `prescaler` by the zxnDMA.
+pub struct Sample {
+    pub prescaler: u8,
+    pub bytes: Vec<u8>,
+}
+
+/// The playback rate of a prescaler value.
+pub fn sample_rate(prescaler: u8) -> u32 {
+    875_000 / prescaler.max(1) as u32
+}
+
+/// Load a PCM .wav file (8 or 16 bit, mono or stereo). Rates from 4 kHz to
+/// 31.25 kHz are kept (to the nearest DMA rate); others are resampled to
+/// 15.6 kHz.
+pub fn load_wav(path: &Path) -> Result<Sample, String> {
+    let data = std::fs::read(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    wav_to_sample(&data).map_err(|e| format!("`{}`: {e}", path.display()))
+}
+
+pub fn wav_to_sample(data: &[u8]) -> Result<Sample, String> {
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err("not a .wav file".into());
+    }
+    let u16_at = |o: usize| u16::from_le_bytes([data[o], data[o + 1]]);
+    let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    let (mut fmt, mut pcm): (Option<(u16, u16, u32, u16)>, Option<&[u8]>) = (None, None);
+    let mut o = 12;
+    while o + 8 <= data.len() {
+        let size = u32_at(o + 4) as usize;
+        let body = &data[o + 8..(o + 8 + size).min(data.len())];
+        match &data[o..o + 4] {
+            b"fmt " if body.len() >= 16 => {
+                fmt = Some((u16::from_le_bytes([body[0], body[1]]), u16::from_le_bytes([body[2], body[3]]),
+                    u32::from_le_bytes([body[4], body[5], body[6], body[7]]), u16::from_le_bytes([body[14], body[15]])))
+            }
+            b"data" => pcm = Some(body),
+            _ => {}
+        }
+        o += 8 + size + (size & 1);
+    }
+    let _ = u16_at;
+    let (format, channels, rate, bits) = fmt.ok_or("no `fmt ` chunk")?;
+    let pcm = pcm.ok_or("no `data` chunk")?;
+    if format != 1 || !(bits == 8 || bits == 16) || channels == 0 {
+        return Err(format!("only uncompressed 8 or 16 bit PCM is supported (format {format}, {bits} bits)"));
+    }
+    // to unsigned 8-bit mono
+    let frame = channels as usize * bits as usize / 8;
+    let mono: Vec<u8> = pcm
+        .chunks_exact(frame)
+        .map(|f| {
+            let sum: i32 = (0..channels as usize)
+                .map(|c| {
+                    if bits == 8 {
+                        f[c] as i32 - 128
+                    } else {
+                        i16::from_le_bytes([f[2 * c], f[2 * c + 1]]) as i32 >> 8
+                    }
+                })
+                .sum();
+            (sum / channels as i32 + 128).clamp(0, 255) as u8
+        })
+        .collect();
+    if mono.is_empty() {
+        return Err("the sample is empty".into());
+    }
+    let (prescaler, bytes) = if (4000..=31250).contains(&rate) {
+        (((875_000 + rate / 2) / rate) as u8, mono)
+    } else {
+        // resample to 15.6 kHz (prescaler 56), linear interpolation
+        let p = 56u8;
+        let out_rate = sample_rate(p) as f64;
+        let n = ((mono.len() as f64) * out_rate / rate as f64).max(1.0) as usize;
+        let step = rate as f64 / out_rate;
+        let v = (0..n)
+            .map(|i| {
+                let x = i as f64 * step;
+                let k = x as usize;
+                let a = mono[k.min(mono.len() - 1)] as f64;
+                let b = mono[(k + 1).min(mono.len() - 1)] as f64;
+                (a + (b - a) * (x - k as f64)).round() as u8
+            })
+            .collect();
+        (p, v)
+    };
+    if bytes.len() >= 1 << 24 {
+        return Err("the sample is longer than 16 MB".into());
+    }
+    Ok(Sample { prescaler, bytes })
+}
+
+/// A .wav file (8-bit mono PCM) for tests.
+#[cfg(test)]
+pub fn encode_wav(rate: u32, samples: &[u8]) -> Vec<u8> {
+    let mut w = Vec::new();
+    w.extend(b"RIFF");
+    w.extend(&(36 + samples.len() as u32).to_le_bytes());
+    w.extend(b"WAVEfmt ");
+    w.extend(&16u32.to_le_bytes());
+    w.extend(&1u16.to_le_bytes());
+    w.extend(&1u16.to_le_bytes());
+    w.extend(&rate.to_le_bytes());
+    w.extend(&rate.to_le_bytes());
+    w.extend(&1u16.to_le_bytes());
+    w.extend(&8u16.to_le_bytes());
+    w.extend(b"data");
+    w.extend(&(samples.len() as u32).to_le_bytes());
+    w.extend(samples);
+    w
+}
