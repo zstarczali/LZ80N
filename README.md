@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/logo-square.png" alt="LZ80N logo" width="260">
+  <img src="assets/LZ80N Neon Rainbow Logo.png" alt="LZ80N logo" width="260">
 </p>
 
-<h1 align="center">LZ80N — The Next Language</h1>
+<h1 align="center">LZ80N - The Next Language</h1>
 
 <p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
 
