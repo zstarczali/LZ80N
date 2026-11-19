@@ -294,9 +294,10 @@ impl<'a> Lexer<'a> {
             let v: f64 = format!("{text}.{frac}")
                 .parse()
                 .map_err(|_| Diag::new(pos, format!("invalid number literal `{text}.{frac}`")))?;
-            let raw = (v * 256.0).round() as i64;
-            if raw > 32767 {
-                return Err(Diag::new(pos, format!("`{text}.{frac}` does not fit in `fixed` (-128 .. 127.99)")));
+            // raw 16.16; `fixed` (8.8) uses it rounded to 1/256
+            let raw = (v * 65536.0).round() as i64;
+            if raw > 0x7FFF_FFFF {
+                return Err(Diag::new(pos, format!("`{text}.{frac}` does not fit in `fixed16` (-32768 .. 32767.99)")));
             }
             return Ok(Tok::Fixed(raw));
         }

@@ -244,7 +244,6 @@ fn errors() {
     assert!(err("word w = 5\nbyte b = w").contains("narrow"));
     assert!(err("print(y)").contains("undefined variable"));
     assert!(err("if 1 then end").contains("bool"));
-    assert!(err("function f() -> byte\n return f()\nend\nprint(f())").contains("recursion"));
     assert!(err("break").contains("outside"));
     assert!(err("byte a[4]\na[4] = 1").contains("out of bounds"));
     assert!(err("byte x = 1\nbyte x = 2").contains("already declared"));
@@ -635,7 +634,6 @@ fn struct_errors() {
     assert!(err("Foo f").contains("unknown type"));
     assert!(err("class C\n function f()\n end\nend\nC c\nc.g()").contains("no method"));
     assert!(err("struct A\n byte x\nend\nstruct B\n byte x\nend\nA a\nB b\na = b").contains("expected a `A`"));
-    assert!(err("class C\n function f()\n self.f()\n end\nend\nC c\nc.f()").contains("recursion"));
 }
 
 /// Every example must compile, assemble and run (they loop forever, so we
@@ -2143,3 +2141,193 @@ fn include_assets_relative_to_their_file() {
     let r = crate::compile_main(&src, Some(&main), "t.nex", true, &dir, false);
     assert!(r.is_ok(), "{:?}", r.err().map(|e| e.iter().map(|d| d.to_string()).collect::<Vec<_>>()));
 }
+
+#[test]
+fn run_recursion() {
+    expect(
+        "rec_basic",
+        "function fact(word n) -> word
+    if n <= 1 then return 1 end
+    return n * fact(n - 1)
+end
+function fib(byte n) -> word
+    if n < 2 then return n end
+    return fib(n - 1) + fib(n - 2)
+end
+-- the arguments read the caller's parameters, crossed over
+function gcd(word a, word b) -> word
+    if b == 0 then return a end
+    return gcd(b, a % b)
+end
+-- mutual recursion
+function is_even(byte n) -> bool
+    if n == 0 then return true end
+    return is_odd(n - 1)
+end
+function is_odd(byte n) -> bool
+    if n == 0 then return false end
+    return is_even(n - 1)
+end
+-- locals and a local array survive the inner calls
+function sum_digits(word n) -> byte
+    byte buf[6]
+    byte d = byte(n % 10)
+    buf[3] = d
+    if n < 10 then return d end
+    byte rest = sum_digits(n / 10)
+    return buf[3] + rest
+end
+print(fact(8), fib(15), gcd(1071, 462))
+print(is_even(10), is_odd(7), is_even(9))
+print(sum_digits(59876))
+",
+        "40320 610 21\ntrue true false\n35\n",
+    );
+}
+
+#[test]
+fn run_recursion_methods_strings_and_ordinary_calls() {
+    expect(
+        "rec_more",
+        "class Node
+    byte value
+    function count(byte n) -> byte
+        if n == 0 then return self.value end
+        return self.value + self.count(n - 1)
+    end
+end
+Node a
+a.value = 3
+-- a string result built recursively
+function stars(byte n) -> string
+    if n == 0 then return \"\" end
+    return \"*\" .. stars(n - 1)
+end
+-- Towers of Hanoi: moves counted in a global
+word moves = 0
+function hanoi(byte n, byte from, byte to, byte via)
+    if n == 0 then return end
+    hanoi(n - 1, from, via, to)
+    moves += 1
+    hanoi(n - 1, via, to, from)
+end
+hanoi(10, 1, 3, 2)
+print(a.count(4), stars(5), moves)
+",
+        "15 ***** 1023\n",
+    );
+    // a non-recursive call gets no save/restore code
+    let asm = crate::compile_source(
+        "function f(byte x) -> byte\n return x + 1\nend\nfunction g() -> byte\n return f(1)\nend\nprint(g())",
+        "t.nex",
+    )
+    .unwrap();
+    assert!(!asm.contains("recursive call") && !asm.contains("rt_stack_overflow"));
+}
+
+#[test]
+fn recursion_stack_overflow_is_caught() {
+    let src = "function down(word n) -> word\n    byte pad[40]\n    pad[0] = 1\n    return down(n + 1) + 1\nend\nprint(down(0))\n";
+    let Some((nex, syms)) = build("rec_overflow", src) else { return };
+    let mut cpu = load_nex(&nex).unwrap();
+    let handler = syms["rt_stack_overflow"];
+    for _ in 0..5_000_000u64 {
+        if cpu.pc == handler {
+            return;
+        }
+        cpu.tick().unwrap();
+    }
+    panic!("the stack overflow handler was not reached");
+}
+
+#[test]
+fn run_long() {
+    expect(
+        "long_basic",
+        "long a = 100000
+long b = -250000
+long big = 2147483647
+print(a, b, a + b, a - b)
+print(a * 3, a * -7, 123456 * 789)
+print(b / 7, b % 7, 1000000000 / 3)
+print(big, -big - 1, big + 1)
+word w = 60000
+byte k = 200
+long c = w * 1000 + k        -- word and byte widen to long
+print(c, long(w) * 30)
+print(a << 4, b >> 3, a & $FF00, a | 1)
+print(a ~ -1, ~a)
+print(a > b, a < b, a == 100000, b ~= -250000, a >= 100000, b <= -250001)
+print(abs(b), min(a, b), max(a, b), clamp(5000000, 0, 999999))
+print(word(a), byte(a), sword(b), long(-5))
+-- a long array, a long field, a long parameter and result
+long tab[] = {1, 70000, -3, 4000000000 - 4000000000}
+struct Acc
+    long total
+    byte n
+end
+Acc acc
+function add(Acc x, long v) -> long
+    x.total += v
+    x.n += 1
+    return x.total
+end
+for i = 0, 3 do
+    add(acc, tab[i])
+end
+print(acc.total, acc.n, \"total: \" .. str(acc.total * 2))
+long i = 0
+long sum = 0
+while i < 100000 do
+    sum += i
+    i += 1000
+end
+print(sum)
+",
+        "100000 -250000 -150000 350000\n300000 -700000 97406784\n-35714 -2 333333333\n2147483647 -2147483648 -2147483648\n60000200 1800000\n1600000 -31250 34304 100001\n-100001 -100001\ntrue false true false true false\n250000 -250000 100000 999999\n34464 160 12144 -5\n69998 4 total: 139996\n4950000\n",
+    );
+}
+
+#[test]
+fn run_fixed16() {
+    expect(
+        "fixed16_basic",
+        "fixed16 a = 1000.5
+fixed16 b = -2.25
+fixed16 tiny = 0.0001
+print(a, b, a + b, a - b)
+print(a * b, a / b)
+print(a * 3, a / 4, b * -2, fixed16(7), fixed16(-300))
+fixed f = 1.5
+fixed16 g = f                  -- fixed widens to fixed16
+print(g, g * g, g / 3, fixed(a / 100), long(a), word(a), sword(b))
+print(a > b, b < -2, a == 1000.5, tiny > 0)
+fixed16 pi = 3.14159
+fixed16 r = 12.5
+print(pi * r * r)
+fixed16 x = 0
+for k = 1, 10 do
+    x += 0.1
+end
+print(x, abs(b), -a, min(a, b), max(a, b))
+fixed16 v[] = {0.5, -1.25, 2}
+print(v[0] + v[1] + v[2])
+",
+        "1000.5 -2.25 998.25 1002.75
+-2251.125 -444.6666\n3001.5 250.125 4.5 7 -300\n1.5 2.25 0.5 10 1000 1000 -3\ntrue true true true\n490.8727\n1 2.25 -1000.5 -2.25 1000.5\n1.25\n",
+    );
+}
+
+#[test]
+fn long_errors() {
+    assert!(err("long a = 5\nword w = a").contains("narrow"));
+    assert!(err("fixed16 a = 1.5\nlong l = a").contains("long(x)"));
+    assert!(err("word w = 5\nfixed16 f = w").contains("fixed16(x)"));
+    assert!(err("fixed16 f = 1.5\nfixed16 g = f & 1").contains("bitwise"));
+    assert!(err("long a = 5\nlong b = a / 0").contains("division by zero"));
+    assert!(err("long a = 5000000000").contains("invalid number"));
+    assert!(err("for i = 0, 100000 do\nend").contains("`while`"));
+    assert!(err("far long x[10]").contains("not supported"));
+    assert!(err("fixed f = 200.5").contains("does not fit"));
+}
+
