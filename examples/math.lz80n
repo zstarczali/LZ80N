@@ -1,0 +1,86 @@
+-- math.lz80n -- fixed point (8.8) numbers and math functions
+--
+--  * a five-pointed star rotates with sin/cos (angles: 256 units per turn)
+--  * a ball falls with gravity; its speed is a `fixed` value
+--  * a pointer in the star's centre follows the ball with atan2
+--  * Layer 2 double buffering: draw into the hidden buffer, then
+--    layer2_flip() shows it, so the picture never flickers
+
+asset sheet = "assets/sprites.png"
+
+const CX = 128                    -- star centre (Layer 2 pixels)
+const CY = 96
+const R = 70                      -- star radius
+
+layer2_visible(true)
+layer2_clear(0)
+
+ink(BRIGHT_WHITE)
+at(1, 1)
+write("fixed point + math")
+ink(BRIGHT_CYAN)
+at(28, 1)
+write("sqrt(2) = ", sqrt(2.0), "   1/3 = ", 1.0 / 3.0)
+at(29, 1)
+write("atan2(1, 1) = ", atan2(1, 1), "   sin(32) = ", sin(32))
+
+byte sx[5]
+byte sy[5]
+
+function draw_star(byte colour)
+    for i = 0, 4 do
+        byte j = (i + 2) % 5
+        line(sx[i], sy[i], sx[j], sy[j], colour)
+    end
+end
+
+-- ball: x moves at a constant speed, y falls with gravity
+fixed by = 0                      -- height above the floor offset, 0..120
+fixed vy = 0
+const GRAVITY = 0.2
+const BOUNCE = 0.9
+word bx = 40
+sword dx = 2
+
+sprite_load(0, sheet)
+sprites_visible(true, false)
+sprite[1].show(1)
+
+byte angle = 0
+while true do
+    vsync()
+    layer2_flip()                            -- show the finished picture
+    layer2_clear(0)                          -- and start a new one (DMA)
+
+    -- rotate and draw the star
+    for i = 0, 4 do
+        byte a = angle + i * 51
+        sx[i] = byte(CX + sword(cos(a) * R))
+        sy[i] = byte(CY + sword(sin(a) * R))
+    end
+    draw_star(rgb(7, 6, 0))
+    angle += 1
+
+    -- gravity
+    vy += GRAVITY
+    by += vy
+    if by > 120 then
+        by = 120
+        vy = -vy * BOUNCE
+        if vy > -1 then vy = -4.5 end        -- keep it bouncing
+    end
+    bx += dx
+    if bx < 34 or bx > 270 then dx = -dx end
+    word ball_y = word(round(by)) + 40       -- display y of the ball
+    sprite[1].position(bx, ball_y + 32)
+
+    -- pointer from the centre towards the ball (both in Layer 2 pixels)
+    byte dir = atan2(sword(ball_y) + 8 - CY, sword(bx) - 32 + 8 - CX)
+    byte px = byte(CX + sword(cos(dir) * 30))
+    byte py = byte(CY + sword(sin(dir) * 30))
+    line(CX, CY, px, py, rgb(0, 7, 3))
+
+    ink(BRIGHT_YELLOW)
+    at(30, 1)
+    write("speed: ", vy, "      ")
+end

@@ -1,0 +1,70 @@
+-- layer2.lz80n -- Layer 2 bitmap graphics (256x192, 256 colours)
+-- Layers, top to bottom: sprites, text, Layer 2, background colour.
+
+asset sheet = "assets/sprites.png"
+
+layer2_visible(true)
+layer2_clear(0)
+border(BLUE)
+
+-- left half: colour gradient, one band per 8 rows
+for band = 0, 23 do
+    fill_rect(0, band * 8, 128, 8, rgb(band / 4, band / 8, 3 - band / 8))
+end
+
+-- right half: a burst of lines from the centre of the panel
+const CX = 192
+const CY = 96
+byte hue = 0
+for x = 128, 255, 8 do
+    line(CX, CY, x, 0, rgb(7, hue & 7, 0))
+    line(CX, CY, x, 191, rgb(hue & 7, 7, 1))
+    hue += 1
+end
+for y = 0, 191, 12 do
+    line(CX, CY, 128, y, rgb(0, hue & 7, 3))
+    line(CX, CY, 255, y, rgb(7, 0, hue & 3))
+    hue += 1
+end
+
+-- frames
+rect(0, 0, 256, 192, rgb(7, 7, 3))
+rect(2, 2, 124, 188, rgb(7, 7, 0))
+
+-- the text layer sits above Layer 2 (paper is transparent)
+ink(BRIGHT_WHITE)
+at(5, 6)
+write("LZ80N Layer 2")
+ink(BRIGHT_YELLOW)
+at(6, 6)
+write("plot line rect fill")
+
+-- a sprite above everything
+sprite_load(0, sheet)
+sprites_visible(true, false)
+sprite[0].show(1)
+
+-- animation: a block slides along the bottom of the gradient panel,
+-- restoring the pixels under it with the colour read back by point()
+byte bx = 8
+sbyte dir = 1
+byte under = point(bx, 170)
+word sx = 40
+word sy = 40
+sword vx = 2
+sword vy = 1
+while true do
+    vsync()
+    fill_rect(bx, 170, 12, 12, under)
+    if bx >= 110 then dir = -1 end
+    if bx <= 6 then dir = 1 end
+    bx += dir
+    under = point(bx, 170)
+    fill_rect(bx, 170, 12, 12, rgb(7, 7, 3))
+    -- bouncing sprite
+    if sx < 33 or sx > 270 then vx = -vx end
+    if sy < 33 or sy > 206 then vy = -vy end
+    sx += vx
+    sy += vy
+    sprite[0].position(sx, sy)
+end

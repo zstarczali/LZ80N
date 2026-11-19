@@ -1,0 +1,76 @@
+-- raster.lz80n -- copper, raster interrupts and other Next timing tools
+--
+--  * the copper changes the background colour on every second line
+--    (a scrolling rainbow), the list is rebuilt in the bottom border
+--  * a raster interrupt at line 96 recolours the white text ink, so the
+--    same text is white above the split and yellow below it
+--  * `interrupt frame` keeps a clock running, independent of the main loop
+
+cpu_speed(MHZ_28)
+
+const SPLIT = 96
+const INK_ENTRY = 2 * BRIGHT_WHITE + 1      -- text palette entry of the ink
+
+-- lines 192..311 are the bottom border, vertical blank and top border;
+-- the top border (where the title is) starts around line 280
+interrupt raster(270)
+    nextreg[0x43] = 0x30                    -- text (tilemap) palette 0
+    nextreg[0x40] = INK_ENTRY
+    nextreg[0x41] = 0xFF                    -- white
+end
+
+interrupt raster(SPLIT)
+    nextreg[0x43] = 0x30
+    nextreg[0x40] = INK_ENTRY
+    nextreg[0x41] = 0xFC                    -- yellow
+end
+
+word ticks = 0
+interrupt frame
+    ticks += 1
+end
+
+-- 32-colour rainbow (RRRGGGBB)
+byte rainbow[32]
+for i = 0, 7 do
+    rainbow[i]      = rgb(7, i, 0)
+    rainbow[i + 8]  = rgb(7 - i, 7, 0)
+    rainbow[i + 16] = rgb(0, 7 - i, i / 2)
+    rainbow[i + 24] = rgb(i, 0, 3)
+end
+
+ink(BRIGHT_WHITE)
+for r = 8, 23 do
+    at(r, 6)
+    write("Same ink - two colours")
+end
+at(2, 6)
+write("Copper + raster interrupts")
+at(30, 2)
+write("seconds:")
+
+seed(frames() + 7)
+byte t = 0
+while true do
+    vsync()                                  -- frame tick = line 192
+    copper_begin()
+    for y = 0, 191, 2 do
+        copper_wait(y)
+        copper_move(0x4A, rainbow[(y >> 2) + t & 31])
+    end
+    copper_wait(192)
+    copper_move(0x4A, 0)                     -- black border below/above
+    copper_start()
+    t += 1
+
+    -- sparkles in the text layer
+    at(byte(random(6)) + 24, byte(random(40)))
+    ink(byte(random(7)) + 9)
+    write("*")
+    at(byte(random(6)) + 24, byte(random(40)))
+    write(" ")
+
+    ink(BRIGHT_WHITE)
+    at(30, 11)
+    write(ticks / 50, "  ")
+end

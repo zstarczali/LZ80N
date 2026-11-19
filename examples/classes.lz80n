@@ -1,0 +1,82 @@
+-- classes.lz80n -- structs, classes and methods
+-- Bouncing balls: an array of class instances, each with its own state.
+-- Keys: SPACE = pause, R = reset energy
+
+struct Vec2
+    sbyte x
+    sbyte y
+end
+
+class Ball
+    byte x = 16
+    byte y = 12
+    Vec2 vel
+    byte bounces
+
+    function start(byte px, byte py, sbyte dx, sbyte dy)
+        self.x = px
+        self.y = py
+        self.vel.x = dx
+        self.vel.y = dy
+        self.bounces = 0
+    end
+
+    function erase()
+        at(self.y, self.x)
+        write(" ")
+    end
+
+    function draw()
+        at(self.y, self.x)
+        write("o")
+    end
+
+    -- move one step, bounce off the walls; returns true on a bounce
+    function step() -> bool
+        bool hit = false
+        sword nx = self.x + self.vel.x
+        sword ny = self.y + self.vel.y
+        if nx < 0 or nx > 39 then
+            self.vel.x = -self.vel.x
+            hit = true
+        end
+        if ny < 2 or ny > 30 then
+            self.vel.y = -self.vel.y
+            hit = true
+        end
+        self.x += self.vel.x
+        self.y += self.vel.y
+        if hit then self.bounces += 1 end
+        return hit
+    end
+end
+
+-- a plain function taking a class instance by reference
+function total(Ball a, Ball b, Ball c) -> word
+    return a.bounces + b.bounces + c.bounces
+end
+
+const N = 3
+Ball balls[N]
+balls[0].start(3, 5, 1, 1)
+balls[1].start(20, 10, -1, 1)
+balls[2].start(10, 18, 1, -1)
+
+word frame = 0
+while true do
+    vsync()
+    vsync()
+    if not key(KEY_SPACE) then
+        for i = 0, N - 1 do
+            balls[i].erase()
+            if balls[i].step() then border(i + 1) end
+            balls[i].draw()
+        end
+        frame += 1
+    end
+    if key(KEY_R) then
+        for i = 0, N - 1 do balls[i].bounces = 0 end
+    end
+    at(0, 0)
+    write("bounces: ", total(balls[0], balls[1], balls[2]), "  frame: ", frame, "  ")
+end

@@ -1,0 +1,53 @@
+-- palette.lz80n -- palette cycling and DMA
+-- The picture is drawn once; the animation only rewrites 32 palette
+-- entries per frame, so it costs almost no CPU time.
+
+const N = 32                       -- colours in the cycle (indices 1..32)
+
+-- a rainbow of 32 colours, 8-bit RRRGGGBB
+byte rainbow[N]
+for i = 0, 7 do
+    rainbow[i]      = rgb(7, i, 0)         -- red -> yellow
+    rainbow[i + 8]  = rgb(7 - i, 7, 0)     -- yellow -> green
+    rainbow[i + 16] = rgb(0, 7 - i, i / 2) -- green -> blue
+    rainbow[i + 24] = rgb(i, 0, 3)         -- blue -> magenta
+end
+
+-- concentric rectangles using palette indices 1..32
+layer2_visible(true)
+layer2_clear(0)
+for k = 0, 95 do
+    rect(k, k, 256 - k * 2, 192 - k * 2, 1 + k % N)
+end
+
+-- a black panel behind the text (index 0 is not part of the cycle)
+fill_rect(24, 4, 208, 56, 0)
+
+ink(BRIGHT_WHITE)
+at(5, 6)
+write("Palette cycling + DMA")
+
+-- DMA: copy the title line of the text layer two rows down
+-- (each text cell is 2 bytes: character, attribute)
+const TEXT = 0x6000
+dma_copy(TEXT + (5 * 40 + 6) * 2, TEXT + (7 * 40 + 6) * 2, 21 * 2)
+ink(BRIGHT_CYAN)
+at(8, 6)
+write("^ copied by the zxnDMA")
+
+-- DMA fill: a row of solid blocks (char 127), white ink
+byte cell[2]
+cell[0] = 127
+cell[1] = 15 * 2
+for c = 6, 33 do
+    dma_copy(addr(cell), TEXT + (10 * 40 + c) * 2, 2)
+end
+
+byte t = 0
+while true do
+    vsync()
+    for i = 0, N - 1 do
+        palette(PAL_LAYER2, 1 + i, rainbow[(i + t) % N])
+    end
+    t += 1
+end

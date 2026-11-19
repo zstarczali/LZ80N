@@ -1,0 +1,5 @@
+compiler/target/
+*.asm
+*.lst
+*.nex
+tools/sjasmplus/

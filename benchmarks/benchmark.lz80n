@@ -1,0 +1,131 @@
+-- benchmark.lz80n -- the same seven tasks as benchmark.bas (NextBASIC)
+--
+-- Every task runs REP times; the time shown is for one run, in ms
+-- (1 frame = 20 ms, so the resolution is 20 / REP ms). Both programs run
+-- at 28 MHz. The results line lets you check both did the same work.
+
+const REP = 10
+
+word s_arith = 0
+word primes = 0
+word sq = 0
+byte flag[2000]
+
+function t_loop()
+    for i = 1, 10000 do
+    end
+end
+
+function t_arith()
+    word s = 0
+    for i = 1, 5000 do
+        s = (s + i * 7) % 1000
+    end
+    s_arith = s
+end
+
+function t_sieve()
+    for i = 0, 1999 do
+        flag[i] = 1
+    end
+    word count = 0
+    for i = 2, 1999 do
+        if flag[i] == 1 then
+            count += 1
+            word j = i + i
+            while j < 2000 do
+                flag[j] = 0
+                j += i
+            end
+        end
+    end
+    primes = count
+end
+
+function t_print()
+    for i = 1, 500 do
+        at(20, 2)
+        write("LZ80N speed test")
+    end
+end
+
+function t_string()
+    for k = 1, 20 do
+        string s = ""
+        for i = 1, 50 do
+            s = s .. chr(65 + i % 26)
+        end
+    end
+end
+
+function t_sqrt()
+    word sum = 0
+    for i = 1, 1000 do
+        sum += sqrt(i)
+    end
+    sq = sum
+end
+
+function t_plot()
+    for y = 0, 63 do
+        for x = 0, 127 do
+            plot(x, y + 120, 224)
+        end
+    end
+end
+
+byte row = 4
+word t0 = 0
+
+-- start timing test `n` (NextReg $7F marks the point for the test emulator)
+function start(byte n)
+    vsync()
+    nextreg[0x7F] = n
+    t0 = frames()
+end
+
+function report(string name)
+    word f = frames() - t0
+    nextreg[0x7F] = 0
+    at(row, 2)
+    ink(BRIGHT_CYAN)
+    write(name)
+    at(row, 12)
+    ink(BRIGHT_WHITE)
+    write(f * 20 / REP, " ms")
+    row += 1
+end
+
+layer2_visible(true)
+ink(BRIGHT_YELLOW)
+at(1, 2)
+write("LZ80N benchmark, 28 MHz")
+
+start(1)
+for r = 1, REP do t_loop() end
+report("loop")
+start(2)
+for r = 1, REP do t_arith() end
+report("arith")
+start(3)
+for r = 1, REP do t_sieve() end
+report("sieve")
+start(4)
+for r = 1, REP do t_print() end
+at(20, 2)
+write("                ")
+report("print")
+start(5)
+for r = 1, REP do t_string() end
+report("string")
+start(6)
+for r = 1, REP do t_sqrt() end
+report("sqrt")
+start(7)
+for r = 1, REP do t_plot() end
+report("plot")
+
+ink(WHITE)
+at(row + 1, 2)
+write("arith ", s_arith, "  primes ", primes, "  sqrt ", sq)
+print("")
