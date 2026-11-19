@@ -1,4 +1,4 @@
-# LZ80N 1.0 — implemented language and decisions
+# LZ80N 1.0 - implemented language and decisions
 
 This is the *working* specification for what `lz80nc` 1.0 implements. It turns
 the open questions of the concept document into concrete (and revisable)
