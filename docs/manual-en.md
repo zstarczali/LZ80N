@@ -1331,6 +1331,7 @@ register allocation.
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2, transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `shooter.lz80n` | a little space shooter: 32x32 sprites cut from a picture, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |
