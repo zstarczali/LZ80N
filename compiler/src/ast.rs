@@ -115,6 +115,9 @@ pub enum ExprKind {
     MethodCall(Box<Expr>, String, Vec<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// `{a, b, c}`: array initializer (only in a declaration);
+    /// also `[]` (size taken from the initializer) as an array size
+    List(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]

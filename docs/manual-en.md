@@ -162,13 +162,58 @@ The `_` character can separate digits. String escapes are `\n \t \\ \" \0`.
 Character literals support `\n \t \\ \' \0`. A string literal can be up to 255
 characters long.
 
-### 3.4 Names and keywords
+### 3.4 Names
 
 Names consist of letters, digits and `_`, and do not start with a digit. Type
-names (structs and classes) start with an upper-case letter.
+names (structs and classes) start with an upper-case letter. Upper and lower
+case are different: `score` and `Score` are two names.
 
-Keywords: `and or not if then elseif else end while do for function return
-break const var true false asm struct class asset interrupt`.
+### 3.5 Reserved words
+
+The following names cannot be used for variables, constants, functions,
+parameters, loop variables, types or assets. The compiler reports
+`` `name` is a reserved name ``.
+
+**Keywords**
+
+`and` `or` `not` `if` `then` `elseif` `else` `end` `while` `do` `for`
+`function` `return` `break` `const` `var` `true` `false` `asm` `struct`
+`class` `asset` `interrupt`
+
+**Type names and `self`**
+
+`bool` `byte` `sbyte` `word` `sword` `fixed` `string`, and `self` (the object
+inside a method).
+
+**Built-in functions** (implemented by the compiler)
+
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower`
+
+**Standard library names** (functions, types and constants written in LZ80N).
+They are reserved in **every** program, even one that does not use the
+module, so a name never changes meaning when a program starts to use it:
+
+| Module | Names |
+|--------|-------|
+| sprite | `Sprite` `sprite` `sprites_visible` |
+| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `TRANSPARENT` |
+| palette | `palette` `palette9` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` |
+| copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
+| sound | `sound_reset` `sound_mix` `tone` `noise` `volume` `sound_off` `beep` `play` `play_loop` `playing` `sound_tick` |
+
+Names starting with **`snd_`** are reserved for the sound module's internal
+variables and functions.
+
+**Built-in constants** (they already exist, so declaring them again is an
+error): `BLACK` … `WHITE`, `BRIGHT_BLACK` … `BRIGHT_WHITE`, `KEY_…`, `JOY_…`,
+`MHZ_3` `MHZ_7` `MHZ_14` `MHZ_28`, `NOT_FOUND`.
+
+**One namespace.** Functions, types and global variables share one set of
+names: a variable cannot have the name of a function or a type.
+
+**Free inside a struct or class.** Field and method names belong to their
+type, so they may be any name except keywords: a class can have a field
+`line` or a method `update()`.
 
 ---
 
@@ -230,13 +275,38 @@ scores[i] += 10
 ```
 
 * The size is a constant expression. Indexes start at 0.
-* Arrays start filled with zeros when the program loads. Array initialisers
-  (`= {…}`) are not supported yet.
+* Arrays without an initialiser start filled with zeros (strings empty).
 * Indexes are **not checked at run time**, which keeps the code fast.
   Constant indexes are checked at compile time.
 * A whole array cannot be assigned at once. Use a loop or `dma_copy`.
 
-### 4.5 Conversions (casts)
+### 4.5 Array initialisers
+
+```lua
+byte heights[] = {20, 45, 80, 120}        -- [] : the size comes from the list
+word scores[10] = {500, 400, 300}         -- the remaining elements are 0
+sbyte dx[] = {-1, 0, 1}
+fixed speed[] = {0.5, 1, -1.25}
+bool solid[] = {true, false, true}
+byte keys[] = {'Q', 'A', 'O', 'P'}
+string menu[] = {"Start", "Options", "Quit"}
+const N = 3
+word table[] = {N * 100, N * 200}         -- constant expressions are fine
+```
+
+* The values must be **compile-time constants** of the element type
+  (numbers, characters, named constants, constant expressions; string
+  literals and string constants for `string` arrays).
+* Fewer values than elements: the rest is 0 (or `""`). More values than
+  elements is an error.
+* **Global** arrays: the values are part of the program file. Initialising
+  costs no code and no time.
+* **Local** arrays (inside a function): the values are copied in (one
+  `LDIR`) every time the declaration runs, so each call starts with the
+  original table.
+* Arrays of structs cannot have an initialiser yet.
+
+### 4.6 Conversions (casts)
 
 A value can always be **widened** implicitly: `byte` → `word`, `sbyte` →
 `sword`. **Narrowing** must be written explicitly:
@@ -275,7 +345,8 @@ are implicit.
 `~=` and `!=` both mean "not equal". Unary `~` is bitwise NOT, binary `~`
 is XOR (as in Lua 5.3).
 
-Compound assignments: `+=  -=  *=  &=  |=`.
+Compound assignments: `+=  -=  *=  /=  %=  &=  |=  <<=  >>=`.
+`a[i] /= 2` means `a[i] = a[i] / 2`.
 
 ### 5.2 How arithmetic works
 
@@ -1083,8 +1154,8 @@ Not supported yet:
 
 * recursion (static frames)
 * `long` (32-bit), `fixed16` (16.16)
-* array initialisers, returning structs, constructors, inheritance
-* compound assignments `/=`, `%=`
+* returning structs, constructors, inheritance, initialisers for arrays of structs
+* multi-dimensional arrays (planned next)
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
 * programs larger than about 31 KB (memory banks)
 * sample playback through the Next's DAC, PT3 music import
@@ -1140,6 +1211,7 @@ register allocation.
 | `palette.lz80n` | colour cycling, `dma_copy`, `addr` |
 | `raster.lz80n` | copper, raster and frame interrupts, `random` |
 | `strings.lz80n` | strings and string functions, a scrolling ticker |
+| `tables.lz80n` | array initialisers: menu, bar chart and colour tables, `/=` `%=` |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |

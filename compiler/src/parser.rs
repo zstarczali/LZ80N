@@ -112,9 +112,33 @@ impl Parser {
         })
     }
     /// `[size]` -- any constant expression, checked by the code generator.
+    /// `{ expr, expr, ... }` (a trailing comma is allowed)
+    fn list(&mut self) -> Result<Expr, Diag> {
+        let pos = self.pos();
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut items = Vec::new();
+        while !self.at(&Tok::RBrace) {
+            items.push(self.expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RBrace, "`}`")?;
+        if items.is_empty() {
+            return Err(Diag::new(pos, "an initializer list needs at least one value"));
+        }
+        Ok(Expr { kind: ExprKind::List(items), pos })
+    }
+
     fn array_suffix(&mut self) -> Result<Option<Expr>, Diag> {
         if !self.eat(&Tok::LBracket) {
             return Ok(None);
+        }
+        if self.at(&Tok::RBracket) {
+            // `name[] = {...}`: the size comes from the initializer
+            let pos = self.pos();
+            self.next();
+            return Ok(Some(Expr { kind: ExprKind::List(vec![]), pos }));
         }
         let e = self.expr()?;
         self.expect(&Tok::RBracket, "`]`")?;
@@ -267,9 +291,23 @@ impl Parser {
                 let ty = self.type_ref()?;
                 let name = self.ident()?;
                 let array = self.array_suffix()?;
-                let init = if self.eat(&Tok::Assign) { Some(self.expr()?) } else { None };
-                if array.is_some() && init.is_some() {
-                    return Err(Diag::new(pos, "array initializers are not supported yet"));
+                let init = if self.eat(&Tok::Assign) {
+                    if self.at(&Tok::LBrace) { Some(self.list()?) } else { Some(self.expr()?) }
+                } else {
+                    None
+                };
+                match (&array, &init) {
+                    (Some(_), Some(Expr { kind: ExprKind::List(_), .. })) => {}
+                    (Some(_), Some(_)) => {
+                        return Err(Diag::new(pos, "an array is initialised with a list: `= {1, 2, 3}`"));
+                    }
+                    (None, Some(Expr { kind: ExprKind::List(_), pos })) => {
+                        return Err(Diag::new(*pos, "a `{...}` list needs an array: `name[] = {...}`"));
+                    }
+                    (Some(Expr { kind: ExprKind::List(_), pos }), None) => {
+                        return Err(Diag::new(*pos, "`[]` needs an initializer list to take its size from"));
+                    }
+                    _ => {}
                 }
                 StmtKind::VarDecl { ty: Some(ty), name, array, init, is_const: false }
             }
@@ -282,6 +320,10 @@ impl Parser {
                     Tok::StarEq => Some(Some(BinOp::Mul)),
                     Tok::AmpEq => Some(Some(BinOp::And)),
                     Tok::PipeEq => Some(Some(BinOp::Or)),
+                    Tok::SlashEq => Some(Some(BinOp::Div)),
+                    Tok::PercentEq => Some(Some(BinOp::Mod)),
+                    Tok::ShlEq => Some(Some(BinOp::Shl)),
+                    Tok::ShrEq => Some(Some(BinOp::Shr)),
                     _ => None,
                 };
                 match op {

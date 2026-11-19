@@ -425,3 +425,29 @@ pub fn uses_layer2(src: &str) -> bool {
 pub fn uses_sprites(src: &str) -> bool {
     src.contains("sprite") || src.contains("Sprite")
 }
+
+/// Public names of the standard modules. They are reserved in every program,
+/// whether or not the module is compiled in, so a name never changes meaning
+/// when a program starts to use a module. Names starting with `snd_` are
+/// reserved for the sound module's internals.
+pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
+    ("sprite", &["Sprite", "sprite", "sprites_visible"]),
+    ("Layer 2", &["layer2_visible", "rgb", "vline", "line", "rect", "fill_rect", "TRANSPARENT"]),
+    ("palette", &["palette", "palette9", "rgb9", "PAL_ULA", "PAL_LAYER2", "PAL_SPRITES", "PAL_TEXT"]),
+    ("copper", &["copper_begin", "copper_wait", "copper_move", "copper_start", "copper_stop"]),
+    (
+        "sound",
+        &[
+            "sound_reset", "sound_mix", "tone", "noise", "volume", "sound_off", "beep", "play",
+            "play_loop", "playing", "sound_tick",
+        ],
+    ),
+];
+
+/// The module that reserves `name`, if any.
+pub fn library_module(name: &str) -> Option<&'static str> {
+    if name.starts_with("snd_") {
+        return Some("sound");
+    }
+    LIBRARY_NAMES.iter().find(|(_, names)| names.contains(&name)).map(|(m, _)| *m)
+}
