@@ -49,7 +49,8 @@ pub fn expand(src: &str, main: Option<&Path>, base_dir: &Path) -> Result<Sources
         }
         return Err(d);
     }
-    let eof = Pos { line: st.out.last().map_or(1, |t| t.pos.line), col: 1, file: 0 };
+    // "end of file" errors point at the last token, in whichever file it is
+    let eof = st.out.last().map_or(Pos { line: 1, col: 1, file: 0 }, |t| t.pos);
     st.out.push(Token { tok: Tok::Eof, pos: eof });
     Ok(Sources { tokens: st.out, files: st.files, dirs: st.dirs, text: st.text })
 }

@@ -34,7 +34,8 @@ CONTENTS
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
                              as Markdown text
-  examples/                  17 example programs and their pictures
+  examples/                  18 example programs, their pictures and
+                             the include files of modules.lz80n (lib/)
   benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
   CHANGELOG.md               what is new in each version
@@ -183,6 +184,7 @@ environment variable, sjasmplus next to lz80nc, sjasmplus on the PATH.
     byte map[24][32]               -- arrays, up to 4 dimensions
     byte table[] = {1, 2, 4, 8}    -- with an initialiser list
     far byte level[40000]          -- big data in the Next's memory banks
+    include "lib/enemies.lz80n"    -- another source file (top level, once)
 
     if score > 100 and alive then ... elseif ... else ... end
     while lives > 0 do ... end
@@ -248,6 +250,7 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     tables     array initialisers
     life       Game of Life on a 2-D array
     banks      far arrays: a 16 KB cave map in memory banks
+    modules    a program in several files (include)
     shooter    a little space shooter (O/P/Q/A or joystick, SPACE to fire)
 
 

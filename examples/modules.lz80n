@@ -10,7 +10,7 @@ include "lib/screen.lz80n"
 include "lib/ball.lz80n"
 
 const NBALLS = 6
-byte colours[] = {0xE0, 0x1C, 0x03, 0xFC, 0xE3, 0x1F}
+byte colours[] = {0xE0, 0x1C, 0x03, 0xFC, 0xF0, 0x1F}
 
 Ball balls[NBALLS]
 for i = 0, NBALLS - 1 do

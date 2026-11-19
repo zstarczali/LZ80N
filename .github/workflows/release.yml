@@ -34,12 +34,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # no apt: pandoc from its release archive, WeasyPrint from PyPI
       - name: Install pandoc and WeasyPrint
         run: |
-          # skip the slow man page index rebuild
-          sudo rm -f /var/lib/man-db/auto-update
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pandoc weasyprint fonts-dejavu
+          curl -fsSL https://github.com/jgm/pandoc/releases/download/3.5/pandoc-3.5-linux-amd64.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/pandoc-3.5/bin" >> "$GITHUB_PATH"
+          pip install --quiet weasyprint==63.1
+          fc-list | grep -i dejavu | head -2 || echo "no DejaVu fonts, using the default"
 
       - name: Build the PDFs
         run: |
@@ -140,7 +145,7 @@ jobs:
           for f in sjasm-src/LICENSE*; do cp "$f" "$pkg/licenses/sjasmplus-$(basename "$f")"; done
           mkdir -p "$pkg/examples" "$pkg/benchmarks"
           cp examples/*.lz80n "$pkg/examples/"
-          cp -r examples/assets "$pkg/examples/"
+          cp -r examples/assets examples/lib "$pkg/examples/"
           cp benchmarks/*.lz80n benchmarks/*.bas benchmarks/README.md "$pkg/benchmarks/" 2>/dev/null || true
           if [[ "${{ matrix.native }}" == true ]]; then
             # smoke test: the packaged compiler builds an example with the packaged assembler
