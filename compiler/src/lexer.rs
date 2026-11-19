@@ -18,7 +18,7 @@ pub enum Tok {
     AsmBody(String),
     // keywords
     And, Or, Not, If, Then, Elseif, Else, End, While, Do, For,
-    Function, Return, Break, Const, Var, True, False, Asm, Struct, Class, Asset, Interrupt, Far,
+    Function, Return, Break, Const, Var, True, False, Asm, Struct, Class, Asset, Interrupt, Far, Include,
     // punctuation / operators
     Plus, Minus, Star, Slash, Percent, Amp, Pipe, Tilde, Shl, Shr,
     EqEq, NotEq, Lt, Le, Gt, Ge, Assign,
@@ -62,7 +62,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn pos(&self) -> Pos {
-        Pos { line: self.line, col: self.col }
+        Pos { line: self.line, col: self.col, file: 0 }
     }
 
     fn run(mut self) -> Result<Vec<Token>, Diag> {
@@ -179,6 +179,7 @@ impl<'a> Lexer<'a> {
                 "class" => Tok::Class,
                 "asset" => Tok::Asset,
                 "far" => Tok::Far,
+                "include" => Tok::Include,
                 "interrupt" => Tok::Interrupt,
                 _ => Tok::Ident(w.to_string()),
             });

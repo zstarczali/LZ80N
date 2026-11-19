@@ -1,0 +1,48 @@
+-- lib/ball.lz80n -- a bouncing ball for modules.lz80n
+--
+-- It needs the text helpers too. The path is relative to this file, and
+-- screen.lz80n is included only once even though modules.lz80n also
+-- includes it.
+
+include "screen.lz80n"
+
+word bounces = 0
+
+class Ball
+    sword x
+    sword y
+    sword dx
+    sword dy
+    byte r
+    byte colour
+
+    function start(byte colour)
+        self.r = 6 + byte(random(10))
+        self.x = 30 + sword(random(190))
+        self.y = 30 + sword(random(120))
+        self.dx = 1 + sword(random(3))
+        self.dy = 1 + sword(random(2))
+        self.colour = colour
+    end
+
+    function move()
+        self.x += self.dx
+        self.y += self.dy
+        sword r = sword(self.r)
+        if self.x < r or self.x > 255 - r then
+            self.dx = -self.dx
+            self.x += self.dx
+            bounces += 1
+        end
+        if self.y < 8 + r or self.y > 183 - r then
+            self.dy = -self.dy
+            self.y += self.dy
+            bounces += 1
+        end
+    end
+
+    function draw()
+        fill_circle(self.x, self.y, self.r, self.colour)
+        fill_circle(self.x - sword(self.r / 3), self.y - sword(self.r / 3), self.r / 4 + 1, rgb(7, 7, 7))
+    end
+end

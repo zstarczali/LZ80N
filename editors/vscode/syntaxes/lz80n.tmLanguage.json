@@ -122,7 +122,7 @@
 
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.lz80n", "match": "\\b(if|then|elseif|else|end|while|do|for|return|break)\\b" },
+        { "name": "keyword.control.lz80n", "match": "\\b(if|then|elseif|else|end|while|do|for|return|break|include)\\b" },
         { "name": "keyword.operator.logical.lz80n", "match": "\\b(and|or|not)\\b" },
         { "name": "constant.language.boolean.lz80n", "match": "\\b(true|false)\\b" },
         { "name": "storage.modifier.lz80n", "match": "\\b(const|var|far)\\b" },
