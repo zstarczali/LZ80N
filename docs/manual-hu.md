@@ -1346,7 +1346,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
 | `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
 | `banks.lz80n` | `far` tömbök: 16 KB-os barlangtérkép memóriabankokban |
-| `shooter.lz80n` | kis űrlövölde: képből kivágott 32x32-es sprite-ok, csillagok, hang |
+| `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle pixel art ellenség (nagyított sprite-ok), csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |
