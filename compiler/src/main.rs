@@ -7,6 +7,7 @@ mod ast;
 mod codegen;
 mod diag;
 mod font;
+mod include;
 mod lexer;
 mod parser;
 mod peephole;
@@ -32,11 +33,36 @@ pub fn compile_opts(
     base_dir: &Path,
     bank_all: bool,
 ) -> Result<String, Vec<diag::Diag>> {
-    let toks = lexer::lex(src).map_err(|d| vec![d])?;
-    let mut prog = parser::parse(toks).map_err(|d| vec![d])?;
+    compile_main(src, None, nex_name, optimize, base_dir, bank_all)
+}
+
+/// `main`: the path of the main source file (so including it again is
+/// recognised). Errors in included files carry their file name.
+pub fn compile_main(
+    src: &str,
+    main: Option<&Path>,
+    nex_name: &str,
+    optimize: bool,
+    base_dir: &Path,
+    bank_all: bool,
+) -> Result<String, Vec<diag::Diag>> {
+    let sources = include::expand(src, main, base_dir).map_err(|d| vec![d])?;
+    let files = sources.files.clone();
+    let name_files = |errs: Vec<diag::Diag>| -> Vec<diag::Diag> {
+        errs.into_iter()
+            .map(|mut d| {
+                if d.pos.file > 0 && d.file.is_none() {
+                    d.file = files.get(d.pos.file as usize).map(|p| p.display().to_string());
+                }
+                d
+            })
+            .collect()
+    };
+    let src = sources.text.as_str();
+    let mut prog = parser::parse(sources.tokens).map_err(|d| name_files(vec![d]))?;
     let reserved = library_name_errors(&prog);
     if !reserved.is_empty() {
-        return Err(reserved);
+        return Err(name_files(reserved));
     }
     for (used, lib_src) in [
         (prelude::uses_sound(src), prelude::SOUND),
@@ -51,8 +77,14 @@ pub fn compile_opts(
             prog.items.splice(0..0, lib.items);
         }
     }
-    let opts = codegen::Options { nex_name: nex_name.to_string(), optimize, base_dir: base_dir.to_path_buf(), bank_all };
-    let out = codegen::compile(&prog, &opts)?;
+    let opts = codegen::Options {
+        nex_name: nex_name.to_string(),
+        optimize,
+        base_dir: base_dir.to_path_buf(),
+        file_dirs: sources.dirs,
+        bank_all,
+    };
+    let out = codegen::compile(&prog, &opts).map_err(name_files)?;
     Ok(out.asm)
 }
 
@@ -183,11 +215,14 @@ fn main() -> ExitCode {
     let asm_path = nex.with_extension("asm");
     let nex_file = nex.file_name().unwrap().to_string_lossy().to_string();
     let base_dir = input.parent().map(Path::to_path_buf).unwrap_or_default();
-    let asm = match compile_opts(&src, &nex_file, optimize, &base_dir, bank_all) {
+    let asm = match compile_main(&src, Some(&input), &nex_file, optimize, &base_dir, bank_all) {
         Ok(a) => a,
         Err(errs) => {
             for d in &errs {
-                eprintln!("{}:{d}", input.display());
+                match &d.file {
+                    Some(f) => eprintln!("{f}:{d}"),
+                    None => eprintln!("{}:{d}", input.display()),
+                }
             }
             eprintln!("{} error(s)", errs.len());
             return ExitCode::FAILURE;
