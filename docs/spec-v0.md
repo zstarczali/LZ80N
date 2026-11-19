@@ -110,6 +110,7 @@ var x = 1000            -- inferred (word)
 const SPEED = 2         -- compile-time constant (folded)
 byte buf[64]            -- fixed-size array
 byte t[] = {1, 2, 3}    -- initialised array (size from the list)
+byte m[4][8]            -- multi-dimensional (up to 4), m[y][x], row-major
 
 x = x + 1               -- also += -= *= /= %= &= |= <<= >>=
 if c then ... elseif d then ... else ... end
@@ -129,6 +130,12 @@ asm ... end             -- raw Z80N assembly lines
   Globals: the values are emitted as data (no code). Locals: copied from a
   constant table with `LDIR` each time the declaration runs. `name[]`
   takes the size from the list. Not for arrays of structs yet.
+  Multi-dimensional: nested lists are rows (`{{1,2},{3,4}}`) or one flat
+  list; only the first size may be `[]`.
+* `asset name = image("file.png")`: a Layer 2 picture (<= 256 x 255) stored
+  in 8K pages from page 28 (no row crosses a page), drawn with
+  `draw_image(name, x, y)` (clipped, TRANSPARENT pixels skipped);
+  `image_width` / `image_height` are compile-time constants.
 * Reserved names: keywords, type names, `self`, built-in functions, built-in
   constants, and the public names of the standard modules (always, even
   when the module is not used) plus the `snd_` prefix

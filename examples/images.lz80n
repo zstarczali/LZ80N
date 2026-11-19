@@ -1,0 +1,33 @@
+-- images.lz80n -- pictures from PNG files on Layer 2
+--
+--  * asset name = image("file.png") converts a PNG at compile time; the
+--    pixels live in their own memory pages, so a full 256x192 picture
+--    costs no program space
+--  * draw_image(img, x, y) copies it to Layer 2, clipped at the edges;
+--    transparent PNG pixels become TRANSPARENT
+--  * a small badge bounces over the landscape, double buffered
+
+asset landscape = image("assets/landscape.png")
+asset badge = image("assets/badge.png")
+
+cpu_speed(MHZ_28)
+layer2_visible(true)
+
+sword x = 10
+sword y = 20
+sword dx = 2
+sword dy = 1
+const MAX_X = 256 - image_width(badge)
+const MAX_Y = 192 - image_height(badge)
+
+while true do
+    draw_image(landscape, 0, 0)
+    draw_image(badge, x, y)
+    fill_circle(x + 32, y + 60, 3, rgb(7, 7, 3))
+    layer2_flip()
+
+    x += dx
+    y += dy
+    if x <= -16 or x >= MAX_X + 16 then dx = -dx end    -- half off the edge
+    if y <= 0 or y >= MAX_Y then dy = -dy end
+end

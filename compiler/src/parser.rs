@@ -118,7 +118,8 @@ impl Parser {
         self.expect(&Tok::LBrace, "`{`")?;
         let mut items = Vec::new();
         while !self.at(&Tok::RBrace) {
-            items.push(self.expr()?);
+            // nested lists for multi-dimensional arrays: {{1, 2}, {3, 4}}
+            items.push(if self.at(&Tok::LBrace) { self.list()? } else { self.expr()? });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -134,15 +135,27 @@ impl Parser {
         if !self.eat(&Tok::LBracket) {
             return Ok(None);
         }
-        if self.at(&Tok::RBracket) {
+        let e = if self.at(&Tok::RBracket) {
             // `name[] = {...}`: the size comes from the initializer
-            let pos = self.pos();
-            self.next();
-            return Ok(Some(Expr { kind: ExprKind::List(vec![]), pos }));
-        }
-        let e = self.expr()?;
+            Expr { kind: ExprKind::List(vec![]), pos: self.pos() }
+        } else {
+            self.expr()?
+        };
         self.expect(&Tok::RBracket, "`]`")?;
-        Ok(Some(e))
+        if !self.at(&Tok::LBracket) {
+            return Ok(Some(e));
+        }
+        // more dimensions: `[a][b]...` is kept as a list of sizes
+        let pos = e.pos;
+        let mut dims = vec![e];
+        while self.eat(&Tok::LBracket) {
+            if self.at(&Tok::RBracket) {
+                return Err(Diag::new(self.pos(), "only the first size can be `[]`"));
+            }
+            dims.push(self.expr()?);
+            self.expect(&Tok::RBracket, "`]`")?;
+        }
+        Ok(Some(Expr { kind: ExprKind::List(dims), pos }))
     }
 
     fn struct_decl(&mut self) -> Result<StructDecl, Diag> {
@@ -275,8 +288,21 @@ impl Parser {
                 let name = self.ident()?;
                 self.expect(&Tok::Assign, "`=`")?;
                 match self.next() {
-                    Tok::Str(path) => StmtKind::Asset { name, path },
-                    _ => return Err(Diag::new(pos, "expected a file name string after `asset name =`")),
+                    Tok::Str(path) => StmtKind::Asset { name, path, image: false },
+                    Tok::Ident(f) if f == "image" => {
+                        self.expect(&Tok::LParen, "`(`")?;
+                        let Tok::Str(path) = self.next() else {
+                            return Err(Diag::new(pos, "expected a file name: `image(\"picture.png\")`"));
+                        };
+                        self.expect(&Tok::RParen, "`)`")?;
+                        StmtKind::Asset { name, path, image: true }
+                    }
+                    _ => {
+                        return Err(Diag::new(
+                            pos,
+                            "expected a file name after `asset name =` (or `image(\"file.png\")`)",
+                        ))
+                    }
                 }
             }
             Tok::Const | Tok::Var => {
@@ -304,7 +330,9 @@ impl Parser {
                     (None, Some(Expr { kind: ExprKind::List(_), pos })) => {
                         return Err(Diag::new(*pos, "a `{...}` list needs an array: `name[] = {...}`"));
                     }
-                    (Some(Expr { kind: ExprKind::List(_), pos }), None) => {
+                    (Some(Expr { kind: ExprKind::List(v), pos }), None)
+                        if v.is_empty() || matches!(&v[0].kind, ExprKind::List(w) if w.is_empty()) =>
+                    {
                         return Err(Diag::new(*pos, "`[]` needs an initializer list to take its size from"));
                     }
                     _ => {}

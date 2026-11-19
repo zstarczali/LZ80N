@@ -33,10 +33,29 @@ const STR_CAP: usize = 64;
 const STR_SIZE: u32 = STR_CAP as u32 + 1;
 
 /// A storage object: a value of layout `lay`, or an array of `len` of them.
+/// `sub` holds the inner dimensions of a multi-dimensional array (0 = none):
+/// `byte m[4][5][6]` is `len 4, sub [5, 6, 0]`, and `m[i]` is `len 5, sub [6, 0, 0]`.
 #[derive(Debug, Clone, Copy)]
 struct Obj {
     lay: Lay,
     len: Option<u32>,
+    sub: [u32; 3],
+}
+
+impl Obj {
+    fn new(lay: Lay, len: Option<u32>) -> Obj {
+        Obj { lay, len, sub: [0; 3] }
+    }
+
+    /// Number of elements of `lay` in one step of the outermost index.
+    fn inner(&self) -> u32 {
+        self.sub.iter().filter(|&&d| d > 0).product()
+    }
+
+    /// Total number of `lay` elements (all dimensions), None for a scalar.
+    fn total(&self) -> Option<u32> {
+        self.len.map(|n| n * self.inner())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +68,7 @@ enum Sym {
     /// string constant
     SConst(String),
     /// Embedded data; `patterns` is set for sprite pattern assets.
-    Asset { label: String, patterns: Option<u32> },
+    Asset { label: String, patterns: Option<u32>, image: Option<(u32, u32)> },
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +167,8 @@ struct Gen {
     structs: Vec<StructDef>,
     struct_ids: HashMap<String, usize>,
     assets: Vec<(String, Vec<u8>)>,
+    /// Layer 2 pictures: (label, image, first 8K page).
+    images: Vec<(String, crate::assets::Image, u32)>,
     base_dir: std::path::PathBuf,
 }
 
@@ -157,7 +178,7 @@ const INTRINSICS: &[&str] = &[
     "cpu_speed", "random", "seed", "pause", "any_key", "wait_key",
     "abs", "min", "max", "clamp", "sqrt", "sin", "cos", "atan2", "round",
     "len", "sub", "find", "val", "asc", "chr", "str", "upper", "lower",
-    "ay_write", "note_period",
+    "ay_write", "note_period", "draw_image", "image_width", "image_height",
 ];
 
 /// Built-in constants. Keys are encoded as `row * 8 + bit` of the
@@ -276,17 +297,93 @@ impl Gen {
         }
     }
 
-    /// Array length of a declaration; `[]` takes it from the initializer list.
-    fn decl_len(&self, array: &Option<Expr>, init: &Option<Expr>) -> R<Option<u32>> {
-        if let Some(Expr { kind: ExprKind::List(v), pos }) = array {
-            if v.is_empty() {
-                return match init {
-                    Some(Expr { kind: ExprKind::List(items), .. }) => Ok(Some(items.len() as u32)),
-                    _ => Err(Diag::new(*pos, "`[]` needs an initializer list to take its size from")),
-                };
-            }
+    /// Dimensions of a declaration: (outer length, inner sizes). `[]` as the
+    /// first size takes it from the initializer list.
+    fn decl_dims(&self, array: &Option<Expr>, init: &Option<Expr>) -> R<Option<(u32, [u32; 3])>> {
+        let Some(a) = array else { return Ok(None) };
+        let sizes: Vec<&Expr> = match &a.kind {
+            ExprKind::List(v) if v.len() >= 2 => v.iter().collect(),
+            _ => vec![a],
+        };
+        if sizes.len() > 4 {
+            return Err(Diag::new(a.pos, "arrays have at most 4 dimensions"));
         }
-        self.array_len(array)
+        let mut sub = [0u32; 3];
+        for (k, d) in sizes[1..].iter().enumerate() {
+            if matches!(&d.kind, ExprKind::List(v) if v.is_empty()) {
+                return Err(Diag::new(d.pos, "only the first size can be `[]`"));
+            }
+            sub[k] = self.array_len(&Some((*d).clone()))?.unwrap();
+        }
+        let inner: u32 = sub.iter().filter(|&&d| d > 0).product();
+        let first = sizes[0];
+        let n = if matches!(&first.kind, ExprKind::List(v) if v.is_empty()) {
+            match init {
+                Some(Expr { kind: ExprKind::List(items), .. }) => {
+                    if sizes.len() > 1 && items.iter().any(|e| matches!(e.kind, ExprKind::List(_))) {
+                        items.len() as u32
+                    } else {
+                        (items.len() as u32).div_ceil(inner)
+                    }
+                }
+                _ => return Err(Diag::new(first.pos, "`[]` needs an initializer list to take its size from")),
+            }
+        } else {
+            self.array_len(&Some(first.clone()))?.unwrap()
+        };
+        if n as u64 * inner as u64 > 0xFFFF {
+            return Err(Diag::new(a.pos, "array too large"));
+        }
+        Ok(Some((n, sub)))
+    }
+
+    /// An initializer list flattened to the element order of `dims`
+    /// (nested lists are rows; short rows are padded).
+    fn flat_init(&self, items: &[Expr], dims: &[u32], lay: Lay) -> R<Vec<Expr>> {
+        let nested = items.iter().any(|e| matches!(e.kind, ExprKind::List(_)));
+        if !nested {
+            return Ok(items.to_vec());
+        }
+        if dims.len() < 2 {
+            return Err(Diag::new(items[0].pos, "too many levels of `{...}` for this array"));
+        }
+        let row: u32 = dims[1..].iter().product();
+        let mut out = Vec::new();
+        for it in items {
+            let ExprKind::List(v) = &it.kind else {
+                return Err(Diag::new(it.pos, "write every row as a `{...}` list"));
+            };
+            let mut r = self.flat_init(v, &dims[1..], lay)?;
+            if r.len() as u32 > row {
+                return Err(Diag::new(it.pos, format!("{} values for a row of {row}", r.len())));
+            }
+            let zero = match lay {
+                Lay::Prim(Ty::Bool) => ExprKind::Bool(false),
+                Lay::Str => ExprKind::Str(String::new()),
+                _ => ExprKind::Int(0),
+            };
+            while (r.len() as u32) < row {
+                r.push(Expr { kind: zero.clone(), pos: it.pos });
+            }
+            out.extend(r);
+        }
+        Ok(out)
+    }
+
+    fn mk_obj(lay: Lay, dims: Option<(u32, [u32; 3])>) -> Obj {
+        match dims {
+            None => Obj::new(lay, None),
+            Some((n, sub)) => Obj { lay, len: Some(n), sub },
+        }
+    }
+
+    /// The initializer of a declaration as data lines.
+    fn decl_data(&self, lay: Lay, dims: (u32, [u32; 3]), items: &[Expr], pos: Pos) -> R<String> {
+        let mut all = vec![dims.0];
+        all.extend(dims.1.iter().filter(|&&d| d > 0));
+        let flat = self.flat_init(items, &all, lay)?;
+        let total = all.iter().product();
+        self.array_data(lay, total, &flat, pos)
     }
 
     /// `db` / `dw` lines for an array initializer (missing values are 0 / "").
@@ -384,7 +481,7 @@ impl Gen {
     fn declare_local_obj(&mut self, name: &str, obj: Obj) -> String {
         self.n += 1;
         let label = format!("l_{}_{}_{}", Self::safe(&self.cur_fn), Self::safe(name), self.n);
-        let bytes = self.lay_size(obj.lay) * obj.len.unwrap_or(1);
+        let bytes = self.lay_size(obj.lay) * obj.total().unwrap_or(1);
         self.alloc_bytes(&label, bytes);
         self.scopes
             .last_mut()
@@ -394,7 +491,7 @@ impl Gen {
     }
 
     fn declare_local(&mut self, name: &str, ty: Ty, len: Option<u32>) -> String {
-        self.declare_local_obj(name, Obj { lay: Lay::Prim(ty), len })
+        self.declare_local_obj(name, Obj::new(Lay::Prim(ty), len))
     }
 
     // ----------------------------------------------------------- top level
@@ -403,12 +500,17 @@ impl Gen {
         for (n, v) in builtin_consts() {
             self.globals.insert(n, Sym::Const(v));
         }
-        // pass 0a: top-level constants (usable in struct array sizes)
+        // pass 0a: top-level constants (usable in struct array sizes) and
+        // assets (so `image_width(img)` can be part of a constant), in order
         for item in &prog.items {
-            if let Item::Stmt(s @ Stmt { kind: StmtKind::VarDecl { is_const: true, .. }, .. }) = item {
-                if let Err(d) = self.declare_global(s) {
-                    self.errors.push(d);
-                }
+            let Item::Stmt(s) = item else { continue };
+            let r = match &s.kind {
+                StmtKind::VarDecl { is_const: true, .. } => self.declare_global(s),
+                StmtKind::Asset { name, path, image } => self.declare_asset(name, path, *image, s.pos),
+                _ => Ok(()),
+            };
+            if let Err(d) = r {
+                self.errors.push(d);
             }
         }
         // pass 0b: struct / class layouts (in declaration order)
@@ -439,7 +541,6 @@ impl Gen {
             if let Item::Stmt(s) = item {
                 let r = match &s.kind {
                     StmtKind::VarDecl { is_const: false, .. } => self.declare_global(s),
-                    StmtKind::Asset { name, path } => self.declare_asset(name, path, s.pos),
                     _ => Ok(()),
                 };
                 if let Err(d) = r {
@@ -488,14 +589,37 @@ impl Gen {
         self.check_interrupt_sharing();
     }
 
-    fn declare_asset(&mut self, name: &str, path: &str, pos: Pos) -> R<()> {
+    fn declare_asset(&mut self, name: &str, path: &str, image: bool, pos: Pos) -> R<()> {
         self.check_new_name(name, pos)?;
         let full = self.base_dir.join(path);
-        let a = crate::assets::load(&full).map_err(|e| Diag::new(pos, e))?;
         let label = format!("a_{name}");
+        if image {
+            let img = crate::assets::load_image(&full).map_err(|e| Diag::new(pos, e))?;
+            // pictures live in 8K pages from 28 (16K bank 14) upwards, above
+            // the two Layer 2 buffers (banks 8-13)
+            let first = self.images.last().map_or(28, |(_, i, p)| p + i.pages.len() as u32);
+            if first + img.pages.len() as u32 > 224 {
+                return Err(Diag::new(pos, "images use more than the Next's 1 MB of memory"));
+            }
+            let size = Some((img.width, img.height));
+            self.images.push((label.clone(), img, first));
+            self.globals.insert(name.to_string(), Sym::Asset { label, patterns: None, image: size });
+            return Ok(());
+        }
+        let a = crate::assets::load(&full).map_err(|e| Diag::new(pos, e))?;
         self.assets.push((label.clone(), a.bytes));
-        self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns });
+        self.globals.insert(name.to_string(), Sym::Asset { label, patterns: a.patterns, image: None });
         Ok(())
+    }
+
+    /// The image asset named by an argument: (label, width, height).
+    fn image_arg(&self, e: &Expr) -> R<(String, u32, u32)> {
+        if let ExprKind::Name(n) = &e.kind {
+            if let Some(Sym::Asset { label, image: Some((w, h)), .. }) = self.lookup(n) {
+                return Ok((label, w, h));
+            }
+        }
+        Err(Diag::new(e.pos, "expected an image asset: `asset name = image(\"file.png\")`"))
     }
 
     fn init_global(&mut self, name: &str, init: &Option<Expr>, pos: Pos) -> R<()> {
@@ -509,7 +633,7 @@ impl Gen {
                 self.gen_expr(init, ty)?;
                 self.store(&label, ty);
             }
-            (Lay::Struct(id), None) => self.init_struct(&label, id, obj.len, pos)?,
+            (Lay::Struct(id), None) => self.init_struct(&label, id, obj.total(), pos)?,
             (Lay::Struct(_), Some(_)) => return Err(Diag::new(pos, "struct variables cannot have an initializer (yet)")),
             (Lay::Str, Some(init)) if obj.len.is_none() => {
                 self.comment(pos, &format!("init {name}"));
@@ -554,9 +678,8 @@ impl Gen {
                 }
                 (Some(e), _) => return Err(Diag::new(e.pos, "struct fields cannot have a default")),
             };
-            let len = self.array_len(&f.array)?;
-            let obj = Obj { lay, len };
-            let size = self.lay_size(lay) * len.unwrap_or(1);
+            let obj = Self::mk_obj(lay, self.decl_dims(&f.array, &None)?);
+            let size = self.lay_size(lay) * obj.total().unwrap_or(1);
             fields.push(FieldDef { name: f.name.clone(), obj, offset, init });
             offset += size;
         }
@@ -597,7 +720,7 @@ impl Gen {
                         self.load_imm(v, t);
                         self.store(&at, t);
                     }
-                    (Lay::Struct(s), _) => self.init_struct(&at, s, f.obj.len, pos)?,
+                    (Lay::Struct(s), _) => self.init_struct(&at, s, f.obj.total(), pos)?,
                     _ => {}
                 }
             }
@@ -661,7 +784,8 @@ impl Gen {
     fn declare_global(&mut self, s: &Stmt) -> R<()> {
         let StmtKind::VarDecl { ty, name, array, init, is_const } = &s.kind else { unreachable!() };
         self.check_new_name(name, s.pos)?;
-        let array = &self.decl_len(array, init)?;
+        let dims = self.decl_dims(array, init)?;
+        let array = &dims.map(|(n, sub)| Self::mk_obj(Lay::Prim(Ty::Byte), Some((n, sub))).total().unwrap());
         if *is_const {
             let sym = self.const_sym(init.as_ref().unwrap(), s.pos)?;
             self.globals.insert(name.clone(), sym);
@@ -678,13 +802,13 @@ impl Gen {
         let label = format!("g_{name}");
         if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
             // initial values are part of the program image: no code at all
-            let data = self.array_data(lay, array.unwrap(), items, s.pos)?;
+            let data = self.decl_data(lay, dims.unwrap(), items, s.pos)?;
             let _ = write!(self.data, "{label}:\n{data}");
         } else {
             let bytes = self.lay_size(lay) * array.unwrap_or(1);
             self.alloc_bytes(&label, bytes);
         }
-        self.globals.insert(name.clone(), Sym::Var { obj: Obj { lay, len: *array }, label, by_ref: false });
+        self.globals.insert(name.clone(), Sym::Var { obj: Self::mk_obj(lay, dims), label, by_ref: false });
         Ok(())
     }
 
@@ -709,7 +833,7 @@ impl Gen {
         let mut params = HashMap::new();
         for (p, lay, slot) in &sig.params {
             let by_ref = matches!(lay, Lay::Struct(_) | Lay::Str);
-            params.insert(p.clone(), Sym::Var { obj: Obj { lay: *lay, len: None }, label: slot.clone(), by_ref });
+            params.insert(p.clone(), Sym::Var { obj: Obj::new(*lay, None), label: slot.clone(), by_ref });
         }
         self.scopes.push(params);
         self.scopes.push(HashMap::new());
@@ -924,7 +1048,9 @@ impl Gen {
         self.str_tmp = 0;
         match &s.kind {
             StmtKind::VarDecl { ty, name, array, init, is_const } => {
-                let array = &self.decl_len(array, init)?;
+                let dims = self.decl_dims(array, init)?;
+                // `array`: total number of elements over all dimensions
+                let array = &dims.map(|(n, sub)| Self::mk_obj(Lay::Prim(Ty::Byte), Some((n, sub))).total().unwrap());
                 if self.scopes.is_empty() {
                     // nested block in main program: give it a scope of its own
                     unreachable!("top-level declarations are handled in run()");
@@ -943,11 +1069,11 @@ impl Gen {
                     let lay = self.resolve_type(t, s.pos)?;
                     let n = array.unwrap();
                     self.comment(s.pos, &format!("local {name}"));
-                    let data = self.array_data(lay, n, items, s.pos)?;
+                    let data = self.decl_data(lay, dims.unwrap(), items, s.pos)?;
                     self.n += 1;
                     let tab = format!("ai_{}", self.n);
                     let _ = write!(self.data, "{tab}:\n{data}");
-                    let label = self.declare_local_obj(name, Obj { lay, len: Some(n) });
+                    let label = self.declare_local_obj(name, Self::mk_obj(lay, dims));
                     self.e(&format!("ld hl,{tab}"));
                     self.e(&format!("ld de,{label}"));
                     self.e(&format!("ld bc,{}", self.lay_size(lay) * n));
@@ -967,7 +1093,7 @@ impl Gen {
                     if let Some(e) = init {
                         self.gen_str(e)?;
                     }
-                    let label = self.declare_local_obj(name, Obj { lay: Lay::Str, len: *array });
+                    let label = self.declare_local_obj(name, Self::mk_obj(Lay::Str, dims));
                     match (init, *array) {
                         (Some(_), _) => {
                             self.e(&format!("ld de,{label}"));
@@ -1003,7 +1129,7 @@ impl Gen {
                                 return Err(Diag::new(s.pos, "struct variables cannot have an initializer (yet)"));
                             }
                             self.comment(s.pos, &format!("local {name}"));
-                            let label = self.declare_local_obj(name, Obj { lay: Lay::Struct(id), len: *array });
+                            let label = self.declare_local_obj(name, Self::mk_obj(Lay::Struct(id), dims));
                             // locals live in static frames: re-apply defaults on every entry
                             return self.init_struct(&label, id, *array, s.pos);
                         }
@@ -1016,7 +1142,7 @@ impl Gen {
                     None if array.is_none() => self.load_imm(0, ty),
                     None => {}
                 }
-                let label = self.declare_local(name, ty, *array);
+                let label = self.declare_local_obj(name, Self::mk_obj(Lay::Prim(ty), dims));
                 if init.is_some() || array.is_none() {
                     self.store(&label, ty);
                 }
@@ -1293,13 +1419,15 @@ impl Gen {
             },
             ExprKind::Index(b, _) => {
                 if Self::is_hw(e, "memory") || Self::is_hw(e, "nextreg") || Self::is_hw(e, "port") {
-                    return Ok(Obj { lay: Lay::Prim(Ty::Byte), len: None });
+                    return Ok(Obj::new(Lay::Prim(Ty::Byte), None));
                 }
                 let o = self.obj_of(b)?;
                 if o.len.is_none() {
                     return Err(Diag::new(e.pos, "indexing something that is not an array"));
                 }
-                Ok(Obj { lay: o.lay, len: None })
+                // drop the outermost dimension
+                let len = if o.sub[0] > 0 { Some(o.sub[0]) } else { None };
+                Ok(Obj { lay: o.lay, len, sub: [o.sub[1], o.sub[2], 0] })
             }
             ExprKind::Field(b, f) => {
                 let (id, fd) = self.field(b, f, e.pos)?;
@@ -1353,7 +1481,7 @@ impl Gen {
                 match self.const_eval(i) {
                     Some(k) => {
                         Self::check_index(o.len, k, i.pos)?;
-                        let esz = self.lay_size(o.lay) as i64;
+                        let esz = (self.lay_size(o.lay) * o.inner()) as i64;
                         self.static_addr(b)?.map(|bs| format!("{bs}+{}", k * esz))
                     }
                     None => None,
@@ -1416,7 +1544,7 @@ impl Gen {
             ExprKind::Index(_, i) if Self::is_hw(e, "memory") => self.gen_expr(i, Ty::Word)?,
             ExprKind::Index(b, i) => {
                 let o = self.obj_of(b)?;
-                let esz = self.lay_size(o.lay);
+                let esz = self.lay_size(o.lay) * o.inner();
                 if let Some(k) = self.const_eval(i) {
                     Self::check_index(o.len, k, i.pos)?;
                     self.place_hl(b)?;
@@ -1485,7 +1613,7 @@ impl Gen {
                 return Ok(Ty::Byte);
             }
         }
-        let Obj { lay: Lay::Prim(ty), len: None } = self.obj_of(e)? else {
+        let Obj { lay: Lay::Prim(ty), len: None, .. } = self.obj_of(e)? else {
             return Err(Diag::new(e.pos, "not a simple value"));
         };
         match self.place(e)? {
@@ -1707,6 +1835,10 @@ impl Gen {
                     _ => return None,
                 })
             }
+            ExprKind::Call(n, args) if (n == "image_width" || n == "image_height") && args.len() == 1 => {
+                let (_, w, h) = self.image_arg(&args[0]).ok()?;
+                Some(if n == "image_width" { w } else { h } as i64)
+            }
             ExprKind::Call(n, args) if matches!(n.as_str(), "abs" | "min" | "max" | "clamp") => {
                 let v: Option<Vec<i64>> = args.iter().map(|a| self.const_eval(a)).collect();
                 let v = v?;
@@ -1742,7 +1874,7 @@ impl Gen {
             }
             ExprKind::Name(n) if matches!(self.lookup(n), Some(Sym::Const(_))) => None,
             ExprKind::Name(_) | ExprKind::Index(..) | ExprKind::Field(..) => match self.obj_of(e)? {
-                Obj { lay: Lay::Prim(t), len: None } => Some(t),
+                Obj { lay: Lay::Prim(t), len: None, .. } => Some(t),
                 Obj { len: Some(_), .. } => return Err(Diag::new(e.pos, "array used without an index")),
                 Obj { lay: Lay::Str, .. } => return Err(Diag::new(e.pos, "a string cannot be used as a number here")),
                 Obj { lay, .. } => {
@@ -1774,7 +1906,7 @@ impl Gen {
                     Some(Ty::Word)
                 } else if n == "point" {
                     Some(Ty::Byte)
-                } else if n == "addr" || n == "random" {
+                } else if matches!(n.as_str(), "addr" | "random" | "image_width" | "image_height") {
                     Some(Ty::Word)
                 } else if n == "any_key" {
                     Some(Ty::Bool)
@@ -1930,7 +2062,7 @@ impl Gen {
             ExprKind::Str(_) | ExprKind::Binary(BinOp::Concat, ..) => true,
             ExprKind::Name(n) if matches!(self.lookup(n), Some(Sym::SConst(_))) => true,
             ExprKind::Name(_) | ExprKind::Index(..) | ExprKind::Field(..) => {
-                matches!(self.obj_of(e), Ok(Obj { lay: Lay::Str, len: None }))
+                matches!(self.obj_of(e), Ok(Obj { lay: Lay::Str, len: None, .. }))
             }
             ExprKind::Call(n, _) => {
                 matches!(n.as_str(), "sub" | "chr" | "str" | "upper" | "lower")
@@ -2290,7 +2422,7 @@ impl Gen {
         matches!(e.kind, ExprKind::Name(_) | ExprKind::Index(..) | ExprKind::Field(..))
             && !Self::is_hw(e, "nextreg")
             && !Self::is_hw(e, "port")
-            && matches!(self.obj_of(e), Ok(Obj { lay: Lay::Prim(_), len: None }))
+            && matches!(self.obj_of(e), Ok(Obj { lay: Lay::Prim(_), len: None, .. }))
             && matches!(self.static_addr(e), Ok(Some(_)))
     }
 
@@ -3296,7 +3428,7 @@ impl Gen {
                     ExprKind::Name(n) => self.lookup(n),
                     _ => None,
                 };
-                let Some(Sym::Asset { label, patterns: Some(count) }) = found else {
+                let Some(Sym::Asset { label, patterns: Some(count), .. }) = found else {
                     return Err(Diag::new(args[1].pos, "second argument must be a sprite asset (.png / .spr)"));
                 };
                 if let Some(first) = self.const_eval(&args[0]) {
@@ -3312,6 +3444,24 @@ impl Gen {
                 self.e(&format!("ld d,{count}"));
                 self.e("call rt_sprite_upload");
                 return Ok(None);
+            }
+            "draw_image" => {
+                argc(3)?;
+                let (label, _, _) = self.image_arg(&args[0])?;
+                self.gen_expr(&args[1], Ty::SWord)?;
+                self.e("ld (rt_img_x),hl");
+                self.gen_expr(&args[2], Ty::SWord)?;
+                self.e("ld (rt_img_y),hl");
+                self.e(&format!("ld hl,{label}"));
+                self.e("call rt_draw_image");
+                return Ok(None);
+            }
+            "image_width" | "image_height" => {
+                argc(1)?;
+                let (_, w, h) = self.image_arg(&args[0])?;
+                let v = if name == "image_width" { w } else { h };
+                self.e(&format!("ld hl,{v}"));
+                return Ok(Some(Ty::Word));
             }
             "kempston" => {
                 argc(0)?;
@@ -3496,6 +3646,16 @@ impl Gen {
                 let _ = writeln!(out, "    dw {}", c.join(","));
             }
         }
+        if !self.images.is_empty() {
+            out.push_str(runtime::IMAGES);
+            for (label, img, first) in &self.images {
+                let _ = writeln!(
+                    out,
+                    "{label}: db {first}\n    dw {}\n    db {},{},{}",
+                    img.width, img.height, img.rows_per_page, img.masked as u8
+                );
+            }
+        }
         if self.uses_trig {
             out.push_str(runtime::TRIG);
             out.push_str("rt_sin_tab:\n");
@@ -3519,13 +3679,33 @@ impl Gen {
         let _ = write!(
             out,
             "\n__program_end:\n    ASSERT __program_end <= $FD00, \"program too large for the v0 memory layout\"\n\n\
+             {}\
              \x20   SAVENEX OPEN \"{}\", __start, $FDFD\n\
              \x20   SAVENEX CORE 3,0,0\n\
              \x20   SAVENEX CFG 0\n\
              \x20   SAVENEX AUTO\n\
              \x20   SAVENEX CLOSE\n",
+            self.image_pages(),
             opts.nex_name
         );
+        out
+    }
+}
+
+impl Gen {
+    /// Picture data: each 8K page assembled into MMU slot 1 at $2000.
+    fn image_pages(&self) -> String {
+        let mut out = String::new();
+        for (label, img, first) in &self.images {
+            let _ = writeln!(out, "; picture {label}: {}x{}", img.width, img.height);
+            for (k, page) in img.pages.iter().enumerate() {
+                let _ = writeln!(out, "    MMU 1 e, {}\n    ORG $2000", first + k as u32);
+                for chunk in page.chunks(32) {
+                    let row: Vec<String> = chunk.iter().map(|b| b.to_string()).collect();
+                    let _ = writeln!(out, "    db {}", row.join(","));
+                }
+            }
+        }
         out
     }
 }

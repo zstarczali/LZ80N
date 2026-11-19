@@ -1677,3 +1677,165 @@ fn library_names_are_reserved() {
     // field and method names are scoped to their class
     expect("r_lib_methods", "class Box\n byte line\n function update() -> byte\n return self.line + 1\n end\nend\nBox b\nb.line = 4\nprint(b.update())", "5\n");
 }
+
+#[test]
+fn run_circles_and_ellipses() {
+    let src = r#"
+fill_circle(100, 100, 10, 7)
+print(point(100, 100), point(110, 100), point(111, 100), point(100, 90), point(100, 89), point(90, 100))
+circle(50, 50, 20, 9)
+print(point(70, 50), point(30, 50), point(50, 30), point(50, 70), point(50, 50), point(64, 64) + point(65, 64) + point(64, 65))
+ellipse(128, 150, 40, 20, 5)
+print(point(168, 150), point(88, 150), point(128, 130), point(128, 170), point(128, 150), point(169, 150))
+fill_ellipse(200, 40, 30, 8, 3)
+print(point(230, 40), point(231, 40), point(200, 48), point(200, 49), point(215, 44))
+fill_circle(-5, 5, 20, 4)              -- clipped at the left and top
+fill_circle(250, 188, 12, 6)           -- clipped at the right and bottom
+print(point(0, 5), point(14, 5), point(250, 191), point(255, 188))
+"#;
+    expect("r_circles", src, "7 7 0 7 0 7\n9 9 9 9 0 9\n5 5 5 5 0 0\n3 0 3 0 3\n4 4 6 6\n");
+}
+
+/// The outline of a circle has no gaps: every pixel has a neighbour.
+#[test]
+fn circle_outline_is_closed() {
+    // one shape per run: where two outlines cross, one overwrites the other
+    let shapes = [
+        "circle(128, 96, 60, 1)",
+        "ellipse(128, 96, 100, 30, 1)",
+        "ellipse(128, 96, 20, 90, 1)",
+        "circle(20, 20, 3, 1)",
+    ];
+    for (i, src) in shapes.iter().enumerate() {
+        let Some((_, cpu)) = run_with(&format!("r_circle_closed{i}"), src, |_| {}) else { return };
+        let px: Vec<(i32, i32)> = (0..192)
+            .flat_map(|y| (0..256).map(move |x| (x, y)))
+            .filter(|&(x, y)| cpu.l2_pixel(x as usize, y as usize) == 1)
+            .collect();
+        assert!(px.len() > 10, "{src}: {} pixels", px.len());
+        let set: HashSet<_> = px.iter().copied().collect();
+        for &(x, y) in &px {
+            let n = (-1..=1)
+                .flat_map(|dx| (-1..=1).map(move |dy| (dx, dy)))
+                .filter(|&(dx, dy)| (dx, dy) != (0, 0) && set.contains(&(x + dx, y + dy)))
+                .count();
+            assert!(n >= 2, "{src}: pixel {x},{y} has {n} neighbours");
+        }
+    }
+}
+
+#[test]
+fn run_multi_dim_arrays() {
+    let src = r#"
+byte grid[3][4]
+for y = 0, 2 do
+    for x = 0, 3 do
+        grid[y][x] = y * 10 + x
+    end
+end
+print(grid[0][0], grid[1][2], grid[2][3])
+byte r = 2
+byte c = 1
+grid[r][c] += 100
+print(grid[r][c], grid[2][0], grid[1][3])
+word big[2][3] = {{1000, 2000, 3000}, {4000, 5000}}
+print(big[0][2], big[1][1], big[1][2])
+byte flat[2][3] = {1, 2, 3, 4, 5, 6}
+print(flat[1][0], flat[0][2])
+string names[][2] = {{"a", "b"}, {"c", "d"}, {"e"}}
+print(names[2][0], names[1][1], len(names[2][1]))
+sbyte cube[2][2][2] = {{{1, -2}, {3, 4}}, {{5, 6}, {7, -8}}}
+print(cube[0][0][1], cube[1][1][1], cube[1][0][0])
+struct P
+    byte x
+    byte y
+end
+P pts[2][3]
+pts[1][2].x = 7
+pts[1][2].y = 9
+print(pts[1][2].x + pts[1][2].y, pts[0][0].x)
+function local_t() -> byte
+    byte t[2][2] = {{1, 2}, {3, 4}}
+    t[1][1] += 1
+    return t[1][1] * 10 + t[0][1]
+end
+print(local_t(), local_t())
+struct Map
+    byte cells[2][5]
+    byte w
+end
+Map m
+m.cells[1][4] = 42
+m.w = 5
+print(m.cells[1][4], m.w)
+"#;
+    expect("r_multidim", src, "0 12 23\n121 20 13\n3000 5000 0\n4 3\ne d 0\n-2 -8 5\n16 0\n52 52\n42 5\n");
+}
+
+#[test]
+fn multi_dim_errors() {
+    assert!(err("byte g[2][3]\ng[0][3] = 1").contains("out of bounds"));
+    assert!(err("byte g[2][3]\ng[2][0] = 1").contains("out of bounds"));
+    assert!(err("byte g[2][3] = {{1, 2, 3, 4}}").contains("row of 3"));
+    assert!(err("byte g[2][] = {1}").contains("only the first size"));
+    assert!(err("byte g[2][3]\nprint(g[1])").contains("array used without an index"));
+}
+
+/// A 100x90 test picture: pixel = (x % 8) << 5 | (y % 8) << 2; (1,1) transparent.
+fn image_pixel(x: usize, y: usize) -> u8 {
+    if (x, y) == (1, 1) { 0xE3 } else { ((x % 8) << 5 | (y % 8) << 2) as u8 }
+}
+
+#[test]
+fn run_draw_image() {
+    let (w, h) = (100usize, 90usize);
+    let mut rgba = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let a = if (x, y) == (1, 1) { 0 } else { 255 };
+            rgba.extend([((x % 8) << 5) as u8, ((y % 8) << 5) as u8, 0, a]);
+        }
+    }
+    let dir = std::env::temp_dir().join("lz80nc_assets");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pic.png");
+    std::fs::write(&path, crate::assets::encode_png(w as u32, h as u32, &rgba)).unwrap();
+    let src = format!(
+        "asset pic = image(\"{}\")\nprint(image_width(pic), image_height(pic))\n\
+         draw_image(pic, -10, 120)\ndraw_image(pic, 200, -5)\ndraw_image(pic, 300, 0)\ndraw_image(pic, 0, -200)",
+        path.display().to_string().replace('\\', "/")
+    );
+    let Some((out, cpu)) = run_with("r_draw_image", &src, |_| {}) else { return };
+    assert_eq!(out, "100 90\n");
+    for sy in 0..192i32 {
+        for sx in 0..256i32 {
+            let mut want = 0;
+            for (ox, oy) in [(-10, 120), (200, -5)] {
+                let (ix, iy) = (sx - ox, sy - oy);
+                if (0..w as i32).contains(&ix) && (0..h as i32).contains(&iy) {
+                    let p = image_pixel(ix as usize, iy as usize);
+                    if p != 0xE3 {
+                        want = p; // transparent pixels leave the screen as it was
+                    }
+                }
+            }
+            assert_eq!(cpu.l2_pixel(sx as usize, sy as usize), want, "pixel {sx},{sy}");
+        }
+    }
+    assert!(err("byte n = 1\ndraw_image(n, 0, 0)").contains("image asset"));
+}
+
+#[test]
+fn run_triangles() {
+    let src = r#"
+fill_triangle(10, 10, 60, 10, 10, 60, 5)
+print(point(10, 10), point(60, 10), point(10, 60), point(30, 30), point(40, 40), point(61, 10))
+fill_triangle(200, 100, 150, 180, 250, 150, 6)    -- any corner order
+print(point(200, 100), point(200, 150), point(150, 180), point(250, 150), point(150, 100))
+fill_triangle(-20, 100, 40, -30, 40, 230, 7)      -- clipped
+print(point(0, 100), point(39, 0), point(39, 191), point(30, 100))
+triangle(100, 20, 140, 20, 120, 60, 8)
+print(point(100, 20), point(120, 20), point(120, 60), point(110, 40), point(120, 30))
+"#;
+    expect("r_triangles", src, "5 5 5 5 0 0\n6 6 6 6 0\n7 7 7 7\n8 8 8 8 0\n");
+}

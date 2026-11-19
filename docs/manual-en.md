@@ -187,7 +187,7 @@ inside a method).
 
 **Built-in functions** (implemented by the compiler)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height`
 
 **Standard library names** (functions, types and constants written in LZ80N).
 They are reserved in **every** program, even one that does not use the
@@ -196,13 +196,14 @@ module, so a name never changes meaning when a program starts to use it:
 | Module | Names |
 |--------|-------|
 | sprite | `Sprite` `sprite` `sprites_visible` |
-| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `TRANSPARENT` |
+| Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` |
 | palette | `palette` `palette9` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
 | sound | `sound_reset` `sound_mix` `tone` `noise` `volume` `sound_off` `beep` `play` `play_loop` `playing` `sound_tick` |
 
 Names starting with **`snd_`** are reserved for the sound module's internal
-variables and functions.
+variables and functions, names starting with **`l2_`** for the Layer 2
+module's helpers.
 
 **Built-in constants** (they already exist, so declaring them again is an
 error): `BLACK` … `WHITE`, `BRIGHT_BLACK` … `BRIGHT_WHITE`, `KEY_…`, `JOY_…`,
@@ -279,6 +280,27 @@ scores[i] += 10
 * Indexes are **not checked at run time**, which keeps the code fast.
   Constant indexes are checked at compile time.
 * A whole array cannot be assigned at once. Use a loop or `dma_copy`.
+
+**Multi-dimensional arrays** have one size per dimension (at most 4):
+
+```lua
+byte grid[24][32]                 -- 24 rows of 32
+grid[y][x] = 1
+grid[y][x + 1] += grid[y][x]
+word table[4][3] = {{1, 2, 3}, {4, 5, 6}}   -- rows as nested lists
+byte flat[2][3] = {1, 2, 3, 4, 5, 6}        -- or one flat list, row by row
+string names[][2] = {{"Ann", "Bob"}, {"Cid"}}   -- [] : number of rows from the list
+Enemy wave[3][8]                  -- structs too
+struct Map
+    byte cells[16][16]            -- and in struct fields
+end
+```
+
+* The elements are stored row by row (the last index changes fastest), so
+  `grid[y][x]` is at `y * 32 + x`.
+* `grid[y]` alone is a row, which can only be indexed further.
+* Only the first size may be `[]`. Short rows in a nested list are padded
+  with zeros.
 
 ### 4.5 Array initialisers
 
@@ -761,7 +783,17 @@ through.
 | `rect(x, y, w, h, c)` | rectangle outline |
 | `fill_rect(x, y, w, h, c)` | filled rectangle |
 | `rgb(r, g, b)` → byte | build a colour: r, g 0–7, b 0–3 |
+| `circle(x, y, r, c)` | circle outline |
+| `fill_circle(x, y, r, c)` | filled circle |
+| `ellipse(x, y, rx, ry, c)` | ellipse outline, radii `rx` and `ry` |
+| `fill_ellipse(x, y, rx, ry, c)` | filled ellipse |
+| `triangle(x0, y0, x1, y1, x2, y2, c)` | triangle outline |
+| `fill_triangle(x0, y0, x1, y1, x2, y2, c)` | filled triangle (corners in any order) |
+| `draw_image(img, x, y)` | draw a picture (see 16.1) |
 | `layer2_flip()` | double buffering: show the image drawn so far, draw into the other buffer |
+
+Circles, ellipses and filled triangles take `sword` coordinates and are
+**clipped**: a shape may hang off any edge of the screen. Radii are 0–255.
 
 ```lua
 layer2_visible(true)
@@ -787,7 +819,8 @@ end
 Layer order is **S-U-L**: sprites on top, then text, then Layer 2.
 
 Rows 192 and below are ignored by `plot`. Pixels are accessed through MMU
-slot 0 (`$0000`–`$1FFF`). Once Layer 2 drawing has been used, `memory[0]` …
+slot 0 (`$0000`–`$1FFF`); `draw_image` also uses slot 1 (`$2000`–`$3FFF`)
+while it copies and puts the ROM back there afterwards. Once Layer 2 drawing has been used, `memory[0]` …
 `memory[$1FFF]` show the last Layer 2 page used, not the ROM.
 
 ---
@@ -838,6 +871,30 @@ is relative to the source file.
   Colours are converted to the Next's `RRRGGGBB` format. Transparent pixels
   (alpha < 128) become the sprite transparency colour `$E3`.
 * `.spr`: raw 8-bit sprite patterns (256 bytes each).
+
+**Pictures for Layer 2**
+
+```lua
+asset title = image("assets/title.png")       -- up to 256 x 255 pixels
+asset logo = image("assets/logo.png")
+
+draw_image(title, 0, 0)                       -- a full-screen picture
+draw_image(logo, x, y)                        -- x, y: sword, may be off screen
+const LOGO_W = image_width(logo)              -- size, known when compiling
+const LOGO_H = image_height(logo)
+```
+
+* The PNG is converted to `RRRGGGBB` when compiling. Its pixels are stored
+  in their **own memory pages** (from 16K bank 14 up), not in the 31 KB
+  program area, so a full 256 × 192 picture (48 KB) costs the program
+  only 6 bytes. All pictures together can use about 780 KB.
+* `draw_image` copies the picture into Layer 2 (the buffer being drawn),
+  clipped at every edge. Rows are copied with `LDIR`: a full screen takes
+  about 2 frames at 28 MHz.
+* Transparent PNG pixels (alpha < 128) are **skipped**, so the screen shows
+  through, like with sprites. A picture without transparent pixels is
+  copied with the faster plain copy.
+* `image_width` and `image_height` are constants.
 
 ### 16.2 Sprites
 
@@ -1124,6 +1181,7 @@ $0000..$1FFF  MMU slot 0: Layer 2 drawing window (after drawing)
 $4000..$5AFF  ULA screen (unused, cleared)
 $6000..$69FF  tilemap (text layer)
 $6C00..$6FFF  text font
+$2000..$3FFF  MMU slot 1: picture pages (only inside draw_image)
 $8000..$FCFF  program code and data (checked at compile time)
 $FDFC..       stack (grows downwards)
 $FDFD..$FDFF  JP to the interrupt handler
@@ -1155,7 +1213,6 @@ Not supported yet:
 * recursion (static frames)
 * `long` (32-bit), `fixed16` (16.16)
 * returning structs, constructors, inheritance, initialisers for arrays of structs
-* multi-dimensional arrays (planned next)
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
 * programs larger than about 31 KB (memory banks)
 * sample playback through the Next's DAC, PT3 music import
@@ -1176,7 +1233,8 @@ register allocation.
 | `print`, `write`, `at`, `ink`, `cls`, `border` | 11 |
 | `key`, `kempston`, `any_key`, `wait_key` | 12 |
 | `vsync`, `pause`, `frames`, `random`, `seed`, `cpu_speed` | 13 |
-| `layer2_visible`, `layer2_clear`, `layer2_flip`, `plot`, `point`, `hline`, `vline`, `line`, `rect`, `fill_rect`, `rgb` | 14 |
+| `layer2_visible`, `layer2_clear`, `layer2_flip`, `plot`, `point`, `hline`, `vline`, `line`, `rect`, `fill_rect`, `circle`, `fill_circle`, `ellipse`, `fill_ellipse`, `triangle`, `fill_triangle`, `rgb` | 14 |
+| `draw_image`, `image_width`, `image_height` | 14, 16 |
 | `palette`, `palette9`, `rgb9` | 15 |
 | `sprite_load`, `sprites_visible`, `sprite[n]` | 16 |
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
@@ -1212,6 +1270,9 @@ register allocation.
 | `raster.lz80n` | copper, raster and frame interrupts, `random` |
 | `strings.lz80n` | strings and string functions, a scrolling ticker |
 | `tables.lz80n` | array initialisers: menu, bar chart and colour tables, `/=` `%=` |
+| `life.lz80n` | Game of Life on 2-D arrays, 2-D initialisers |
+| `shapes.lz80n` | circles, ellipses, clipping, double buffering |
+| `images.lz80n` | PNG pictures on Layer 2, transparency |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |
