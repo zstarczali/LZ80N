@@ -1076,6 +1076,34 @@ rt_l2_init:
     ld (rt_l2page),a
     ret
 
+; ---- far memory: 8K pages through MMU slot 1 ($2000-$3FFF) ----
+; rt_farpage always holds the page in slot 1 ($FF = ROM); interrupts save
+; and restore it. A = first page of the data, HL = byte offset (< 64K) ->
+; the right page mapped, HL = address. Clobbers A, C.
+rt_far_map:
+    ld c,a
+    ld a,h
+    rlca
+    rlca
+    rlca
+    and 7                   ; offset / 8K
+    add a,c
+    ld c,a
+    ld a,(rt_farpage)
+    cp c
+    jr z,.same
+    ld a,c
+    ld (rt_farpage),a
+    nextreg $51,a
+.same:
+    ld a,h
+    and $1F
+    or $20
+    ld h,a
+    ret
+
+rt_farpage: db $FF
+
 ; double buffering: show the bank drawn so far, draw into the other one
 rt_l2_flip:
     ld a,(rt_l2bank)
@@ -1559,6 +1587,7 @@ rt_draw_image:
     call rt_l2_map          ; slot 0 = destination page, HL = address
     ex de,hl
     ld a,(rt_img_page)
+    ld (rt_farpage),a
     nextreg $51,a
     ld hl,(rt_img_ptr)
     ld bc,(rt_img_cw)
@@ -1573,7 +1602,9 @@ rt_draw_image:
     ld hl,rt_img_ch
     dec (hl)
     jr nz,.row
-    nextreg $51,$FF         ; ROM back in slot 1
+    ld a,$FF
+    ld (rt_farpage),a
+    nextreg $51,a           ; ROM back in slot 1
     ret
 ; copy BC pixels, leaving the screen where the picture is TRANSPARENT
 .masked:

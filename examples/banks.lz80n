@@ -1,0 +1,75 @@
+-- banks.lz80n -- far arrays: big data in its own memory banks
+--
+--  * far byte cave[64][256]: a 16 KB map that does not use the 31 KB
+--    program area (it lives in 8K pages above the Layer 2 buffers)
+--  * far word heights[256]: the ceiling height of every column
+--  * the map is generated once, then a 32x22 window is shown as 8x8 tiles
+--  * O / P scroll the window (hold SPACE for fast scrolling)
+
+const W = 256
+const H = 64
+far byte cave[H][W]
+far byte roof[W]
+far byte floor[W]
+
+-- generate a winding cave: random walk of the roof and the floor
+seed(1234)
+byte r = 10
+byte f = 50
+for x = 0, W - 1 do
+    r = byte(clamp(sword(r) + sword(random(5)) - 2, 2, 30))
+    f = byte(clamp(sword(f) + sword(random(5)) - 2, r + 12, 61))
+    roof[x] = r
+    floor[x] = f
+    for y = 0, H - 1 do
+        byte t = 0                          -- 0 = air
+        if y < r or y > f then t = 1 end    -- 1 = rock
+        if y == r or y == f then t = 2 end  -- 2 = edge
+        cave[y][x] = t
+    end
+    -- crystals here and there
+    if random(8) == 0 then cave[f - 1][x] = 3 end
+end
+
+byte colours[] = {0, 0x49, 0x6D, 0x1F}
+
+function draw(byte left, byte top)
+    for ty = 0, 21 do
+        for tx = 0, 31 do
+            fill_rect(tx * 8, 16 + ty * 8, 8, 8, colours[cave[top + ty][left + tx]])
+        end
+    end
+end
+
+ink(BRIGHT_WHITE)
+at(0, 1)
+write("far arrays: 16K map in banks  O/P")
+layer2_visible(true)
+layer2_clear(0)
+
+byte left = 0
+byte top = 0
+bool dirty = true
+while true do
+    if dirty then
+        -- keep the cave in view: centre on the middle of this column
+        byte mid = (roof[left + 16] + floor[left + 16]) / 2
+        top = byte(clamp(sword(mid) - 11, 0, H - 22))
+        draw(left, top)
+        layer2_flip()
+        at(1, 1)
+        write("x = ", left, "   ")
+        dirty = false
+    end
+    byte step = 1
+    if key(KEY_SPACE) then step = 4 end
+    if key(KEY_P) and left <= W - 32 - step then
+        left += step
+        dirty = true
+    end
+    if key(KEY_O) and left >= step then
+        left -= step
+        dirty = true
+    end
+    vsync()
+end
