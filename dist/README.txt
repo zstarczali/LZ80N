@@ -34,7 +34,7 @@ CONTENTS
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
                              as Markdown text
-  examples/                  19 example programs, their pictures and
+  examples/                  21 example programs, their pictures and
                              the include files of modules.lz80n (lib/)
   benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
@@ -177,6 +177,8 @@ environment variable, sjasmplus next to lz80nc, sjasmplus on the PATH.
     word score = 0                 -- 0..65535
     sword speed = -300             -- -32768..32767
     fixed angle = 1.5              -- 8.8 fixed point, -128..127.99
+    long big = 2000000000          -- 32-bit
+    fixed16 x = 1000.0001          -- 16.16 fixed point
     bool alive = true
     string name = "Ann"            -- up to 64 characters
     const MAX = 10                 -- compile-time constant
@@ -242,6 +244,7 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     hello      numbers, functions, for loops, colours
     move       keyboard and joystick
     classes    structs, classes, methods, arrays of objects
+    inherit    constructors, inheritance, functions returning structs
     text       the text layer and its 16 colours
     strings    string functions, a scrolling ticker
     math       fixed point, sin/cos/atan2/sqrt, double buffering
@@ -256,6 +259,7 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     life       Game of Life on a 2-D array
     banks      far arrays: a 16 KB cave map in memory banks
     modules    a program in several files (include)
+    bignum     long and fixed16: big numbers, a cannonball's path
     recursion  a fractal tree, the Towers of Hanoi
     shooter    a little space shooter (O/P/Q/A or joystick, SPACE to fire)
 
