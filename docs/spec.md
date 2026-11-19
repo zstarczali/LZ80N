@@ -574,6 +574,23 @@ $FDFC..       stack (grows down)
 5. Sound: 8-bit DAC sample playback, music import (PT3 / Vortex Tracker).
 6. An IR between the AST and the backend, register allocation.
 
+## 32-bit types
+
+* `long` (signed 32) and `fixed16` (16.16) live in DE:HL (DE = high word).
+  Binary operations: left operand pushed, right evaluated, `exx`, left
+  popped: X = DE:HL, Y = DE':HL' (constant right operands are loaded
+  straight into the shadow set). Runtime (`runtime::long()`, emitted when
+  used): add/sub/and/or/xor/neg/cpl, `rt_cmp32` (Z equal, C less, signed),
+  `rt_mul32` (low 32 bits from 10 `MUL D,E` partial products, IX frame),
+  `rt_divu32`/`rt_divs32`/`rt_mods32` (restoring division, remainder in the
+  shadow set), `rt_fmul32` (bytes 2..5 of the product), `rt_fdiv32`
+  ((X << 16) / Y with X >> 16 as the initial remainder), shifts, min/max,
+  decimal output. The ISR saves the shadow registers when 32-bit code or
+  recursion is used.
+* Fixed point literals are lexed as raw 16.16; `fixed` rounds to 8.8.
+  `FConst` holds raw 16.16. A literal's natural type is `fixed` if it fits
+  8.8, else `fixed16`.
+
 ## Source files
 
 * `include "path"` (top level only) is expanded on the token stream before

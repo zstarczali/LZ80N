@@ -75,7 +75,7 @@
           }
         },
         {
-          "match": "(->)\\s*(bool|byte|sbyte|word|sword|fixed|string|[A-Za-z_][A-Za-z0-9_]*)",
+          "match": "(->)\\s*(bool|byte|sbyte|word|sword|fixed|fixed16|long|string|[A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "keyword.operator.arrow.lz80n" },
             "2": { "name": "storage.type.return.lz80n" }
@@ -132,7 +132,7 @@
 
     "types": {
       "name": "storage.type.primitive.lz80n",
-      "match": "\\b(bool|byte|sbyte|word|sword|fixed|string)\\b"
+      "match": "\\b(bool|byte|sbyte|word|sword|fixed16|fixed|long|string)\\b"
     },
 
     "self": {

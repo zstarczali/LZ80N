@@ -1,0 +1,69 @@
+-- bignum.lz80n -- 32-bit numbers: long and fixed16
+--
+--  * long: whole numbers up to +-2 147 483 647 (scores, factorials,
+--    a 32-bit random number generator)
+--  * fixed16: 16.16 fixed point, -32768 .. 32767.99998 with steps of
+--    1/65536 (precise physics: a cannonball's path on Layer 2)
+
+-- 12! still fits in a long
+function factorial(byte n) -> long
+    long f = 1
+    for i = 2, n do
+        f *= i
+    end
+    return f
+end
+
+-- a 32-bit linear congruential generator
+long state = 12345
+function next_random() -> long
+    state = state * 1103515245 + 12345
+    return (state >> 8) & $7FFFFF
+end
+
+ink(BRIGHT_YELLOW)
+at(0, 1)
+write("long and fixed16")
+ink(BRIGHT_WHITE)
+long score = 0
+for level = 1, 20 do
+    score += long(level) * 25000
+end
+at(2, 1)
+write("score after 20 levels: ", score)
+at(3, 1)
+write("12! = ", factorial(12))
+at(4, 1)
+write("random: ", next_random(), " ", next_random())
+
+-- fixed16: precise steps that `fixed` (1/256) could not add up
+fixed16 sum = 0
+for k = 1, 1000 do
+    sum += 0.001
+end
+at(5, 1)
+write("1000 x 0.001 = ", sum)
+fixed16 pi = 3.14159
+at(6, 1)
+write("area of r=100: ", pi * 100 * 100)
+
+-- a cannonball: position and speed in fixed16, gravity 0.05 per frame
+layer2_visible(true)
+layer2_clear(rgb(0, 0, 1))
+hline(0, 186, 256, rgb(2, 5, 1))
+fixed16 x = 4
+fixed16 y = 185
+fixed16 vx = 1.9
+fixed16 vy = -3.5
+while y <= 185 and x < 255 do
+    plot(byte(x), byte(y), rgb(7, 6, 1))
+    x += vx
+    y += vy
+    vy += 0.05
+end
+fill_circle(sword(x), 182, 4, rgb(7, 2, 0))
+layer2_flip()
+
+while true do
+    vsync()
+end

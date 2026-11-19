@@ -174,7 +174,7 @@ jelzi: `` `név` is a reserved name ``.
 
 **Típusnevek és a `self`**
 
-`bool` `byte` `sbyte` `word` `sword` `fixed` `string`, valamint a `self` (az
+`bool` `byte` `sbyte` `word` `sword` `fixed` `long` `fixed16` `string`, valamint a `self` (az
 objektum a metóduson belül).
 
 **Beépített függvények** (a fordító valósítja meg őket)
@@ -254,6 +254,8 @@ title("My game")
 | `word` | 2 | 0 … 65535 | előjel nélküli |
 | `sword` | 2 | -32768 … 32767 | előjeles |
 | `fixed` | 2 | -128 … 127,996 | 8.8 fixpontos, lépésköz 1/256 |
+| `long` | 4 | -2 147 483 648 … 2 147 483 647 | előjeles 32 bites (10.4) |
+| `fixed16` | 4 | -32768 … 32767,99998 | 16.16 fixpontos, lépésköz 1/65536 (10.4) |
 | `string` | 65 | 0 … 64 karakter | szöveg |
 
 A legkisebb, még elegendő típust válaszd. A Z80-on a 8 bites műveletek a
@@ -356,7 +358,7 @@ word table[] = {N * 100, N * 200}         -- konstans kifejezés is lehet
 ### 4.6 Konverziók (típuskényszerítés)
 
 Egy érték mindig **bővíthető** automatikusan: `byte` → `word`, `sbyte` →
-`sword`. A **szűkítést** ki kell írni:
+`sword`, bármely egész → `long`, `fixed` → `fixed16`. A **szűkítést** ki kell írni:
 
 ```lua
 word w = 1000
@@ -716,6 +718,50 @@ end
 
 A szinusz- és arkusztangens-táblázat (kb. 0,6 KB) csak akkor kerül a
 programba, ha a `sin`, `cos` vagy `atan2` szerepel benne.
+
+### 10.4 32 bites számok: `long` és `fixed16`
+
+Ha a 16 bit nem elég:
+
+| Típus | Méret | Tartomány | Mire |
+|-------|-------|-----------|------|
+| `long` | 4 bájt | -2 147 483 648 … 2 147 483 647 | nagy pontszámok, számlálók, szorzatok |
+| `fixed16` | 4 bájt | -32768 … 32767,99998, lépésköz 1/65536 | pontos pozíciók és fizika |
+
+```lua
+long score = 0
+score += long(level) * 25000         -- szorzás előtt bővíts
+long f = 1
+for i = 2, 12 do
+    f *= i                           -- 479001600
+end
+
+fixed16 x = 4
+fixed16 vy = -3.5
+vy += 0.05                           -- a kis lépések pontosan összeadódnak
+plot(byte(x), byte(y), c)
+```
+
+* Az egészek (`byte` … `sword`) automatikusan `long`-gá bővülnek, a `fixed`
+  `fixed16`-tá. A többi irányhoz konverzió kell: `long(f)`, `fixed16(n)`,
+  `word(l)`, `byte(l)`, `fixed(f16)`. Fixpontosból egészbe lefelé kerekít.
+* `long`-on minden operátor működik (`+ - * / % & | ~ << >>`,
+  összehasonlítások; a `>>` megtartja az előjelet). A `fixed16`-nak
+  `+ - * / %` és összehasonlítás van; a `fixed16 * egész` és
+  `fixed16 / egész` pontos.
+* A `print`, `write`, `str()` és `..` a `long`-ot teljes egészében, a
+  `fixed16`-ot legfeljebb négy tizedessel mutatja. Az `abs`, `min`, `max`
+  és `clamp` is működik.
+* `long` és `fixed16` lehet változó, tömbelem (inicializálással is),
+  struktúramező, paraméter és visszatérési érték. Még nem: `far` tömb
+  belőlük, és `long`-gal számoló `for` ciklus (helyette `while`).
+* Sebesség: az összeadás és az összehasonlítás néhány tucat T-ciklus, a
+  szorzás kb. 700, az osztás kb. 3000 (futtatórendszer-rutinok, a szorzás
+  a Z80N `MUL` utasítását használja). Ahol elég, használj 16 bites típust.
+* A tizedesponttal írt szám `fixed`, ha elfér 8.8-ban, különben `fixed16`.
+  `fixed16` változóba írva a teljes pontosságát megtartja.
+
+A `bignum.lz80n` példa mindkét típust használja.
 
 ---
 
@@ -1328,7 +1374,6 @@ változtatni.
 
 Még nem támogatott:
 
-* `long` (32 bites), `fixed16` (16.16)
 * struktúra visszaadása, konstruktor, öröklődés, kezdőérték struktúratömbnek
 * a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
 * kb. 31 KB-nál nagyobb főprogram (legfelső szintű kód, globálisok és
@@ -1391,6 +1436,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
 | `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
 | `banks.lz80n` | `far` tömbök: 16 KB-os barlangtérkép memóriabankokban |
+| `bignum.lz80n` | `long` és `fixed16`: nagy pontszámok, 12!, ágyúgolyó pályája |
 | `recursion.lz80n` | rekurzió: fraktálfa, Hanoi tornyai, kölcsönös rekurzió |
 | `modules.lz80n` | program három fájlban: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
