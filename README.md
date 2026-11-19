@@ -30,7 +30,7 @@
   <a href="docs/manual-en.md"><img alt="manual: English" src="https://img.shields.io/badge/manual-English-0a7bbb"></a>
   <a href="docs/manual-hu.md"><img alt="kézikönyv: Magyar" src="https://img.shields.io/badge/k%C3%A9zik%C3%B6nyv-Magyar-0a7bbb"></a>
   <a href="docs/spec-v0.md"><img alt="spec: v0" src="https://img.shields.io/badge/spec-v0-0a7bbb"></a>
-  <a href="examples/"><img alt="examples: 11 programs" src="https://img.shields.io/badge/examples-11%20programs-2ea44f"></a>
+  <a href="examples/"><img alt="examples: 12 programs" src="https://img.shields.io/badge/examples-12%20programs-2ea44f"></a>
   <a href="benchmarks/"><img alt="benchmark: LZ80N vs NextBASIC" src="https://img.shields.io/badge/benchmark-LZ80N%20vs%20NextBASIC-2ea44f"></a>
 </p>
 
@@ -86,6 +86,7 @@ Examples:
 | `math.lz80n` | `fixed` point, `sin`/`cos`/`atan2`/`sqrt`, gravity, Layer 2 double buffering |
 | `palette.lz80n` | palette cycling animation, `dma_copy`, `addr()` |
 | `raster.lz80n` | copper rainbow, `interrupt raster` / `interrupt frame`, `random()`, `cpu_speed()` |
+| `tables.lz80n` | array initializers: menu, bar chart and colour tables, `/=` `%=` |
 | `strings.lz80n` | string values, `..`, `sub`/`find`/`upper`/`str`, user string functions, a ticker |
 | `sound.lz80n` | 3 × AY: background music (`play_loop`), `beep` piano, laser and noise effects |
 | `sprites.lz80n` | hardware sprites, PNG `asset` conversion, a class driving sprites |

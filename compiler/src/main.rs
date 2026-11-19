@@ -23,6 +23,10 @@ pub fn compile_source(src: &str, nex_name: &str) -> Result<String, Vec<diag::Dia
 pub fn compile_with(src: &str, nex_name: &str, optimize: bool, base_dir: &Path) -> Result<String, Vec<diag::Diag>> {
     let toks = lexer::lex(src).map_err(|d| vec![d])?;
     let mut prog = parser::parse(toks).map_err(|d| vec![d])?;
+    let reserved = library_name_errors(&prog);
+    if !reserved.is_empty() {
+        return Err(reserved);
+    }
     for (used, lib_src) in [
         (prelude::uses_sound(src), prelude::SOUND),
         (prelude::uses_copper(src), prelude::COPPER),
@@ -39,6 +43,61 @@ pub fn compile_with(src: &str, nex_name: &str, optimize: bool, base_dir: &Path) 
     let opts = codegen::Options { nex_name: nex_name.to_string(), optimize, base_dir: base_dir.to_path_buf() };
     let out = codegen::compile(&prog, &opts)?;
     Ok(out.asm)
+}
+
+/// Declarations in the user's program that take a standard library name.
+fn library_name_errors(prog: &ast::Program) -> Vec<diag::Diag> {
+    use ast::{Item, Stmt, StmtKind};
+    fn check(name: &str, pos: diag::Pos, out: &mut Vec<diag::Diag>) {
+        if let Some(m) = prelude::library_module(name) {
+            out.push(diag::Diag::new(pos, format!("`{name}` is a reserved name (standard library: {m} module)")));
+        }
+    }
+    fn stmts(list: &[Stmt], out: &mut Vec<diag::Diag>) {
+        for s in list {
+            match &s.kind {
+                StmtKind::VarDecl { name, .. } | StmtKind::Asset { name, .. } => check(name, s.pos, out),
+                StmtKind::For { var, body, .. } => {
+                    check(var, s.pos, out);
+                    stmts(body, out);
+                }
+                StmtKind::While { body, .. } => stmts(body, out),
+                StmtKind::If { arms, otherwise } => {
+                    for (_, b) in arms {
+                        stmts(b, out);
+                    }
+                    if let Some(b) = otherwise {
+                        stmts(b, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn func(f: &ast::Func, is_method: bool, out: &mut Vec<diag::Diag>) {
+        if !is_method {
+            check(&f.name, f.pos, out);
+        }
+        for (p, _) in &f.params {
+            check(p, f.pos, out);
+        }
+        stmts(&f.body, out);
+    }
+    let mut out = Vec::new();
+    for item in &prog.items {
+        match item {
+            Item::Func(f) => func(f, false, &mut out),
+            Item::Interrupt(_, body, _) => stmts(body, &mut out),
+            Item::Struct(sd) => {
+                check(&sd.name, sd.pos, &mut out);
+                for m in &sd.methods {
+                    func(m, true, &mut out);
+                }
+            }
+            Item::Stmt(s) => stmts(std::slice::from_ref(s), &mut out),
+        }
+    }
+    out
 }
 
 fn find_sjasmplus(explicit: Option<PathBuf>) -> Option<PathBuf> {

@@ -22,8 +22,8 @@ pub enum Tok {
     // punctuation / operators
     Plus, Minus, Star, Slash, Percent, Amp, Pipe, Tilde, Shl, Shr,
     EqEq, NotEq, Lt, Le, Gt, Ge, Assign,
-    PlusEq, MinusEq, StarEq, AmpEq, PipeEq,
-    LParen, RParen, LBracket, RBracket, Comma, Dot, Arrow,
+    PlusEq, MinusEq, StarEq, AmpEq, PipeEq, SlashEq, PercentEq, ShlEq, ShrEq,
+    LParen, RParen, LBracket, RBracket, LBrace, RBrace, Comma, Dot, Arrow,
     Eof,
 }
 
@@ -217,6 +217,16 @@ impl<'a> Lexer<'a> {
             b'-' if n == b'=' => two(self, Tok::MinusEq),
             b'-' if n == b'>' => two(self, Tok::Arrow),
             b'*' if n == b'=' => two(self, Tok::StarEq),
+            b'/' if n == b'=' => two(self, Tok::SlashEq),
+            b'%' if n == b'=' => two(self, Tok::PercentEq),
+            b'<' if n == b'<' && self.peek(1) == b'=' => {
+                self.bump();
+                two(self, Tok::ShlEq)
+            }
+            b'>' if n == b'>' && self.peek(1) == b'=' => {
+                self.bump();
+                two(self, Tok::ShrEq)
+            }
             b'&' if n == b'=' => two(self, Tok::AmpEq),
             b'|' if n == b'=' => two(self, Tok::PipeEq),
             b'=' if n == b'=' => two(self, Tok::EqEq),
@@ -240,6 +250,8 @@ impl<'a> Lexer<'a> {
             b'(' => Tok::LParen,
             b')' => Tok::RParen,
             b'[' => Tok::LBracket,
+            b'{' => Tok::LBrace,
+            b'}' => Tok::RBrace,
             b']' => Tok::RBracket,
             b',' => Tok::Comma,
             b'.' if n == b'.' => two(self, Tok::DotDot),

@@ -1588,3 +1588,92 @@ write("q\tz")
         assert!(lines[5].starts_with("q?z"), "{t}");
     }
 }
+
+// ------------------------------------------------------------------
+// array initializers, compound assignment
+
+#[test]
+fn run_array_initializers() {
+    let src = r#"
+const N = 3
+byte primes[] = {2, 3, 5, 7, 11}
+word big[4] = {1000, 65535, N * 100}      -- the rest is 0
+sbyte delta[] = {-1, 0, 1}
+fixed speed[] = {0.5, 1, -1.25}
+bool solid[] = {true, false, true}
+byte letters[] = {'L', 'Z', 'X'}
+string names[] = {"Ada", "Bob", "Cy"}
+print(primes[4], big[0], big[1], big[2], big[3], delta[0], delta[2])
+print(speed[0], speed[1], speed[2], solid[0], solid[1], letters[1], names[1], len(names[2]))
+
+function local_table(byte i) -> byte
+    byte t[] = {10, 20, 30}
+    t[0] += 1                         -- changed, but restored on the next call
+    return t[i]
+end
+print(local_table(0), local_table(0), local_table(2))
+
+function local_names() -> string
+    string n[2] = {"hi"}
+    return n[0] .. "/" .. n[1] .. "/" .. str(len(n[1]))
+end
+print(local_names())
+"#;
+    expect(
+        "r_arrinit",
+        src,
+        "11 1000 65535 300 0 -1 1\n0.5 1 -1.25 true false 90 Bob 2\n11 11 30\nhi//0\n",
+    );
+}
+
+#[test]
+fn run_compound_assignments() {
+    let src = r#"
+word w = 1000
+w /= 7
+print(w)
+w %= 10
+print(w)
+byte b = 3
+b <<= 4
+print(b)
+b >>= 2
+print(b)
+sword s = -100
+s /= 3
+s %= 7
+print(s)
+byte a[3] = {100, 50, 9}
+a[1] /= 5
+a[2] <<= 1
+print(a[1], a[2])
+"#;
+    expect("r_compound", src, "142\n2\n48\n12\n-5\n10 18\n");
+}
+
+#[test]
+fn array_initializer_errors() {
+    assert!(err("byte t[2] = {1, 2, 3}").contains("3 values for an array of 2"));
+    assert!(err("byte t[] = {1, 300}").contains("constants that fit"));
+    assert!(err("byte x = 5\nbyte t[] = {x}").contains("constants that fit"));
+    assert!(err("byte t[]").contains("needs an initializer list"));
+    assert!(err("byte t = {1}").contains("needs an array"));
+    assert!(err("byte t[3] = 5").contains("initialised with a list"));
+    assert!(err("var t[] = {1}").len() > 0);
+    assert!(err("struct P\n byte x\nend\nP ps[] = {1}").contains("arrays of structs"));
+    assert!(err("string s[] = {5}").contains("string constants"));
+    assert!(err("print({1, 2})").len() > 0);
+}
+
+#[test]
+fn library_names_are_reserved() {
+    // reserved even when the module is not used by the program
+    assert!(err("byte tone = 3").contains("standard library: sound"));
+    assert!(err("function line(byte a)\nend").contains("standard library: Layer 2"));
+    assert!(err("byte snd_x = 1").contains("sound"));
+    assert!(err("for rgb = 1, 2 do end").contains("Layer 2"));
+    assert!(err("function f(byte volume)\nend").contains("sound"));
+    assert!(err("struct Sprite\n byte x\nend").contains("sprite"));
+    // field and method names are scoped to their class
+    expect("r_lib_methods", "class Box\n byte line\n function update() -> byte\n return self.line + 1\n end\nend\nBox b\nb.line = 4\nprint(b.update())", "5\n");
+}

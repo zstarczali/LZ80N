@@ -276,6 +276,75 @@ impl Gen {
         }
     }
 
+    /// Array length of a declaration; `[]` takes it from the initializer list.
+    fn decl_len(&self, array: &Option<Expr>, init: &Option<Expr>) -> R<Option<u32>> {
+        if let Some(Expr { kind: ExprKind::List(v), pos }) = array {
+            if v.is_empty() {
+                return match init {
+                    Some(Expr { kind: ExprKind::List(items), .. }) => Ok(Some(items.len() as u32)),
+                    _ => Err(Diag::new(*pos, "`[]` needs an initializer list to take its size from")),
+                };
+            }
+        }
+        self.array_len(array)
+    }
+
+    /// `db` / `dw` lines for an array initializer (missing values are 0 / "").
+    fn array_data(&self, lay: Lay, len: u32, items: &[Expr], pos: Pos) -> R<String> {
+        if items.len() as u32 > len {
+            return Err(Diag::new(pos, format!("{} values for an array of {len}", items.len())));
+        }
+        let mut out = String::new();
+        let mut emit = |kw: &str, vals: &[i64]| {
+            for c in vals.chunks(16) {
+                let v: Vec<String> = c.iter().map(|x| x.to_string()).collect();
+                let _ = writeln!(out, "    {kw} {}", v.join(","));
+            }
+        };
+        match lay {
+            Lay::Prim(t) => {
+                let mut vals = Vec::new();
+                for e in items {
+                    let v = match t {
+                        Ty::Fixed => self.fixed_const(e).filter(|v| (-32768..=32767).contains(v)),
+                        Ty::Bool => match &e.kind {
+                            ExprKind::Bool(b) => Some(*b as i64),
+                            _ => None,
+                        },
+                        _ => self.const_eval(e).filter(|&v| t.literal_fits(v)),
+                    }
+                    .ok_or_else(|| {
+                        Diag::new(e.pos, format!("initializer values must be `{}` constants that fit", t.name()))
+                    })?;
+                    vals.push(mask(v, t));
+                }
+                vals.resize(len as usize, 0);
+                emit(if t.size() == 1 { "db" } else { "dw" }, &vals);
+            }
+            Lay::Str => {
+                for i in 0..len as usize {
+                    let text = match items.get(i).map(|e| (&e.kind, e.pos)) {
+                        None => String::new(),
+                        Some((ExprKind::Str(t), _)) => t.clone(),
+                        Some((ExprKind::Name(n), p)) => match self.lookup(n) {
+                            Some(Sym::SConst(t)) => t,
+                            _ => return Err(Diag::new(p, "string array values must be string constants")),
+                        },
+                        Some((_, p)) => return Err(Diag::new(p, "string array values must be string constants")),
+                    };
+                    // a string variable holds the first STR_CAP characters
+                    let b: Vec<u8> = text.bytes().take(STR_CAP as usize).collect();
+                    let mut vals = vec![b.len() as i64];
+                    vals.extend(b.iter().map(|&c| c as i64));
+                    vals.resize(STR_SIZE as usize, 0);
+                    emit("db", &vals);
+                }
+            }
+            Lay::Struct(_) => return Err(Diag::new(pos, "arrays of structs cannot have an initializer (yet)")),
+        }
+        Ok(out)
+    }
+
     fn lay_size(&self, lay: Lay) -> u32 {
         match lay {
             Lay::Prim(t) => t.size(),
@@ -430,6 +499,9 @@ impl Gen {
     }
 
     fn init_global(&mut self, name: &str, init: &Option<Expr>, pos: Pos) -> R<()> {
+        if let Some(Expr { kind: ExprKind::List(_), .. }) = init {
+            return Ok(()); // already in the data
+        }
         let Some(Sym::Var { obj, label, .. }) = self.lookup(name) else { return Ok(()) };
         match (obj.lay, init) {
             (Lay::Prim(ty), Some(init)) => {
@@ -589,7 +661,7 @@ impl Gen {
     fn declare_global(&mut self, s: &Stmt) -> R<()> {
         let StmtKind::VarDecl { ty, name, array, init, is_const } = &s.kind else { unreachable!() };
         self.check_new_name(name, s.pos)?;
-        let array = &self.array_len(array)?;
+        let array = &self.decl_len(array, init)?;
         if *is_const {
             let sym = self.const_sym(init.as_ref().unwrap(), s.pos)?;
             self.globals.insert(name.clone(), sym);
@@ -597,12 +669,21 @@ impl Gen {
         }
         let lay = match ty {
             Some(t) => self.resolve_type(t, s.pos)?,
+            None if matches!(init, Some(Expr { kind: ExprKind::List(_), .. })) => {
+                return Err(Diag::new(s.pos, "an initialised array needs an element type"));
+            }
             None if self.is_str(init.as_ref().unwrap()) => Lay::Str,
             None => Lay::Prim(self.infer_decl(init.as_ref().unwrap())?),
         };
         let label = format!("g_{name}");
-        let bytes = self.lay_size(lay) * array.unwrap_or(1);
-        self.alloc_bytes(&label, bytes);
+        if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
+            // initial values are part of the program image: no code at all
+            let data = self.array_data(lay, array.unwrap(), items, s.pos)?;
+            let _ = write!(self.data, "{label}:\n{data}");
+        } else {
+            let bytes = self.lay_size(lay) * array.unwrap_or(1);
+            self.alloc_bytes(&label, bytes);
+        }
         self.globals.insert(name.clone(), Sym::Var { obj: Obj { lay, len: *array }, label, by_ref: false });
         Ok(())
     }
@@ -843,7 +924,7 @@ impl Gen {
         self.str_tmp = 0;
         match &s.kind {
             StmtKind::VarDecl { ty, name, array, init, is_const } => {
-                let array = &self.array_len(array)?;
+                let array = &self.decl_len(array, init)?;
                 if self.scopes.is_empty() {
                     // nested block in main program: give it a scope of its own
                     unreachable!("top-level declarations are handled in run()");
@@ -852,6 +933,25 @@ impl Gen {
                 if *is_const {
                     let sym = self.const_sym(init.as_ref().unwrap(), s.pos)?;
                     self.scopes.last_mut().unwrap().insert(name.clone(), sym);
+                    return Ok(());
+                }
+                if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
+                    // static frame: copy the initial values in on every entry
+                    let Some(t) = ty else {
+                        return Err(Diag::new(s.pos, "an initialised array needs an element type"));
+                    };
+                    let lay = self.resolve_type(t, s.pos)?;
+                    let n = array.unwrap();
+                    self.comment(s.pos, &format!("local {name}"));
+                    let data = self.array_data(lay, n, items, s.pos)?;
+                    self.n += 1;
+                    let tab = format!("ai_{}", self.n);
+                    let _ = write!(self.data, "{tab}:\n{data}");
+                    let label = self.declare_local_obj(name, Obj { lay, len: Some(n) });
+                    self.e(&format!("ld hl,{tab}"));
+                    self.e(&format!("ld de,{label}"));
+                    self.e(&format!("ld bc,{}", self.lay_size(lay) * n));
+                    self.e("ldir");
                     return Ok(());
                 }
                 let is_string = match ty {
@@ -1634,6 +1734,9 @@ impl Gen {
             }
             ExprKind::Bool(_) => Some(Ty::Bool),
             ExprKind::Str(_) => return Err(Diag::new(e.pos, "a string cannot be used as a number here")),
+            ExprKind::List(_) => {
+                return Err(Diag::new(e.pos, "a `{...}` list is only allowed as an array initializer"));
+            }
             ExprKind::Binary(BinOp::Concat, ..) => {
                 return Err(Diag::new(e.pos, "a string cannot be used as a number here"))
             }
@@ -1813,7 +1916,9 @@ impl Gen {
                 let ty = Ty::int(want.size(), nat.signed() || want.signed());
                 self.gen_arith(*op, l, r, ty, e.pos)?;
             }
-            ExprKind::Int(_) | ExprKind::Fixed(_) | ExprKind::Bool(_) | ExprKind::Str(_) => unreachable!(),
+            ExprKind::Int(_) | ExprKind::Fixed(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::List(_) => {
+                unreachable!()
+            }
         }
         Ok(())
     }
