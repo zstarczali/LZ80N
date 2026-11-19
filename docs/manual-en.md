@@ -47,26 +47,17 @@ The compact technical specification is [`spec.md`](spec.md).
 
 ### 1.1 What you need
 
-* **Rust** (stable) to build the compiler.
-* **SjASMPlus 1.24.0**: the assembler that turns the generated code into a
-  `.nex` file. A copy is in `tools/sjasmplus`, and the compiler finds it there.
+* **lz80nc**, the compiler, and **SjASMPlus 1.24.0**, the assembler that
+  turns the generated code into a `.nex` file. The release packages for
+  Windows, macOS and Linux contain both; the compiler finds the assembler
+  next to itself. (Building from source: see `README.md`.)
 * A **ZX Spectrum Next** (core 3.0 or later) or the **CSpect** emulator.
 
 LZ80N targets the Next only. There is no 48K or 128K compatibility mode. The
 program switches the CPU to 28 MHz and uses Next hardware (tilemap, Layer 2,
 sprites, zxnDMA, copper) directly.
 
-### 1.2 Building the compiler
-
-```powershell
-cd compiler
-cargo build --release
-cargo test                 # optional: runs the test suite (needs sjasmplus)
-```
-
-The compiler is `compiler/target/release/lz80nc` (`lz80nc.exe` on Windows).
-
-### 1.3 Compiling a program
+### 1.2 Compiling a program
 
 ```powershell
 lz80nc examples/hello.lz80n            # writes hello.asm and hello.nex
@@ -80,12 +71,12 @@ lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
 Errors are reported as `file:line:column: error: message`. The compiler
 reports as many errors as it can find in one run.
 
-### 1.4 Running
+### 1.3 Running
 
 * **CSpect**: `CSpect.exe -zxnext -w3 hello.nex`
 * **Next**: copy the `.nex` file to the SD card and open it in the Browser.
 
-### 1.5 Project layout
+### 1.4 Project layout
 
 ```
 compiler/      the Rust compiler (lexer, parser, code generator, runtime, tests)

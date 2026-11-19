@@ -30,13 +30,16 @@ jobs:
   docs:
     name: PDF manuals
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: Install pandoc and WeasyPrint
         run: |
+          # skip the slow man page index rebuild
+          sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get update
-          sudo apt-get install -y pandoc weasyprint fonts-dejavu
+          sudo apt-get install -y --no-install-recommends pandoc weasyprint fonts-dejavu
 
       - name: Build the PDFs
         run: |
