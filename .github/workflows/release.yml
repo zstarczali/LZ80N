@@ -1,0 +1,189 @@
+name: release
+
+# Builds LZ80N for Windows, macOS and Linux (x64 and ARM64), makes the PDF
+# manuals and packs everything (compiler, SjASMPlus, manuals, examples,
+# README.txt) into one archive per platform.
+#
+# * push a tag `v1.2.3` (it must match compiler/Cargo.toml) -> GitHub release
+# * run it by hand (Actions -> release -> Run workflow) -> the archives are
+#   kept as workflow artifacts; tick "publish" to make a draft release too
+# * push to the branch `release-test` -> a trial build, artifacts only
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["release-test"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Also create a draft GitHub release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  SJASMPLUS_VERSION: "1.24.0"
+
+jobs:
+  docs:
+    name: PDF manuals
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pandoc and WeasyPrint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc weasyprint fonts-dejavu
+
+      - name: Build the PDFs
+        run: |
+          mkdir -p pdf
+          for lang in en hu; do
+            pandoc "docs/manual-$lang.md" -f gfm -t html5 --standalone \
+              --metadata pagetitle="LZ80N manual ($lang)" \
+              --css pdf.css -o "docs/manual-$lang.html"
+            weasyprint "docs/manual-$lang.html" "pdf/manual-$lang.pdf"
+          done
+          ls -l pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manuals
+          path: pdf/*.pdf
+
+  build:
+    name: ${{ matrix.name }}
+    needs: docs
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64,   os: windows-latest,   target: x86_64-pc-windows-msvc,    native: true }
+          - { name: windows-arm64, os: windows-latest,   target: aarch64-pc-windows-msvc,   native: false }
+          - { name: linux-x64,     os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  native: true }
+          - { name: linux-arm64,   os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, native: true }
+          - { name: macos-x64,     os: macos-latest,     target: x86_64-apple-darwin,       native: false, arch: x86_64 }
+          - { name: macos-arm64,   os: macos-latest,     target: aarch64-apple-darwin,      native: true,  arch: arm64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Version
+        id: ver
+        run: |
+          v=$(grep -m1 '^version' compiler/Cargo.toml | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
+            echo "::error::tag ${GITHUB_REF#refs/tags/} does not match Cargo.toml version $v"
+            exit 1
+          fi
+
+      - name: Build lz80nc
+        working-directory: compiler
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: SjASMPlus source (licence; build on Linux and macOS)
+        run: git clone --depth 1 --branch "v$SJASMPLUS_VERSION" --recursive https://github.com/z00m128/sjasmplus.git sjasm-src
+
+      - name: SjASMPlus for Windows (official binary)
+        if: runner.os == 'Windows'
+        run: |
+          curl -fsSL -o sjasmplus.zip "https://github.com/z00m128/sjasmplus/releases/download/v$SJASMPLUS_VERSION/sjasmplus-$SJASMPLUS_VERSION.win.zip"
+          mkdir sjasm-win && unzip -q sjasmplus.zip -d sjasm-win
+          cp "$(find sjasm-win -name sjasmplus.exe | head -1)" sjasmplus.exe
+
+      - name: SjASMPlus for Linux
+        if: runner.os == 'Linux'
+        run: |
+          make -C sjasm-src -j4
+          cp sjasm-src/sjasmplus sjasmplus
+
+      - name: SjASMPlus for macOS
+        if: runner.os == 'macOS'
+        run: |
+          make -C sjasm-src -j4 CC="clang -arch ${{ matrix.arch }}" CXX="clang++ -arch ${{ matrix.arch }}"
+          cp sjasm-src/sjasmplus sjasmplus
+          file sjasmplus
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: manuals
+          path: pdf
+
+      - name: Package
+        id: pkg
+        run: |
+          v=${{ steps.ver.outputs.version }}
+          pkg="lz80n-$v-${{ matrix.name }}"
+          exe=""; [[ "${{ runner.os }}" == Windows ]] && exe=".exe"
+          mkdir -p "$pkg/docs" "$pkg/licenses"
+          cp "compiler/target/${{ matrix.target }}/release/lz80nc$exe" "$pkg/"
+          cp "sjasmplus$exe" "$pkg/"
+          cp pdf/manual-en.pdf pdf/manual-hu.pdf "$pkg/docs/"
+          cp docs/manual-en.md docs/manual-hu.md docs/spec.md "$pkg/docs/"
+          sed "s/@VERSION@/$v/g; s/@PLATFORM@/${{ matrix.name }}/g; s/@SJASM@/$SJASMPLUS_VERSION/g" dist/README.txt > "$pkg/README.txt"
+          cp LICENSE CHANGELOG.md "$pkg/"
+          shopt -s nullglob
+          for f in sjasm-src/LICENSE*; do cp "$f" "$pkg/licenses/sjasmplus-$(basename "$f")"; done
+          mkdir -p "$pkg/examples" "$pkg/benchmarks"
+          cp examples/*.lz80n "$pkg/examples/"
+          cp -r examples/assets "$pkg/examples/"
+          cp benchmarks/*.lz80n benchmarks/*.bas benchmarks/README.md "$pkg/benchmarks/" 2>/dev/null || true
+          if [[ "${{ matrix.native }}" == true ]]; then
+            # smoke test: the packaged compiler builds an example with the packaged assembler
+            (cd "$pkg" && ./lz80nc$exe examples/hello.lz80n && test -f examples/hello.nex && rm examples/hello.asm examples/hello.nex)
+          fi
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            7z a -tzip "$pkg.zip" "$pkg" > /dev/null
+            echo "file=$pkg.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar czf "$pkg.tar.gz" "$pkg"
+            echo "file=$pkg.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ steps.pkg.outputs.file }}
+
+  release:
+    name: GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release notes and checksums
+        id: notes
+        run: |
+          v=$(grep -m1 '^version' compiler/Cargo.toml | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          # this version's section of CHANGELOG.md
+          awk -v v="$v" '$0 ~ "^## "v {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          sed "s/@VERSION@/$v/g; s/@PLATFORM@/all platforms/g; s/@SJASM@/$SJASMPLUS_VERSION/g" dist/README.txt > artifacts/README.txt
+          (cd artifacts && sha256sum * > SHA256SUMS.txt)
+          ls -l artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.notes.outputs.version }}
+          name: LZ80N ${{ steps.notes.outputs.version }}
+          body_path: notes.md
+          draft: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          files: artifacts/*
