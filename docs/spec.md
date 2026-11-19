@@ -620,6 +620,17 @@ $FDFC..       stack (grows down)
   `rt_smp_on` makes `rt_dma_go` (dma_copy / dma_fill / layer2_clear) use
   LDIR instead of the DMA. NR $08 bit 3 enables the DACs.
 
+## Music
+
+* `asset m = "x.pt3"`: pt3.rs plays the module through when compiling
+  (Vortex Tracker II rules as in zxtune) into AY registers per frame.
+  Stream: `db mask R0-R7, mask R8-R13` + the values of the set bits; R0-R12
+  only when changed (all at frame 0 and the loop frame), R13 only when the
+  tune writes it; mask byte 2 = $80: end. Bytes in 8K far pages;
+  descriptor `a_m: db first page / dw loop address ($2000-$3FFF) / db loop page`.
+* `runtime::MUSIC`: `rt_mus_tick` in the frame ISR maps the current page in
+  slot 1, selects the chip (port $FFFD = ~chip) and writes one frame.
+
 ## Source files
 
 * `include "path"` (top level only) is expanded on the token stream before

@@ -1,0 +1,55 @@
+-- music.lz80n -- ProTracker 3 music
+--
+--  * asset tune = "assets/tune.pt3": a .pt3 module (ProTracker 3 or
+--    Vortex Tracker II). The compiler plays it through once and stores the
+--    AY registers of every frame in memory banks; a tiny player in the
+--    frame interrupt sends them to the chip. No CPU time for the music.
+--  * music_play(tune) loops (from the module's loop position),
+--    music_once(tune) plays it once; music_stop(); music_playing()
+--  * an optional second argument picks the AY chip (0-2, default 0); the
+--    other chips stay free for sound effects (play, beep: channels 3-8)
+--
+-- Keys: SPACE = stop / start, B = a beep on chip 1
+--
+-- The tune is made by assets/make_music.py.
+
+asset tune = "assets/tune.pt3"
+
+cls()
+ink(BRIGHT_CYAN)
+at(1, 2)
+write("PT3 music on AY chip 0")
+ink(BRIGHT_WHITE)
+at(3, 2)
+write("SPACE  stop / start")
+at(4, 2)
+write("B      beep on chip 1")
+
+music_play(tune)
+layer2_visible(true)
+layer2_clear(0)
+
+-- level meters of the three voices, read back from the AY chip
+function meter(byte v, byte level)
+    byte y = 60 + v * 24
+    fill_rect(40, y, level * 10, 16, rgb(1 + v * 3, 7 - v * 2, 2))
+    fill_rect(40 + level * 10, y, 160 - level * 10, 16, rgb(0, 0, 1))
+end
+
+while true do
+    vsync()
+    if key(KEY_SPACE) then
+        if music_playing() then music_stop() else music_play(tune) end
+        while key(KEY_SPACE) do vsync() end
+    end
+    if key(KEY_B) then
+        beep(3, 60, 10)
+    end
+    for v = 0, 2 do
+        -- AY register 8 + v: the voice's volume (bit 4 = envelope)
+        port[0xFFFD] = 0xFF            -- chip 0
+        port[0xFFFD] = 8 + v
+        byte level = port[0xFFFD] & 15
+        meter(v, level)
+    end
+end
