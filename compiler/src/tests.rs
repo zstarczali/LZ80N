@@ -244,7 +244,6 @@ fn errors() {
     assert!(err("word w = 5\nbyte b = w").contains("narrow"));
     assert!(err("print(y)").contains("undefined variable"));
     assert!(err("if 1 then end").contains("bool"));
-    assert!(err("function f() -> byte\n return f()\nend\nprint(f())").contains("recursion"));
     assert!(err("break").contains("outside"));
     assert!(err("byte a[4]\na[4] = 1").contains("out of bounds"));
     assert!(err("byte x = 1\nbyte x = 2").contains("already declared"));
@@ -635,7 +634,6 @@ fn struct_errors() {
     assert!(err("Foo f").contains("unknown type"));
     assert!(err("class C\n function f()\n end\nend\nC c\nc.g()").contains("no method"));
     assert!(err("struct A\n byte x\nend\nstruct B\n byte x\nend\nA a\nB b\na = b").contains("expected a `A`"));
-    assert!(err("class C\n function f()\n self.f()\n end\nend\nC c\nc.f()").contains("recursion"));
 }
 
 /// Every example must compile, assemble and run (they loop forever, so we
@@ -2143,3 +2141,102 @@ fn include_assets_relative_to_their_file() {
     let r = crate::compile_main(&src, Some(&main), "t.nex", true, &dir, false);
     assert!(r.is_ok(), "{:?}", r.err().map(|e| e.iter().map(|d| d.to_string()).collect::<Vec<_>>()));
 }
+
+#[test]
+fn run_recursion() {
+    expect(
+        "rec_basic",
+        "function fact(word n) -> word
+    if n <= 1 then return 1 end
+    return n * fact(n - 1)
+end
+function fib(byte n) -> word
+    if n < 2 then return n end
+    return fib(n - 1) + fib(n - 2)
+end
+-- the arguments read the caller's parameters, crossed over
+function gcd(word a, word b) -> word
+    if b == 0 then return a end
+    return gcd(b, a % b)
+end
+-- mutual recursion
+function is_even(byte n) -> bool
+    if n == 0 then return true end
+    return is_odd(n - 1)
+end
+function is_odd(byte n) -> bool
+    if n == 0 then return false end
+    return is_even(n - 1)
+end
+-- locals and a local array survive the inner calls
+function sum_digits(word n) -> byte
+    byte buf[6]
+    byte d = byte(n % 10)
+    buf[3] = d
+    if n < 10 then return d end
+    byte rest = sum_digits(n / 10)
+    return buf[3] + rest
+end
+print(fact(8), fib(15), gcd(1071, 462))
+print(is_even(10), is_odd(7), is_even(9))
+print(sum_digits(59876))
+",
+        "40320 610 21\ntrue true false\n35\n",
+    );
+}
+
+#[test]
+fn run_recursion_methods_strings_and_ordinary_calls() {
+    expect(
+        "rec_more",
+        "class Node
+    byte value
+    function count(byte n) -> byte
+        if n == 0 then return self.value end
+        return self.value + self.count(n - 1)
+    end
+end
+Node a
+a.value = 3
+-- a string result built recursively
+function stars(byte n) -> string
+    if n == 0 then return \"\" end
+    return \"*\" .. stars(n - 1)
+end
+-- Towers of Hanoi: moves counted in a global
+word moves = 0
+function hanoi(byte n, byte from, byte to, byte via)
+    if n == 0 then return end
+    hanoi(n - 1, from, via, to)
+    moves += 1
+    hanoi(n - 1, via, to, from)
+end
+hanoi(10, 1, 3, 2)
+print(a.count(4), stars(5), moves)
+",
+        "15 ***** 1023\n",
+    );
+    // a non-recursive call gets no save/restore code
+    let asm = crate::compile_source(
+        "function f(byte x) -> byte\n return x + 1\nend\nfunction g() -> byte\n return f(1)\nend\nprint(g())",
+        "t.nex",
+    )
+    .unwrap();
+    assert!(!asm.contains("recursive call") && !asm.contains("rt_stack_overflow"));
+}
+
+#[test]
+fn recursion_stack_overflow_is_caught() {
+    let src = "function down(word n) -> word\n    byte pad[40]\n    pad[0] = 1\n    return down(n + 1) + 1\nend\nprint(down(0))\n";
+    let Some((nex, syms)) = build("rec_overflow", src) else { return };
+    let mut cpu = load_nex(&nex).unwrap();
+    let handler = syms["rt_stack_overflow"];
+    for _ in 0..5_000_000u64 {
+        if cpu.pc == handler {
+            return;
+        }
+        cpu.tick().unwrap();
+    }
+    panic!("the stack overflow handler was not reached");
+}
+

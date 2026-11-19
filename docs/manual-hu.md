@@ -491,18 +491,42 @@ clear_line(5)
   táblák a Luában).
 * Függvény visszaadhat `string`-et (`-> string`), struktúrát egyelőre nem.
 
-### 7.1 Nincs rekurzió
+### 7.1 Rekurzió
 
-A gyors hívások érdekében minden függvény paraméterei és lokális változói
-**rögzített memóriacímen** vannak (statikus keretek). Ennek következményei:
+Egy függvény meghívhatja önmagát, közvetlenül vagy más függvényeken
+keresztül is:
 
-* Egy függvény nem hívhatja önmagát, sem közvetlenül, sem más függvényeken
-  keresztül. A fordító ezt hibaként jelzi.
+```lua
+function factorial(word n) -> word
+    if n <= 1 then return 1 end
+    return n * factorial(n - 1)
+end
+
+function hanoi(byte n, byte from, byte to, byte via)
+    if n == 0 then return end
+    hanoi(n - 1, from, via, to)
+    hanoi(n - 1, via, to, from)
+end
+```
+
+Hogyan működik, és mibe kerül:
+
+* A gyors hívások érdekében minden függvény paraméterei és lokális változói
+  **rögzített memóriacímen** vannak (statikus keretek). Ha egy hívás
+  visszatérhet a hívóhoz (a hívott maga a hívó, vagy újra meghívhatja), a
+  hívó a hívás előtt a veremre másolja a saját keretét, utána pedig
+  visszaállítja. A közönséges hívások ezért semmivel sem lassabbak.
+* Egy rekurzív hívás ára a hívó keretével nő: a paraméterek és lokális
+  változók bájtjaira kb. 10 T-ciklus bájtonként. Nagy lokális tömböt ne
+  tegyél rekurzív függvénybe (legyen globális).
+* A veremnek a program alatt kb. 1–2 KB hely jut, a program méretétől
+  függően. A túl mély rekurzió "stack overflow (recursion too deep)"
+  üzenettel megállítja a programot, és nem írja felül a memóriát.
 * Egy függvényt nem használhat egyszerre a főprogram és egy
-  megszakításkezelő (18. fejezet). Ezt is jelzi a fordító.
+  megszakításkezelő (18. fejezet): a megszakítás akkor is jöhet, amikor a
+  főprogram éppen benne jár. A fordító ezt hibaként jelzi.
 
-Játékokban és demókban ritkán van szükség rekurzióra. Ciklussal és saját
-veremmel (tömbbel) helyettesíthető.
+A `recursion.lz80n` példa fraktálfát rajzol, és megoldja a Hanoi tornyait.
 
 ---
 
@@ -1304,7 +1328,6 @@ változtatni.
 
 Még nem támogatott:
 
-* rekurzió (statikus keretek)
 * `long` (32 bites), `fixed16` (16.16)
 * struktúra visszaadása, konstruktor, öröklődés, kezdőérték struktúratömbnek
 * a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
@@ -1368,6 +1391,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `shapes.lz80n` | körök, ellipszisek, vágás, dupla pufferelés |
 | `images.lz80n` | PNG képek a Layer 2-n, átlátszóság |
 | `banks.lz80n` | `far` tömbök: 16 KB-os barlangtérkép memóriabankokban |
+| `recursion.lz80n` | rekurzió: fraktálfa, Hanoi tornyai, kölcsönös rekurzió |
 | `modules.lz80n` | program három fájlban: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |

@@ -1685,3 +1685,27 @@ rt_bcall:
 rt_codepage: db 10           ; bank 5, the normal contents of $4000
 rt_bret:     db 0
 "#;
+
+/// Recursive calls: the handler when a saved frame would not fit.
+pub const RECURSION: &str = r#"
+; recursion too deep: the stack would run into the program
+rt_stack_overflow:
+    di
+    ld sp,$FDFD
+    ld hl,.msg
+.l:
+    ld a,(hl)
+    or a
+    jr z,.h
+    push hl
+    call rt_putc
+    pop hl
+    inc hl
+    jr .l
+.h:
+    halt
+    jr .h
+.msg:
+    db 10,"stack overflow (recursion too deep)",0
+"#;
+
