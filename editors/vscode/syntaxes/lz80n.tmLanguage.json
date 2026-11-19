@@ -145,7 +145,7 @@
         {
           "comment": "built-in functions (compiler intrinsics)",
           "name": "support.function.builtin.lz80n",
-          "match": "\\b(print|write|at|ink|cls|border|vsync|pause|frames|key|kempston|any_key|wait_key|cpu_speed|random|seed|addr|dma_copy|dma_fill|plot|point|hline|layer2_clear|layer2_flip|sprite_load|ay_write|note_period|abs|min|max|clamp|sqrt|sin|cos|atan2|round|len|sub|find|val|asc|chr|str|upper|lower|draw_image|image_width|image_height|image)\\b(?=\\s*\\()"
+          "match": "\\b(print|write|at|ink|cls|border|vsync|pause|frames|key|kempston|any_key|wait_key|cpu_speed|random|seed|addr|dma_copy|dma_fill|plot|point|hline|layer2_clear|layer2_flip|sprite_load|ay_write|note_period|abs|min|max|clamp|sqrt|sin|cos|atan2|round|len|sub|find|val|asc|chr|str|upper|lower|draw_image|image_width|image_height|image|layer2_mode|layer2_width|layer2_height|sample_play|sample_loop|sample_stop|sample_playing|music_play|music_once|music_stop|music_playing)\\b(?=\\s*\\()"
         },
         {
           "comment": "hardware access arrays",
@@ -155,7 +155,7 @@
         {
           "comment": "standard library (written in LZ80N, always reserved)",
           "name": "support.function.library.lz80n",
-          "match": "\\b(sprites_visible|layer2_visible|rgb|vline|line|rect|fill_rect|circle|fill_circle|ellipse|fill_ellipse|triangle|fill_triangle|palette|palette9|rgb9|copper_begin|copper_wait|copper_move|copper_start|copper_stop|sound_reset|sound_mix|tone|noise|volume|sound_off|beep|play|play_loop|playing|sound_tick)\\b(?=\\s*\\()"
+          "match": "\\b(sprites_visible|layer2_visible|rgb|vline|line|rect|fill_rect|circle|fill_circle|ellipse|fill_ellipse|triangle|fill_triangle|palette|palette9|palette_select|rgb9|copper_begin|copper_wait|copper_move|copper_start|copper_stop|sound_reset|sound_mix|tone|noise|volume|sound_off|beep|play|play_loop|playing|sound_tick)\\b(?=\\s*\\()"
         },
         { "name": "support.class.library.lz80n", "match": "\\bSprite\\b" }
       ]
@@ -165,7 +165,7 @@
       "patterns": [
         {
           "name": "support.constant.builtin.lz80n",
-          "match": "\\b(BLACK|BLUE|RED|MAGENTA|GREEN|CYAN|YELLOW|WHITE|BRIGHT_(BLACK|BLUE|RED|MAGENTA|GREEN|CYAN|YELLOW|WHITE)|KEY_[A-Z0-9]+|JOY_(RIGHT|LEFT|DOWN|UP|FIRE)|MHZ_(3|7|14|28)|NOT_FOUND|TRANSPARENT|PAL_(ULA|LAYER2|SPRITES|TEXT))\\b"
+          "match": "\\b(BLACK|BLUE|RED|MAGENTA|GREEN|CYAN|YELLOW|WHITE|BRIGHT_(BLACK|BLUE|RED|MAGENTA|GREEN|CYAN|YELLOW|WHITE)|KEY_[A-Z0-9]+|JOY_(RIGHT|LEFT|DOWN|UP|FIRE)|MHZ_(3|7|14|28)|NOT_FOUND|TRANSPARENT|PAL_(ULA|LAYER2|SPRITES|TEXT)(_2)?|L2_(256|320|640))\\b"
         },
         { "name": "variable.other.constant.lz80n", "match": "\\b[A-Z][A-Z0-9_]*\\b" }
       ]

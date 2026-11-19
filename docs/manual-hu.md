@@ -8,7 +8,7 @@ fordítja, és `.nex` fájlba csomagolja, amely közvetlenül fut a Nexten vagy
 emulátorban. Nincs interpreter, nincs virtuális gép és nincs szemétgyűjtő: amit
 leírsz, az Z80N utasításokká válik.
 
-Ez a kézikönyv a nyelvet és a könyvtárait az 1.0.0-s verzió állapota szerint
+Ez a kézikönyv a nyelvet és a könyvtárait az 1.1.0-s verzió állapota szerint
 írja le (lásd [`CHANGELOG.md`](../CHANGELOG.md)). Az angol változat: [`manual-en.md`](manual-en.md). A tömör műszaki
 specifikáció: [`spec.md`](spec.md).
 
@@ -179,7 +179,7 @@ objektum a metóduson belül).
 
 **Beépített függvények** (a fordító valósítja meg őket)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing` `music_play` `music_once` `music_stop` `music_playing`
 
 **A szabványos könyvtár nevei** (LZ80N-ben írt függvények, típusok és
 konstansok). **Minden** programban foglaltak, akkor is, ha a program nem
@@ -1096,6 +1096,7 @@ Az `asset`-et a fordító fordításkor alakítja át és építi be a programba
   pixelekből (alfa < 128) a sprite-átlátszósági szín (`$E3`) lesz.
 * `.spr`: nyers 8 bites sprite-minták (egyenként 256 bájt).
 * `.wav`: hangminta (17.3).
+* `.pt3`: zene (17.4).
 
 **Képek a Layer 2-re**
 
@@ -1263,6 +1264,34 @@ sample_stop()
   Layer 2 törlése kb. 2 képkocka).
 
 Lásd: `examples/samples.lz80n`.
+
+### 17.4 ProTracker 3 zene
+
+```lua
+asset tune = "assets/tune.pt3"
+
+music_play(tune)             -- ismétlődik, a modul ismétlési pontjától
+music_once(tune)             -- egyszer, utána csend
+music_play(tune, 2)          -- a 2-es AY chipen (0-2, alapból 0)
+if music_playing() then ... end
+music_stop()
+```
+
+* ProTracker 3 vagy Vortex Tracker II `.pt3` modulok (egy AY; TurboSound
+  modulból az első rész). Mind az öt hangjegytábla, a 3.3-3.4 és 3.5+
+  hangerőtábla, a minták, ornamentek, burkolók és az effektek (glissando,
+  portamento, minta- és ornament-eltolás, vibrato, burkoló-csúszás, tempó)
+  támogatottak.
+* A fordító **fordításkor** végigjátssza a modult, és képkockánként eltárolja
+  a 13 AY regisztert (csak a változókat, kb. 4-8 bájt képkockánként) saját
+  memórialapokon: egy 3 perces dal kb. 60 KB a bankokban, és csak néhány
+  bájt a programterületen. Játék közben a képkocka-megszakítás csak a
+  következő képkockát másolja a chipbe: szinte semmi CPU-idő.
+* A zene egy AY chipet foglal; a `beep`, a `play` és a `tone` a másik kettő
+  csatornáin működik (17.1: a 3-8. csatorna az 1-es és 2-es chip).
+* A minták (17.3) közben szólhatnak.
+
+Lásd: `examples/music.lz80n` (a dallamot az `assets/make_music.py` készíti).
 
 ---
 
@@ -1532,7 +1561,6 @@ Még nem támogatott:
 
 * kb. 31 KB-nál több globális változó és adat a programterületen (a nagy
   táblák helye a `far` tömb, 19.1)
-* PT3 zene importálása
 
 Tervezett sorrend: sebességmérés a NextBASIC ellen valódi gépen →
 `long`/`fixed16`/Layer 2 módok → konstruktorok és öröklődés → memóriabankok →
@@ -1600,5 +1628,6 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `shooter.lz80n` | kis űrlövölde: képből kivágott játékos, ötféle 16x16-os pixel art ellenség, csillagok, hang |
 | `sound.lz80n` | háttérzene, `beep`, hangeffektek |
 | `samples.lz80n` | `.wav` minták a DAC-on, a háttérben |
+| `music.lz80n` | ProTracker 3 zene, hangerőmérők |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |

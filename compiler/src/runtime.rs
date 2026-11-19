@@ -2594,6 +2594,7 @@ rt_smp_play:
     out (c),a
     inc b
     in a,(c)
+    and $7F                 ; (bit 7 would unlock port $7FFD)
     or 8
     nextreg $08,a
     ld hl,rt_smp_prog
@@ -2799,4 +2800,156 @@ rt_smp_need:   dw 0
 rt_smp_dst:    dw 0
 rt_smp_next:   db 0
 rt_smp_silent: db 0
+"#;
+
+/// .pt3 music, rendered when compiling into AY registers per frame (see
+/// pt3.rs): the frame interrupt writes one frame to the chosen AY chip.
+/// The stream lives in 8K pages, read through slot 1 ($2000-$3FFF).
+pub const MUSIC: &str = r#"
+; ---- music ----
+; HL = descriptor (db first page; dw loop address; db loop page),
+; A = 1: loop, D = AY chip 0..2
+rt_mus_play:
+    push af
+    push de
+    push hl
+    call rt_mus_stop
+    pop hl
+    pop de
+    pop af
+    ld (rt_mus_loop),a
+    ld (rt_mus_desc),hl
+    ld a,d
+    ld (rt_mus_chip),a
+    ld a,(hl)
+    ld (rt_mus_page),a
+    ld hl,$2000
+    ld (rt_mus_ptr),hl
+    ; NR $08 bit 1: TurboSound (all three AY chips)
+    ld bc,$243B
+    ld a,8
+    out (c),a
+    inc b
+    in a,(c)
+    and $7F
+    or 2
+    nextreg $08,a
+    ld a,1
+    ld (rt_mus_on),a
+    ret
+
+; stop and silence the chip
+rt_mus_stop:
+    ld a,(rt_mus_on)
+    or a
+    ret z
+    xor a
+    ld (rt_mus_on),a
+rt_mus_quiet:
+    ld a,(rt_mus_chip)
+    ld d,a
+    ld e,$3F
+    ld a,7
+    call rt_ay_write
+    ld a,(rt_mus_chip)
+    ld d,a
+    ld e,0
+    ld a,8
+    call rt_ay_write
+    ld a,(rt_mus_chip)
+    ld d,a
+    ld e,0
+    ld a,9
+    call rt_ay_write
+    ld a,(rt_mus_chip)
+    ld d,a
+    ld e,0
+    ld a,10
+    jp rt_ay_write
+
+; next byte of the stream (HL in slot 1, the next page after $3FFF)
+rt_mus_byte:
+    ld a,(hl)
+    inc hl
+    bit 6,h
+    ret z
+    push af
+    ld h,$20
+    ld a,(rt_mus_page)
+    inc a
+    ld (rt_mus_page),a
+    nextreg $51,a
+    pop af
+    ret
+
+; frame interrupt: one frame of registers
+rt_mus_tick:
+    ld a,(rt_mus_on)
+    or a
+    ret z
+    ld a,(rt_farpage)
+    push af
+    ld a,(rt_mus_page)
+    nextreg $51,a
+    ld hl,(rt_mus_ptr)
+    ld a,(rt_mus_chip)
+    cpl                     ; chip 0/1/2 -> $FF / $FE / $FD
+    ld bc,$FFFD
+    out (c),a
+.frame:
+    call rt_mus_byte
+    ld e,a
+    call rt_mus_byte
+    ld d,a
+    bit 7,d
+    jr z,.regs
+    ; the end of the song
+    ld a,(rt_mus_loop)
+    or a
+    jr z,.end
+    ld hl,(rt_mus_desc)
+    inc hl
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld a,(hl)
+    ld (rt_mus_page),a
+    nextreg $51,a
+    ex de,hl
+    jr .frame
+.end:
+    xor a
+    ld (rt_mus_on),a
+    pop af
+    nextreg $51,a
+    jp rt_mus_quiet
+.regs:
+    xor a                   ; register number
+.r:
+    srl d
+    rr e
+    jr nc,.n
+    ld bc,$FFFD
+    out (c),a               ; register
+    push af
+    call rt_mus_byte
+    ld b,$BF
+    out (c),a               ; value (port $BFFD)
+    pop af
+.n:
+    inc a
+    cp 14
+    jr nz,.r
+    ld (rt_mus_ptr),hl
+    pop af
+    nextreg $51,a
+    ret
+
+rt_mus_on:    db 0
+rt_mus_loop:  db 0
+rt_mus_chip:  db 0
+rt_mus_desc:  dw 0
+rt_mus_page:  db 0
+rt_mus_ptr:   dw 0
 "#;
