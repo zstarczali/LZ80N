@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SjASMPlus 1.24.0
+        run: |
+          curl -fsSL -o sjasmplus.zip https://github.com/z00m128/sjasmplus/releases/download/v1.24.0/sjasmplus-1.24.0.win.zip
+          mkdir -p tools/sjasmplus
+          unzip -q sjasmplus.zip -d tools/sjasmplus
+          ls tools/sjasmplus
+
+      - name: Build
+        working-directory: compiler
+        run: cargo build --release
+
+      - name: Test
+        working-directory: compiler
+        run: cargo test --release
+
+      - name: Compile the examples
+        run: |
+          for f in examples/*.lz80n benchmarks/benchmark.lz80n; do
+            ./compiler/target/release/lz80nc "$f"
+          done

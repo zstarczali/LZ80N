@@ -1,8 +1,38 @@
 <p align="center">
-  <img src="assets/logo.png" alt="LZ80N — The simplicity of Lua. The power of Z80N." width="800">
+  <img src="assets/logo-square.png" alt="LZ80N logo" width="260">
 </p>
 
-# LZ80N — The Next Language
+<h1 align="center">LZ80N — The Next Language</h1>
+
+<p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
+
+<p align="center">
+  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 0.1.0" src="https://img.shields.io/badge/version-0.1.0-brightgreen"></a>
+  <a href="https://github.com/zstarczali/LZ80N/actions/workflows/ci.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/zstarczali/LZ80N/ci.yml?label=build"></a>
+  <a href="https://github.com/zstarczali/LZ80N/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/zstarczali/LZ80N?color=blue"></a>
+</p>
+
+<p align="center">
+  <a href="compiler/"><img alt="compiler: Rust" src="https://img.shields.io/badge/compiler-Rust-b7410e?logo=rust&logoColor=white"></a>
+  <a href="docs/manual-en.md#22-how-a-program-runs"><img alt="target: Z80N / ZX Spectrum Next" src="https://img.shields.io/badge/target-Z80N%20%2F%20ZX%20Spectrum%20Next-6f42c1"></a>
+  <a href="docs/spec-v0.md#toolchain"><img alt="output: .nex" src="https://img.shields.io/badge/output-.nex-6f42c1"></a>
+  <a href="https://github.com/z00m128/sjasmplus"><img alt="assembler: SjASMPlus 1.24" src="https://img.shields.io/badge/assembler-SjASMPlus%201.24-555"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/zstarczali/LZ80N/commits"><img alt="last commit" src="https://img.shields.io/github/last-commit/zstarczali/LZ80N"></a>
+  <a href="https://github.com/zstarczali/LZ80N/commits"><img alt="commit activity" src="https://img.shields.io/github/commit-activity/m/zstarczali/LZ80N"></a>
+  <a href="https://github.com/zstarczali/LZ80N/issues"><img alt="issues" src="https://img.shields.io/github/issues/zstarczali/LZ80N"></a>
+  <a href="https://github.com/zstarczali/LZ80N/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/zstarczali/LZ80N?style=flat"></a>
+</p>
+
+<p align="center">
+  <a href="docs/manual-en.md"><img alt="manual: English" src="https://img.shields.io/badge/manual-English-0a7bbb"></a>
+  <a href="docs/manual-hu.md"><img alt="kézikönyv: Magyar" src="https://img.shields.io/badge/k%C3%A9zik%C3%B6nyv-Magyar-0a7bbb"></a>
+  <a href="docs/spec-v0.md"><img alt="spec: v0" src="https://img.shields.io/badge/spec-v0-0a7bbb"></a>
+  <a href="examples/"><img alt="examples: 11 programs" src="https://img.shields.io/badge/examples-11%20programs-2ea44f"></a>
+  <a href="benchmarks/"><img alt="benchmark: LZ80N vs NextBASIC" src="https://img.shields.io/badge/benchmark-LZ80N%20vs%20NextBASIC-2ea44f"></a>
+</p>
 
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.

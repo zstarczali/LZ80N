@@ -1,4 +1,5 @@
-"""Generate assets/logo.png: the LZ80N pixel logo for the README.
+"""Generate the LZ80N pixel logos: assets/logo.png (wide banner) and
+assets/logo-square.png (rounded square icon, used in the README).
 
 Big letters: chunky 2-pixel-stroke block glyphs, slanted like italics.
 Spectrum-style rainbow stripes run through them; a soft glow behind.
@@ -120,5 +121,79 @@ def main():
     print("wrote assets/logo.png", img.size)
 
 
+def square():
+    """assets/logo-square.png: a rounded square icon, "LZ" / "80N" in white
+    pixel letters, Spectrum rainbow stripes in the bottom-right corner."""
+    S = 2048                        # drawn at 2x, saved at 1024 x 1024
+    cell, block = 64, 57
+    shear = 0.18
+    radius = 300
+
+    img = Image.new("RGB", (S, S))
+    d = ImageDraw.Draw(img)
+    top, bottom = (24, 30, 52), (6, 8, 14)
+    for y in range(S):              # vertical gradient
+        t = y / (S - 1)
+        d.line([(0, y), (S, y)], fill=tuple(int(a + (b - a) * t) for a, b in zip(top, bottom)))
+    for gy in range(cell // 2, S, cell):   # faint dot grid
+        for gx in range(cell // 2, S, cell):
+            d.rectangle([gx - 2, gy - 2, gx + 2, gy + 2], fill=(34, 40, 62))
+
+    # the letters, two lines, on the grid
+    taken = set()
+    letters = []
+    def put_line(word, row0):
+        width = sum(len(GLYPHS[c][0]) for c in word) + 2 * (len(word) - 1)
+        col0 = (S // cell - width) // 2 - 1
+        gx = 0
+        for ch in word:
+            g = GLYPHS[ch]
+            for r, row in enumerate(g):
+                shift = shear * (8 - r) * cell
+                for c, p in enumerate(row):
+                    if p == "#":
+                        letters.append((col0 * cell + (gx + c) * cell + shift, (row0 + r) * cell))
+                        taken.add((col0 + gx + c, row0 + r))
+            gx += len(g[0]) + 2
+    put_line("LZ", 4)
+    put_line("80N", 15)
+
+    # rainbow stripes, 45 degrees, bottom-right corner (staircase of cells)
+    n = S // cell
+    stripes = []
+    for row in range(n):
+        for col in range(n):
+            u = (n - 1 - col) + (n - 1 - row)       # distance from the corner
+            k = (u - 3) // 2
+            if 0 <= k < 4 and (col, row) not in taken:
+                stripes.append((col * cell, row * cell, STRIPES[k]))
+
+    layer = Image.new("RGB", (S, S), (0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    for x, y in letters:
+        ld.rectangle([x, y, x + block - 1, y + block - 1], fill=(255, 255, 255))
+    for x, y, col in stripes:
+        ld.rectangle([x, y, x + block - 1, y + block - 1], fill=col)
+    glow = layer.filter(ImageFilter.GaussianBlur(40))
+    img = Image.composite(glow, img, glow.convert("L").point(lambda v: min(255, int(v * 0.7))))
+    d = ImageDraw.Draw(img)
+    for x, y in letters:
+        d.rectangle([x, y, x + block - 1, y + block - 1], fill=(255, 255, 255))
+    for x, y, col in stripes:
+        d.rectangle([x, y, x + block - 1, y + block - 1], fill=col)
+
+    draw_text_small(img, "ZX SPECTRUM NEXT", 3 * cell, 27 * cell + 8, 10, (120, 200, 255))
+
+    # rounded corners: transparent outside
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, S - 1, S - 1], radius=radius, fill=255)
+    out = img.convert("RGBA")
+    out.putalpha(mask)
+    out = out.resize((1024, 1024), Image.LANCZOS)
+    out.save(ROOT / "assets/logo-square.png", optimize=True)
+    print("wrote assets/logo-square.png", out.size)
+
+
 if __name__ == "__main__":
     main()
+    square()
