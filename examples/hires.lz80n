@@ -1,0 +1,98 @@
+-- hires.lz80n -- Layer 2 in 320x256 and 640x256, second palettes
+--
+--  * layer2_mode(L2_320): 320x256 pixels, 256 colours, the whole display
+--    including the border
+--  * layer2_mode(L2_640): 640x256 pixels, 16 colours (palette indices 0..15);
+--    the pixels are half as wide as they are tall
+--  * layer2_width() / layer2_height() tell the size; every drawing
+--    function takes x up to 639
+--  * PAL_LAYER2_2 is the second Layer 2 palette (here a dimmed copy);
+--    palette_select() switches between the two instantly
+--
+-- Keys: SPACE = switch 320x256 / 640x256, P = first / second palette
+
+-- Layer 2 colour i is palette entry i. In 640x256 the pixels are 0..15,
+-- so entries 0..15 get 16 chosen colours; in 320x256 they are the
+-- standard RRRGGGBB colours again. The second palette is a dimmed copy.
+byte red[] = {0, 7, 7, 7, 4, 0, 0, 0, 3, 7, 7, 1, 2, 4, 6, 7}
+byte green[] = {0, 0, 3, 7, 7, 7, 4, 0, 0, 5, 7, 1, 2, 4, 6, 7}
+byte blue[] = {1, 0, 0, 0, 0, 1, 3, 3, 3, 3, 3, 0, 1, 1, 2, 3}
+
+function dim(byte c) -> byte
+    return (c >> 1) & 0x6C | (c & 3) >> 1
+end
+
+function load_palettes(bool wide)
+    for i = 0, 255 do
+        byte c = byte(i)
+        if wide and i < 16 then c = rgb(red[i], green[i], blue[i]) end
+        palette(PAL_LAYER2, byte(i), c)
+        palette(PAL_LAYER2_2, byte(i), dim(c))
+    end
+end
+
+function scene()
+    word w = layer2_width()
+    word h = layer2_height()
+    bool wide = w == 640
+    byte bg = rgb(0, 0, 1)
+    byte fg = rgb(7, 7, 3)
+    if wide then
+        bg = 0
+        fg = 15
+    end
+    layer2_clear(bg)
+    -- colour bars along the bottom
+    if wide then
+        for i = 0, 15 do
+            fill_rect(word(i) * 40, 216, 40, 40, i)
+        end
+    else
+        for x = 0, 319 do
+            vline(x, 216, 40, byte(x * 4 / 5))
+        end
+    end
+    -- a frame around the whole display and the diagonals
+    rect(0, 0, w, h, fg)
+    line(0, 0, w - 1, 215, fg)
+    line(w - 1, 0, 0, 215, fg)
+    -- circles across the full width
+    byte c = 3
+    for k = 0, 4 do
+        sword cx = sword(w / 10 + word(k) * (w / 5))
+        if wide then c = byte(k + 2) else c = rgb(byte(k + 3), byte(7 - k), 1) end
+        -- 640x256 pixels are half as wide: twice the radius across
+        byte rx = 36
+        if wide then rx = 72 end
+        fill_ellipse(cx, 110, rx, 36, c)
+        ellipse(cx, 110, rx + rx / 4, 44, fg)
+    end
+    at(1, 2)
+    write(w, " x ", h, "   ")
+end
+
+load_palettes(false)
+layer2_visible(true)
+cls()
+ink(BRIGHT_WHITE)
+at(30, 2)
+write("SPACE: 320 / 640    P: second palette")
+byte mode = L2_320
+bool second = false
+layer2_mode(mode)
+scene()
+while true do
+    vsync()
+    if key(KEY_SPACE) then
+        if mode == L2_320 then mode = L2_640 else mode = L2_320 end
+        layer2_mode(mode)
+        load_palettes(mode == L2_640)
+        scene()
+        while key(KEY_SPACE) do vsync() end
+    end
+    if key(KEY_P) then
+        second = not second
+        palette_select(PAL_LAYER2, second)
+        while key(KEY_P) do vsync() end
+    end
+end

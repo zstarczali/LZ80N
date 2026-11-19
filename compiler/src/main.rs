@@ -83,6 +83,7 @@ pub fn compile_main(
         base_dir: base_dir.to_path_buf(),
         file_dirs: sources.dirs,
         bank_all,
+        l2_hires: src.contains("layer2_mode"),
     };
     let out = codegen::compile(&prog, &opts).map_err(name_files)?;
     Ok(out.asm)
