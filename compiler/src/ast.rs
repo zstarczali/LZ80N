@@ -173,6 +173,8 @@ pub struct Func {
     pub ret: Option<Ty>,
     /// `-> string`
     pub ret_str: bool,
+    /// `-> StructName`
+    pub ret_named: Option<String>,
     pub body: Vec<Stmt>,
     pub pos: Pos,
 }
@@ -190,6 +192,8 @@ pub struct FieldDecl {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
+    /// `class B extends A`
+    pub parent: Option<String>,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<Func>,
     pub pos: Pos,

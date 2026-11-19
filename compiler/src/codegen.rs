@@ -88,8 +88,10 @@ struct StructDef {
     name: String,
     fields: Vec<FieldDef>,
     size: u32,
-    /// method name -> function key ("Type.method")
+    /// method name -> function key ("Type.method"); inherited ones included
     methods: HashMap<String, String>,
+    /// `extends`
+    parent: Option<usize>,
 }
 
 /// Where an object lives after `place()`.
@@ -108,6 +110,8 @@ struct FnSig {
     ret: Option<Ty>,
     /// `-> string`: label of the static return buffer
     ret_str: Option<String>,
+    /// `-> Struct`: (struct id, label of the static return buffer)
+    ret_struct: Option<(usize, String)>,
 }
 
 /// Right-hand operand of a binary operation after `gen_operands`.
@@ -157,6 +161,9 @@ struct Gen {
     str_tmps: HashSet<String>,
     /// return buffer of the function being compiled (`-> string`)
     cur_ret_str: Option<String>,
+    cur_ret_struct: Option<usize>,
+    /// structs whose default image (`sd_Name`) is in the data
+    struct_images: HashSet<usize>,
     /// sin/cos/atan2 tables needed
     uses_trig: bool,
     /// Interrupt handlers: (raster line or None = frame, label, key)
@@ -415,7 +422,8 @@ impl Gen {
     /// An initializer list flattened to the element order of `dims`
     /// (nested lists are rows; short rows are padded).
     fn flat_init(&self, items: &[Expr], dims: &[u32], lay: Lay) -> R<Vec<Expr>> {
-        let nested = items.iter().any(|e| matches!(e.kind, ExprKind::List(_)));
+        let leaf_lists = matches!(lay, Lay::Struct(_)) && dims.len() == 1;
+        let nested = !leaf_lists && items.iter().any(|e| matches!(e.kind, ExprKind::List(_)));
         if !nested {
             return Ok(items.to_vec());
         }
@@ -435,6 +443,7 @@ impl Gen {
             let zero = match lay {
                 Lay::Prim(Ty::Bool) => ExprKind::Bool(false),
                 Lay::Str => ExprKind::Str(String::new()),
+                Lay::Struct(_) => ExprKind::List(vec![]),
                 _ => ExprKind::Int(0),
             };
             while (r.len() as u32) < row {
@@ -453,7 +462,15 @@ impl Gen {
     }
 
     /// The initializer of a declaration as data lines.
-    fn decl_data(&self, lay: Lay, dims: (u32, [u32; 3]), items: &[Expr], pos: Pos) -> R<String> {
+    fn decl_data(&self, lay: Lay, dims: Option<(u32, [u32; 3])>, items: &[Expr], pos: Pos) -> R<String> {
+        let Some(dims) = dims else {
+            // a single struct: `Point p = {1, 2}`
+            let Lay::Struct(_) = lay else {
+                return Err(Diag::new(pos, "a `{...}` list needs an array or a struct (add `[]`)"));
+            };
+            let one = Expr { kind: ExprKind::List(items.to_vec()), pos };
+            return self.array_data(lay, 1, &[one], pos);
+        };
         let mut all = vec![dims.0];
         all.extend(dims.1.iter().filter(|&&d| d > 0));
         let flat = self.flat_init(items, &all, lay)?;
@@ -535,7 +552,19 @@ impl Gen {
                     emit("db", &vals);
                 }
             }
-            Lay::Struct(_) => return Err(Diag::new(pos, "arrays of structs cannot have an initializer (yet)")),
+            Lay::Struct(id) => {
+                for i in 0..len as usize {
+                    let fields: &[Expr] = match items.get(i) {
+                        None => &[],
+                        Some(Expr { kind: ExprKind::List(v), .. }) => v,
+                        Some(e) => return Err(Diag::new(e.pos, "write each struct value as a `{...}` list")),
+                    };
+                    let bytes = self.struct_bytes(id, fields, pos)?;
+                    for chunk in bytes.chunks(16) {
+                        emit("db", &chunk.iter().map(|&b| b as i64).collect::<Vec<_>>());
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -638,6 +667,16 @@ impl Gen {
                 self.errors.push(d);
             }
         }
+        // inherited methods (parents come first, so grandparents are already in)
+        for id in 0..self.structs.len() {
+            if let Some(p) = self.structs[id].parent {
+                let inherited: Vec<(String, String)> =
+                    self.structs[p].methods.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+                for (m, k) in inherited {
+                    self.structs[id].methods.entry(m).or_insert(k);
+                }
+            }
+        }
         // pass 2: globals (direct top-level declarations), in order
         for item in &prog.items {
             if let Item::Stmt(s) = item {
@@ -680,7 +719,7 @@ impl Gen {
                 Item::Struct(sd) => sd.methods.iter().try_for_each(|m| self.func(m, format!("{}.{}", sd.name, m.name))),
                 Item::Interrupt(line, body, pos) => match self.irq_key(line.as_ref()) {
                     Some(key) if self.funcs.contains_key(&key) && !self.calls.contains_key(&key) => {
-                        let f = Func { name: key.clone(), params: vec![], ret: None, ret_str: false, body: body.clone(), pos: *pos };
+                        let f = Func { name: key.clone(), params: vec![], ret: None, ret_str: false, ret_named: None, body: body.clone(), pos: *pos };
                         self.func(&f, key)
                     }
                     _ => Ok(()),
@@ -839,10 +878,11 @@ impl Gen {
     }
 
     fn init_global(&mut self, name: &str, init: &Option<Expr>, pos: Pos) -> R<()> {
-        if let Some(Expr { kind: ExprKind::List(_), .. }) = init {
+        let Some(Sym::Var { obj, label, .. }) = self.lookup(name) else { return Ok(()) };
+        let dims = obj.len.map(|n| (n, obj.sub));
+        if matches!(init, Some(Expr { kind: ExprKind::List(_), .. })) && !self.runtime_struct_list(obj.lay, &dims, init) {
             return Ok(()); // already in the data
         }
-        let Some(Sym::Var { obj, label, .. }) = self.lookup(name) else { return Ok(()) };
         match (obj.lay, init) {
             (Lay::Prim(ty), Some(init)) => {
                 self.comment(pos, &format!("init {name}"));
@@ -850,7 +890,12 @@ impl Gen {
                 self.store(&label, ty);
             }
             (Lay::Struct(id), None) => self.init_struct(&label, id, obj.total(), pos)?,
-            (Lay::Struct(_), Some(_)) => return Err(Diag::new(pos, "struct variables cannot have an initializer (yet)")),
+            (Lay::Struct(id), Some(init)) if obj.len.is_none() => {
+                self.comment(pos, &format!("init {name}"));
+                let dest = Expr { kind: ExprKind::Name(name.to_string()), pos };
+                self.struct_into(&dest, id, init, true)?;
+            }
+            (Lay::Struct(_), Some(_)) => return Err(Diag::new(pos, "an array of structs takes a `{...}` list")),
             (Lay::Str, Some(init)) if obj.len.is_none() => {
                 self.comment(pos, &format!("init {name}"));
                 self.gen_str(init)?;
@@ -868,8 +913,16 @@ impl Gen {
         if !sd.name.starts_with(|c: char| c.is_ascii_uppercase()) {
             return Err(Diag::new(sd.pos, format!("type names must start with an upper-case letter (`{}`)", sd.name)));
         }
-        let mut fields: Vec<FieldDef> = Vec::new();
-        let mut offset = 0;
+        let parent = match &sd.parent {
+            None => None,
+            Some(p) => match self.struct_ids.get(p) {
+                Some(&id) => Some(id),
+                None => return Err(Diag::new(sd.pos, format!("unknown parent class `{p}` (declare it first)"))),
+            },
+        };
+        // a derived class starts with all the fields of its parent
+        let mut fields: Vec<FieldDef> = parent.map(|p| self.structs[p].fields.clone()).unwrap_or_default();
+        let mut offset = parent.map(|p| self.structs[p].size).unwrap_or(0);
         for f in &sd.fields {
             if fields.iter().any(|x| x.name == f.name) {
                 return Err(Diag::new(f.pos, format!("duplicate field `{}`", f.name)));
@@ -903,9 +956,308 @@ impl Gen {
             return Err(Diag::new(sd.pos, "struct too large"));
         }
         let id = self.structs.len();
-        self.structs.push(StructDef { name: sd.name.clone(), fields, size: offset, methods: HashMap::new() });
+        self.structs.push(StructDef { name: sd.name.clone(), fields, size: offset, methods: HashMap::new(), parent });
         self.struct_ids.insert(sd.name.clone(), id);
         Ok(())
+    }
+
+    // ------------------------------------------------------- struct values
+    /// A single struct initialised from a `{...}` list that is not all
+    /// constants: built by code instead of being data.
+    fn runtime_struct_list(&self, lay: Lay, dims: &Option<(u32, [u32; 3])>, init: &Option<Expr>) -> bool {
+        match (lay, dims, init) {
+            (Lay::Struct(id), None, Some(Expr { kind: ExprKind::List(items), pos })) => {
+                self.struct_bytes(id, items, *pos).is_err()
+            }
+            _ => false,
+        }
+    }
+
+    /// Is `a` the class `b` or derived from it?
+    fn is_sub(&self, mut a: usize, b: usize) -> bool {
+        loop {
+            if a == b {
+                return true;
+            }
+            match self.structs[a].parent {
+                Some(p) => a = p,
+                None => return false,
+            }
+        }
+    }
+
+    /// The struct a constructor, `{...}` list or struct-returning call makes
+    /// (lists: None, their type comes from where they go).
+    fn struct_maker_ty(&self, e: &Expr) -> Option<usize> {
+        match &e.kind {
+            ExprKind::Call(n, _) => self
+                .struct_ids
+                .get(n)
+                .copied()
+                .or_else(|| self.funcs.get(n).and_then(|f| f.ret_struct.as_ref().map(|r| r.0))),
+            ExprKind::MethodCall(obj, m, _) => {
+                let key = self.method_key(obj, m, e.pos).ok()?;
+                self.funcs[&key].ret_struct.as_ref().map(|r| r.0)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_struct_maker(&self, e: &Expr) -> bool {
+        matches!(e.kind, ExprKind::List(_)) || self.struct_maker_ty(e).is_some()
+    }
+
+    /// A hidden struct variable for a temporary value (static frame slot).
+    fn hidden_struct(&mut self, id: usize, pos: Pos) -> Expr {
+        self.n += 1;
+        let name = format!("$t{}", self.n);
+        let obj = Obj::new(Lay::Struct(id), None);
+        if self.scopes.is_empty() {
+            let label = format!("t_{}", self.n);
+            self.alloc_bytes(&label, self.structs[id].size);
+            self.globals.insert(name.clone(), Sym::Var { obj, label, by_ref: false });
+        } else {
+            self.declare_local_obj(&name, obj);
+        }
+        Expr { kind: ExprKind::Name(name), pos }
+    }
+
+    /// Copy `size` bytes from the address in HL to `dest`.
+    fn copy_hl_to(&mut self, dest: &Expr, size: u32) -> R<()> {
+        if let Some(a) = self.static_addr(dest)? {
+            self.e(&format!("ld de,{a}"));
+        } else {
+            self.e("push hl");
+            self.place_hl(dest)?;
+            self.e("ex de,hl");
+            self.e("pop hl");
+        }
+        self.e(&format!("ld bc,{size}"));
+        self.e("ldir");
+        Ok(())
+    }
+
+    /// One constant of a numeric/bool initializer, masked to the type.
+    fn prim_const(&self, e: &Expr, t: Ty) -> R<i64> {
+        let v = match t {
+            Ty::Fixed => self.fixed_const(e).filter(|v| (-32768..=32767).contains(v)),
+            Ty::Fixed16 => self.fixed16_const(e).filter(|v| (-0x8000_0000..=0x7FFF_FFFF).contains(v)),
+            Ty::Bool => match &e.kind {
+                ExprKind::Bool(b) => Some(*b as i64),
+                _ => None,
+            },
+            _ => self.const_eval(e).filter(|&v| t.literal_fits(v)),
+        }
+        .ok_or_else(|| Diag::new(e.pos, format!("initializer values must be `{}` constants that fit", t.name())))?;
+        Ok(mask(v, t))
+    }
+
+    fn str_const(&self, e: &Expr) -> R<String> {
+        match &e.kind {
+            ExprKind::Str(t) => Ok(t.clone()),
+            ExprKind::Name(n) => match self.lookup(n) {
+                Some(Sym::SConst(t)) => Ok(t),
+                _ => Err(Diag::new(e.pos, "string values here must be string constants")),
+            },
+            _ => Err(Diag::new(e.pos, "string values here must be string constants")),
+        }
+    }
+
+    /// The bytes of a struct value from a `{...}` list of field values in
+    /// declaration order (missing fields: their defaults, or 0 / "").
+    fn struct_bytes(&self, id: usize, items: &[Expr], pos: Pos) -> R<Vec<u8>> {
+        let sd = &self.structs[id];
+        if items.len() > sd.fields.len() {
+            return Err(Diag::new(
+                pos,
+                format!("{} values for `{}`, which has {} fields", items.len(), sd.name, sd.fields.len()),
+            ));
+        }
+        let mut out = Vec::new();
+        for (k, f) in sd.fields.iter().enumerate() {
+            let n = f.obj.total().unwrap_or(1) as usize;
+            let item = items.get(k);
+            // the elements of an array field come as a nested list
+            let elems: Vec<Option<&Expr>> = match (item, f.obj.len.is_some()) {
+                (None, _) => vec![None; n],
+                (Some(e), false) => vec![Some(e)],
+                (Some(Expr { kind: ExprKind::List(v), pos: p }), true) => {
+                    if v.len() > n {
+                        return Err(Diag::new(*p, format!("{} values for field `{}` of {n}", v.len(), f.name)));
+                    }
+                    (0..n).map(|i| v.get(i)).collect()
+                }
+                (Some(e), true) => {
+                    return Err(Diag::new(e.pos, format!("field `{}` is an array: give it a `{{...}}` list", f.name)))
+                }
+            };
+            for el in elems {
+                match (f.obj.lay, el) {
+                    (Lay::Prim(t), el) => {
+                        let v = match el {
+                            Some(e) => self.prim_const(e, t)?,
+                            None if f.obj.len.is_none() => mask(f.init.unwrap_or(0), t),
+                            None => 0,
+                        };
+                        for b in 0..t.size() {
+                            out.push((v >> (8 * b)) as u8);
+                        }
+                    }
+                    (Lay::Str, el) => {
+                        let text = match el {
+                            Some(e) => self.str_const(e)?,
+                            None => String::new(),
+                        };
+                        let b: Vec<u8> = text.bytes().take(STR_CAP as usize).collect();
+                        let mut v = vec![b.len() as u8];
+                        v.extend(b);
+                        v.resize(STR_SIZE as usize, 0);
+                        out.extend(v);
+                    }
+                    (Lay::Struct(s), None) => out.extend(self.struct_bytes(s, &[], pos)?),
+                    (Lay::Struct(s), Some(Expr { kind: ExprKind::List(v), pos: p })) => {
+                        out.extend(self.struct_bytes(s, v, *p)?)
+                    }
+                    (Lay::Struct(_), Some(e)) => {
+                        return Err(Diag::new(e.pos, "write a struct field's value as a `{...}` list"))
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Data label holding the given bytes.
+    fn bytes_label(&mut self, prefix: &str, bytes: &[u8]) -> String {
+        self.n += 1;
+        let l = format!("{prefix}_{}", self.n);
+        let _ = writeln!(self.data, "{l}:");
+        for c in bytes.chunks(16) {
+            let v: Vec<String> = c.iter().map(|x| x.to_string()).collect();
+            let _ = writeln!(self.data, "    db {}", v.join(","));
+        }
+        l
+    }
+
+    /// `sd_Name`: a struct with all its defaults (what a constructor starts from).
+    fn struct_image(&mut self, id: usize, pos: Pos) -> R<String> {
+        let l = format!("sd_{}", self.structs[id].name);
+        if self.struct_images.insert(id) {
+            let bytes = self.struct_bytes(id, &[], pos)?;
+            let _ = writeln!(self.data, "{l}:");
+            for c in bytes.chunks(16) {
+                let v: Vec<String> = c.iter().map(|x| x.to_string()).collect();
+                let _ = writeln!(self.data, "    db {}", v.join(","));
+            }
+        }
+        Ok(l)
+    }
+
+    /// `Type(args)` built in `t`: defaults, then `init(args)` if the class
+    /// has one, else the arguments go to the fields in order.
+    fn construct(&mut self, t: &Expr, cid: usize, args: &[Expr], pos: Pos) -> R<()> {
+        if let Some(key) = self.structs[cid].methods.get("init").cloned() {
+            let img = self.struct_image(cid, pos)?;
+            self.e(&format!("ld hl,{img}"));
+            self.copy_hl_to(t, self.structs[cid].size)?;
+            let mut all: Vec<&Expr> = vec![t];
+            all.extend(args.iter());
+            self.call_fn(&key, &all, pos)?;
+            return Ok(());
+        }
+        self.fill_fields(t, cid, args, pos)
+    }
+
+    /// Defaults, then `args` to the fields in declaration order.
+    fn fill_fields(&mut self, t: &Expr, cid: usize, args: &[Expr], pos: Pos) -> R<()> {
+        let img = self.struct_image(cid, pos)?;
+        self.e(&format!("ld hl,{img}"));
+        self.copy_hl_to(t, self.structs[cid].size)?;
+        let fields: Vec<String> = self.structs[cid].fields.iter().map(|f| f.name.clone()).collect();
+        if args.len() > fields.len() {
+            return Err(Diag::new(
+                pos,
+                format!("`{}` has {} fields, got {} values (or give it an `init` method)", self.structs[cid].name, fields.len(), args.len()),
+            ));
+        }
+        for (f, a) in fields.iter().zip(args) {
+            let fe = Expr { kind: ExprKind::Field(Box::new(t.clone()), f.clone()), pos: a.pos };
+            self.assign(&fe, a)?;
+        }
+        Ok(())
+    }
+
+    /// Store a struct value in `dest` (of struct type `id`): another struct
+    /// (the same class or a derived one: its `id` part is copied), a `{...}`
+    /// list, a constructor or a call returning a struct. `direct`: `dest`
+    /// cannot appear in `value`, so a constructor may build in place.
+    fn struct_into(&mut self, dest: &Expr, id: usize, value: &Expr, direct: bool) -> R<()> {
+        let size = self.structs[id].size;
+        let tname = self.structs[id].name.clone();
+        let not_a = |me: &Self, other: usize| {
+            Diag::new(value.pos, format!("a `{}` is not a `{tname}`", me.structs[other].name))
+        };
+        match &value.kind {
+            ExprKind::List(items) => match self.struct_bytes(id, items, value.pos) {
+                Ok(bytes) => {
+                    // all constants: a copy of a ready-made image
+                    let l = self.bytes_label("si", &bytes);
+                    self.e(&format!("ld hl,{l}"));
+                    self.copy_hl_to(dest, size)
+                }
+                Err(_) if direct => self.fill_fields(dest, id, items, value.pos),
+                Err(_) => {
+                    // `v = {v.y, v.x}`: build it aside first
+                    let t = self.hidden_struct(id, value.pos);
+                    self.fill_fields(&t, id, items, value.pos)?;
+                    self.place_hl(&t)?;
+                    self.copy_hl_to(dest, size)
+                }
+            },
+            ExprKind::Call(n, args) if self.struct_ids.contains_key(n) => {
+                let cid = self.struct_ids[n];
+                if !self.is_sub(cid, id) {
+                    return Err(not_a(self, cid));
+                }
+                if direct && cid == id {
+                    return self.construct(dest, cid, args, value.pos);
+                }
+                let t = self.hidden_struct(cid, value.pos);
+                self.construct(&t, cid, args, value.pos)?;
+                self.place_hl(&t)?;
+                self.copy_hl_to(dest, size)
+            }
+            ExprKind::Call(..) | ExprKind::MethodCall(..) if self.struct_maker_ty(value).is_some() => {
+                let rid = self.struct_maker_ty(value).unwrap();
+                if !self.is_sub(rid, id) {
+                    return Err(not_a(self, rid));
+                }
+                match &value.kind {
+                    ExprKind::Call(n, args) => {
+                        self.call(n, args, value.pos)?;
+                    }
+                    ExprKind::MethodCall(obj, m, args) => {
+                        self.method_call(obj, m, args, value.pos)?;
+                    }
+                    _ => unreachable!(),
+                }
+                // HL = the function's return buffer
+                self.copy_hl_to(dest, size)
+            }
+            _ => {
+                let src = self.obj_of(value)?;
+                match src.lay {
+                    Lay::Struct(s) if src.len.is_none() => {
+                        if !self.is_sub(s, id) {
+                            return Err(not_a(self, s));
+                        }
+                    }
+                    _ => return Err(Diag::new(value.pos, format!("expected a `{tname}` value"))),
+                }
+                self.place_hl(value)?;
+                self.copy_hl_to(dest, size)
+            }
+        }
     }
 
     /// Does this struct (or a nested one) have field defaults?
@@ -993,7 +1345,18 @@ impl Gen {
         } else {
             None
         };
-        self.funcs.insert(key, FnSig { label, params, ret: f.ret, ret_str });
+        let ret_struct = match &f.ret_named {
+            None => None,
+            Some(n) => {
+                let Some(&id) = self.struct_ids.get(n) else {
+                    return Err(Diag::new(f.pos, format!("unknown return type `{n}`")));
+                };
+                let l = format!("r_{}", Self::safe(&key));
+                self.alloc_bytes(&l, self.structs[id].size);
+                Some((id, l))
+            }
+        };
+        self.funcs.insert(key, FnSig { label, params, ret: f.ret, ret_str, ret_struct });
         Ok(())
     }
 
@@ -1013,12 +1376,18 @@ impl Gen {
                 return Err(Diag::new(s.pos, "an initialised array needs an element type"));
             }
             None if self.is_str(init.as_ref().unwrap()) => Lay::Str,
+            None if self.struct_maker_ty(init.as_ref().unwrap()).is_some() => {
+                Lay::Struct(self.struct_maker_ty(init.as_ref().unwrap()).unwrap())
+            }
             None => Lay::Prim(self.infer_decl(init.as_ref().unwrap())?),
         };
         let label = format!("g_{name}");
-        if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
+        if self.runtime_struct_list(lay, &dims, init) {
+            // `V w = {k, k * 2}`: filled in by the code (init_global)
+            self.alloc_bytes(&label, self.lay_size(lay));
+        } else if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
             // initial values are part of the program image: no code at all
-            let data = self.decl_data(lay, dims.unwrap(), items, s.pos)?;
+            let data = self.decl_data(lay, dims, items, s.pos)?;
             let _ = write!(self.data, "{label}:\n{data}");
         } else {
             let bytes = self.lay_size(lay) * array.unwrap_or(1);
@@ -1043,6 +1412,7 @@ impl Gen {
         self.cur_fn = key.clone();
         self.cur_ret = Some(sig.ret);
         self.cur_ret_str = sig.ret_str.clone();
+        self.cur_ret_struct = sig.ret_struct.as_ref().map(|r| r.0);
         self.calls.entry(key.clone()).or_insert((f.pos, HashSet::new()));
         let start = self.code.len();
         let _ = writeln!(self.code, "\n; function {key}");
@@ -1051,6 +1421,9 @@ impl Gen {
         for (p, lay, slot) in &sig.params {
             let by_ref = matches!(lay, Lay::Struct(_) | Lay::Str);
             params.insert(p.clone(), Sym::Var { obj: Obj::new(*lay, None), label: slot.clone(), by_ref });
+        }
+        if let Some((id, buf)) = &sig.ret_struct {
+            params.insert("$ret".into(), Sym::Var { obj: Obj::new(Lay::Struct(*id), None), label: buf.clone(), by_ref: false });
         }
         self.scopes.push(params);
         self.scopes.push(HashMap::new());
@@ -1094,7 +1467,7 @@ impl Gen {
             Some(n) => format!("i_raster_{n}"),
             None => "i_frame".to_string(),
         };
-        self.funcs.insert(key.clone(), FnSig { label: label.clone(), params: vec![], ret: None, ret_str: None });
+        self.funcs.insert(key.clone(), FnSig { label: label.clone(), params: vec![], ret: None, ret_str: None, ret_struct: None });
         self.irqs.push((n, label, key));
         Ok(())
     }
@@ -1261,15 +1634,27 @@ impl Gen {
                     self.scopes.last_mut().unwrap().insert(name.clone(), sym);
                     return Ok(());
                 }
+                let lay0 = match ty {
+                    Some(t) => Some(self.resolve_type(t, s.pos)?),
+                    None => None,
+                };
+                if let (Some(Lay::Struct(id)), Some(e)) = (lay0, init) {
+                    if self.runtime_struct_list(Lay::Struct(id), &dims, init) {
+                        self.comment(s.pos, &format!("local {name}"));
+                        self.declare_local_obj(name, Self::mk_obj(Lay::Struct(id), None));
+                        let dest = Expr { kind: ExprKind::Name(name.clone()), pos: s.pos };
+                        return self.struct_into(&dest, id, e, true);
+                    }
+                }
                 if let Some(Expr { kind: ExprKind::List(items), .. }) = init {
                     // static frame: copy the initial values in on every entry
                     let Some(t) = ty else {
                         return Err(Diag::new(s.pos, "an initialised array needs an element type"));
                     };
                     let lay = self.resolve_type(t, s.pos)?;
-                    let n = array.unwrap();
+                    let n = array.unwrap_or(1);
                     self.comment(s.pos, &format!("local {name}"));
-                    let data = self.decl_data(lay, dims.unwrap(), items, s.pos)?;
+                    let data = self.decl_data(lay, dims, items, s.pos)?;
                     self.n += 1;
                     let tab = format!("ai_{}", self.n);
                     let _ = write!(self.data, "{tab}:\n{data}");
@@ -1325,16 +1710,31 @@ impl Gen {
                         Lay::Prim(t) => t,
                         Lay::Str => unreachable!(),
                         Lay::Struct(id) => {
-                            if init.is_some() {
-                                return Err(Diag::new(s.pos, "struct variables cannot have an initializer (yet)"));
-                            }
                             self.comment(s.pos, &format!("local {name}"));
+                            if let Some(init) = init {
+                                if array.is_some() {
+                                    return Err(Diag::new(s.pos, "an array of structs takes a `{...}` list"));
+                                }
+                                self.declare_local_obj(name, Self::mk_obj(Lay::Struct(id), None));
+                                let dest = Expr { kind: ExprKind::Name(name.clone()), pos: s.pos };
+                                return self.struct_into(&dest, id, init, true);
+                            }
                             let label = self.declare_local_obj(name, Self::mk_obj(Lay::Struct(id), dims));
                             // locals live in static frames: re-apply defaults on every entry
                             return self.init_struct(&label, id, *array, s.pos);
                         }
                     },
-                    None => self.infer_decl(init.as_ref().unwrap())?,
+                    None => {
+                        let init = init.as_ref().unwrap();
+                        if let Some(id) = self.struct_maker_ty(init) {
+                            // `var p = Point(1, 2)`
+                            self.comment(s.pos, &format!("local {name}"));
+                            self.declare_local_obj(name, Self::mk_obj(Lay::Struct(id), None));
+                            let dest = Expr { kind: ExprKind::Name(name.clone()), pos: s.pos };
+                            return self.struct_into(&dest, id, init, true);
+                        }
+                        self.infer_decl(init)?
+                    }
                 };
                 self.comment(s.pos, &format!("local {name}"));
                 match init {
@@ -1393,6 +1793,14 @@ impl Gen {
             StmtKind::Asset { .. } => Err(Diag::new(s.pos, "`asset` declarations must be at the top level")),
             StmtKind::Far(_) => Err(Diag::new(s.pos, "`far` arrays must be declared at the top level")),
             StmtKind::Return(e) => {
+                if let Some(id) = self.cur_ret_struct {
+                    let Some(e) = e else { return Err(Diag::new(s.pos, "missing return value")) };
+                    let dest = Expr { kind: ExprKind::Name("$ret".into()), pos: s.pos };
+                    self.struct_into(&dest, id, e, true)?;
+                    self.place_hl(&dest)?;
+                    self.e("ret");
+                    return Ok(());
+                }
                 if let Some(buf) = self.cur_ret_str.clone() {
                     let Some(e) = e else { return Err(Diag::new(s.pos, "missing return value")) };
                     self.gen_str(e)?;
@@ -1639,6 +2047,10 @@ impl Gen {
                 let _ = id;
                 Ok(fd.obj)
             }
+            _ if self.struct_maker_ty(e).is_some() => Err(Diag::new(
+                e.pos,
+                format!("put this `{}` value in a variable first", self.structs[self.struct_maker_ty(e).unwrap()].name),
+            )),
             _ => Err(Diag::new(e.pos, "expected a variable, array element or field")),
         }
     }
@@ -1981,21 +2393,7 @@ impl Gen {
                 }
                 self.e("call rt_scopy");
             }
-            Lay::Struct(id) => {
-                // whole-struct copy
-                let src = self.obj_of(value)?;
-                if src.lay != obj.lay || src.len.is_some() {
-                    return Err(Diag::new(value.pos, format!("expected a `{}` value", self.structs[id].name)));
-                }
-                let size = self.structs[id].size;
-                self.place_hl(value)?;
-                self.e("push hl");
-                self.place_hl(target)?;
-                self.e("ex de,hl");
-                self.e("pop hl");
-                self.e(&format!("ld bc,{size}"));
-                self.e("ldir");
-            }
+            Lay::Struct(id) => self.struct_into(target, id, value, false)?,
         }
         Ok(())
     }
@@ -2152,6 +2550,15 @@ impl Gen {
                 let (_, w, h) = self.image_arg(&args[0]).ok()?;
                 Some(if n == "image_width" { w } else { h } as i64)
             }
+            ExprKind::Call(n, args) if (n == "rgb" || n == "rgb9") && args.len() == 3 => {
+                let v: Option<Vec<i64>> = args.iter().map(|a| self.const_eval(a)).collect();
+                let v = v?;
+                Some(if n == "rgb" {
+                    (v[0] & 7) << 5 | (v[1] & 7) << 2 | v[2] & 3
+                } else {
+                    (v[0] & 7) << 6 | (v[1] & 7) << 3 | v[2] & 7
+                })
+            }
             ExprKind::Call(n, args) if matches!(n.as_str(), "abs" | "min" | "max" | "clamp") => {
                 let v: Option<Vec<i64>> = args.iter().map(|a| self.const_eval(a)).collect();
                 let v = v?;
@@ -2209,6 +2616,8 @@ impl Gen {
                     Some(t)
                 } else if self.funcs.get(n).is_some_and(|f| f.ret_str.is_some()) {
                     return Err(Diag::new(e.pos, format!("`{n}` returns a string, not a number")));
+                } else if let Some((id, _)) = self.funcs.get(n).and_then(|f| f.ret_struct.clone()) {
+                    return Err(Diag::new(e.pos, format!("`{n}` returns a `{}`, not a number", self.structs[id].name)));
                 } else if let Some(f) = self.funcs.get(n) {
                     match f.ret {
                         Some(t) => Some(t),
@@ -2254,6 +2663,11 @@ impl Gen {
                     return Err(Diag::new(e.pos, format!("`{n}` returns a string, not a number")));
                 } else if INTRINSICS.contains(&n.as_str()) {
                     return Err(Diag::new(e.pos, format!("`{n}` does not return a value")));
+                } else if self.struct_ids.contains_key(n) {
+                    return Err(Diag::new(
+                        e.pos,
+                        format!("`{n}(...)` makes a `{n}`: use it in a declaration, assignment, `return` or as an argument"),
+                    ));
                 } else {
                     return Err(Diag::new(e.pos, format!("undefined function `{n}`")));
                 }
@@ -3607,6 +4021,12 @@ impl Gen {
 
     // ---------------------------------------------------------------- calls
     fn call(&mut self, name: &str, args: &[Expr], pos: Pos) -> R<Option<Ty>> {
+        if self.struct_ids.contains_key(name) {
+            return Err(Diag::new(
+                pos,
+                format!("`{name}(...)` makes a `{name}`: use it in a declaration, assignment, `return` or as an argument"),
+            ));
+        }
         let argc = |n: usize| -> R<()> {
             if args.len() != n {
                 Err(Diag::new(pos, format!("`{name}` expects {n} argument(s), got {}", args.len())))
@@ -4171,7 +4591,36 @@ impl Gen {
         self.call_fn(name, &args, pos)
     }
 
+    /// The class of the method being compiled (for `super`).
+    fn cur_class(&self) -> Option<usize> {
+        let (t, _) = self.cur_fn.split_once('.')?;
+        self.struct_ids.get(t).copied()
+    }
+
+    /// `super.m()` / `Type.m(obj, ...)`: the class named instead of an object.
+    fn static_method_owner(&self, obj: &Expr, pos: Pos) -> R<Option<usize>> {
+        let ExprKind::Name(n) = &obj.kind else { return Ok(None) };
+        if self.lookup(n).is_some() {
+            return Ok(None);
+        }
+        if n == "super" {
+            let parent = self.cur_class().and_then(|c| self.structs[c].parent);
+            return match parent {
+                Some(p) => Ok(Some(p)),
+                None => Err(Diag::new(pos, "`super` can only be used in a method of a class that `extends` another")),
+            };
+        }
+        Ok(self.struct_ids.get(n).copied())
+    }
+
     fn method_key(&self, obj: &Expr, m: &str, pos: Pos) -> R<String> {
+        if let Some(id) = self.static_method_owner(obj, pos)? {
+            return self.structs[id]
+                .methods
+                .get(m)
+                .cloned()
+                .ok_or_else(|| Diag::new(pos, format!("`{}` has no method `{m}`", self.structs[id].name)));
+        }
         let o = self.obj_of(obj)?;
         let (Lay::Struct(id), None) = (o.lay, o.len) else {
             return Err(Diag::new(pos, format!("`.{m}()` called on something that is not a struct/class value")));
@@ -4185,7 +4634,13 @@ impl Gen {
 
     fn method_call(&mut self, obj: &Expr, m: &str, args: &[Expr], pos: Pos) -> R<Option<Ty>> {
         let key = self.method_key(obj, m, pos)?;
-        let mut all: Vec<&Expr> = vec![obj];
+        let this = Expr { kind: ExprKind::Name("self".into()), pos };
+        let mut all: Vec<&Expr> = match &obj.kind {
+            // `super.m(...)`: on self; `Type.m(obj, ...)`: the object is the first argument
+            ExprKind::Name(n) if n == "super" && self.lookup(n).is_none() => vec![&this],
+            _ if self.static_method_owner(obj, pos)?.is_some() => vec![],
+            _ => vec![obj],
+        };
         all.extend(args.iter());
         self.call_fn(&key, &all, pos)
     }
@@ -4203,9 +4658,16 @@ impl Gen {
                 Ok(Ty::Word)
             }
             Lay::Struct(id) => {
+                if self.is_struct_maker(a) {
+                    // a constructor, list or struct-returning call: build it in a temporary
+                    let t = self.hidden_struct(id, a.pos);
+                    self.struct_into(&t, id, a, true)?;
+                    self.place_hl(&t)?;
+                    return Ok(Ty::Word);
+                }
                 let o = self.obj_of(a)?;
-                if o.lay != lay || o.len.is_some() {
-                    return Err(Diag::new(a.pos, format!("expected a `{}` variable", self.structs[id].name)));
+                if !matches!(o.lay, Lay::Struct(s) if self.is_sub(s, id)) || o.len.is_some() {
+                    return Err(Diag::new(a.pos, format!("expected a `{}` value", self.structs[id].name)));
                 }
                 self.place_hl(a)?;
                 Ok(Ty::Word)

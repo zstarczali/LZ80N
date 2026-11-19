@@ -1,0 +1,123 @@
+-- inherit.lz80n -- struct values, constructors and inheritance
+--
+--  * Vec(x, y)               a constructor: the values go to the fields
+--  * Shape(...) / init       a class with an `init` method is built by it
+--  * class Ball extends Shape inherits fields and methods, overrides draw()
+--  * super.init(...)         calls the parent's version
+--  * function ... -> Vec     functions return struct values
+--  * Ball balls[] = {...}    arrays of structs with initial values
+
+struct Vec
+    sword x
+    sword y
+end
+
+function add(Vec a, Vec b) -> Vec
+    return Vec(a.x + b.x, a.y + b.y)
+end
+
+function scale(Vec v, sbyte k) -> Vec
+    return Vec(v.x * k, v.y * k)
+end
+
+class Shape
+    Vec pos
+    Vec vel
+    byte colour = 255
+    byte bounces
+
+    function init(sword x, sword y, sword dx, sword dy, byte c)
+        self.pos = Vec(x, y)
+        self.vel = {dx, dy}
+        self.colour = c
+    end
+
+    -- the edge of the shape, seen from its centre
+    function half() -> byte
+        return 4
+    end
+
+    function move()
+        Vec next = add(self.pos, self.vel)
+        byte h = self.half()
+        if next.x < h or next.x > 255 - h then
+            self.vel.x = -self.vel.x
+            self.bounces += 1
+        end
+        if next.y < 24 + h or next.y > 191 - h then
+            self.vel.y = -self.vel.y
+            self.bounces += 1
+        end
+        self.pos = add(self.pos, self.vel)
+    end
+
+    function draw()
+        fill_rect(byte(self.pos.x - 4), byte(self.pos.y - 4), 8, 8, self.colour)
+    end
+end
+
+class Ball extends Shape
+    byte radius = 6
+
+    function init(sword x, sword y, sword dx, sword dy, byte c, byte r)
+        super.init(x, y, dx, dy, c)
+        self.radius = r
+    end
+
+    function half() -> byte
+        return self.radius
+    end
+
+    function move()
+        super.move()
+        self.vel.y += 1                 -- gravity
+    end
+
+    function draw()
+        fill_circle(self.pos.x, self.pos.y, self.radius, self.colour)
+    end
+end
+
+class Box extends Shape
+    function draw()
+        rect(byte(self.pos.x - 4), byte(self.pos.y - 4), 8, 8, self.colour)
+        plot(byte(self.pos.x), byte(self.pos.y), self.colour)
+    end
+end
+
+-- arrays of structs with initial values: one {...} per element, the
+-- fields in declaration order (inherited ones first)
+Box boxes[] = {
+    {{40, 60}, {3, 2}, rgb(7, 7, 0)},
+    {{200, 100}, {-2, 3}, rgb(0, 7, 7)},
+    {{120, 150}, {4, -1}, rgb(7, 3, 7)},
+}
+Ball balls[3]
+balls[0] = Ball(60, 40, 3, 0, rgb(7, 2, 0), 8)
+balls[1] = Ball(130, 70, -2, 1, rgb(2, 7, 1), 5)
+balls[2] = Ball(190, 50, 4, -2, rgb(3, 4, 7), 10)
+
+balls[1].vel = scale(balls[1].vel, 2)   -- a struct result assigned
+
+layer2_visible(true)
+cls()
+ink(BRIGHT_YELLOW)
+at(0, 1)
+write("classes and inheritance")
+while true do
+    vsync()
+    layer2_clear(rgb(0, 0, 1))
+    for i = 0, 2 do
+        boxes[i].move()
+        boxes[i].draw()
+        balls[i].move()
+        balls[i].draw()
+    end
+    layer2_flip()
+    at(2, 1)
+    word total = 0
+    for i = 0, 2 do
+        total += balls[i].bounces + boxes[i].bounces
+    end
+    write("bounces: ", total, "  ")
+end
