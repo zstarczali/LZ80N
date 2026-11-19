@@ -9,7 +9,7 @@ on the Next or in an emulator. There is no interpreter, no virtual machine and
 no garbage collector: what you write becomes Z80N instructions.
 
 This manual describes the language and its libraries as implemented in
-version 1.0.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
+version 1.1.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
 The compact technical specification is [`spec.md`](spec.md).
 
 ---
@@ -179,7 +179,7 @@ inside a method).
 
 **Built-in functions** (implemented by the compiler)
 
-`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing`
+`print` `write` `at` `ink` `cls` `border` `vsync` `pause` `frames` `key` `kempston` `any_key` `wait_key` `cpu_speed` `random` `seed` `memory` `nextreg` `port` `addr` `dma_copy` `dma_fill` `plot` `point` `hline` `layer2_clear` `layer2_flip` `sprite_load` `ay_write` `note_period` `abs` `min` `max` `clamp` `sqrt` `sin` `cos` `atan2` `round` `len` `sub` `find` `val` `asc` `chr` `str` `upper` `lower` `draw_image` `image_width` `image_height` `layer2_mode` `layer2_width` `layer2_height` `sample_play` `sample_loop` `sample_stop` `sample_playing` `music_play` `music_once` `music_stop` `music_playing`
 
 **Standard library names** (functions, types and constants written in LZ80N).
 They are reserved in **every** program, even one that does not use the
@@ -1084,6 +1084,7 @@ is relative to the source file.
   (alpha < 128) become the sprite transparency colour `$E3`.
 * `.spr`: raw 8-bit sprite patterns (256 bytes each).
 * `.wav`: a sound sample (17.3).
+* `.pt3`: music (17.4).
 
 **Pictures for Layer 2**
 
@@ -1251,6 +1252,34 @@ sample_stop()
   clearing Layer 2 takes about 2 frames).
 
 See `examples/samples.lz80n`.
+
+### 17.4 ProTracker 3 music
+
+```lua
+asset tune = "assets/tune.pt3"
+
+music_play(tune)             -- loops from the module's loop position
+music_once(tune)             -- once, then silence
+music_play(tune, 2)          -- on AY chip 2 (0-2, default 0)
+if music_playing() then ... end
+music_stop()
+```
+
+* `.pt3` modules from ProTracker 3 or Vortex Tracker II (one AY; of a
+  TurboSound module the first part). All five note tables, the 3.3-3.4 and
+  3.5+ volume tables, samples, ornaments, envelopes and the effects
+  (glissando, portamento, sample and ornament offsets, vibrato, envelope
+  slide, tempo) are supported.
+* The compiler plays the module through **when compiling** and stores the
+  13 AY registers of every frame (only those that change, about 4-8 bytes
+  per frame) in their own memory pages: a 3-minute song is about 60 KB of
+  banks, a few bytes of the program area. In the game, the frame interrupt
+  only copies the next frame to the chip: almost no CPU time.
+* The music owns one AY chip; `beep`, `play` and `tone` work on the
+  channels of the other two (17.1: channels 3-8 for chips 1 and 2).
+* Samples (17.3) sound at the same time.
+
+See `examples/music.lz80n` (its tune is made by `assets/make_music.py`).
 
 ---
 
@@ -1513,7 +1542,6 @@ Not supported yet:
 
 * more than about 31 KB of global variables and data in the program area
   (big tables belong in `far` arrays, 19.1)
-* PT3 music import
 
 Planned order: benchmarks against NextBASIC on real hardware →
 `long`/`fixed16`/Layer 2 modes → constructors and inheritance → memory banks
@@ -1582,5 +1610,6 @@ register allocation.
 | `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `samples.lz80n` | `.wav` samples on the DAC in the background |
+| `music.lz80n` | ProTracker 3 music, level meters |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |

@@ -7,7 +7,7 @@
 <p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
 
 <p align="center">
-  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.0.0" src="https://img.shields.io/badge/version-1.0.0-brightgreen"></a>
+  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.1.0" src="https://img.shields.io/badge/version-1.1.0-brightgreen"></a>
   <a href="https://github.com/zstarczali/LZ80N/actions/workflows/ci.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/zstarczali/LZ80N/ci.yml?label=build"></a>
   <a href="https://github.com/zstarczali/LZ80N/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/zstarczali/LZ80N?color=blue"></a>
 </p>
@@ -37,10 +37,11 @@
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.
 
-Status: **1.0.0** — a complete command-line compiler: typed variables,
+Status: **1.1.0** — a complete command-line compiler: typed variables,
 multi-dimensional arrays with initialisers, strings, `fixed` point math,
 structs and classes, hardware sprites, Layer 2 graphics (lines, circles,
-ellipses, triangles, PNG pictures), palettes, AY sound and music, zxnDMA,
+ellipses, triangles, PNG pictures), palettes, AY sound and music, ProTracker 3 modules,
+DAC samples, zxnDMA,
 copper and raster interrupts, tilemap text, inline `asm`, data and code
 banking for programs beyond the 31 KB program area, a peephole optimizer,
 and a test suite that runs the compiled `.nex` files in a built-in Z80N
@@ -93,6 +94,9 @@ Examples:
 | `tables.lz80n` | array initializers: menu, bar chart and colour tables, `/=` `%=` |
 | `life.lz80n` | Game of Life on 2-D arrays |
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
+| `hires.lz80n` | Layer 2 320x256 and 640x256, second palettes |
+| `inherit.lz80n` | struct values, constructors, `class B extends A` |
+| `bignum.lz80n` | `long` and `fixed16`: scores, factorials, a cannonball arc |
 | `images.lz80n` | PNG pictures on Layer 2 with transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
 | `recursion.lz80n` | recursion: a fractal tree, the Towers of Hanoi |
@@ -100,6 +104,8 @@ Examples:
 | `shooter.lz80n` | a little space shooter with sprites cut from a picture |
 | `strings.lz80n` | string values, `..`, `sub`/`find`/`upper`/`str`, user string functions, a ticker |
 | `sound.lz80n` | 3 × AY: background music (`play_loop`), `beep` piano, laser and noise effects |
+| `samples.lz80n` | `.wav` samples played on the DAC by the zxnDMA |
+| `music.lz80n` | a ProTracker 3 (`.pt3`) module with level meters |
 | `sprites.lz80n` | hardware sprites, PNG `asset` conversion, a class driving sprites |
 
 `EXAMPLE=sprites FRAMES=120 cargo test render_example -- --ignored` renders
