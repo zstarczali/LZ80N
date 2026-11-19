@@ -55,6 +55,8 @@ pub struct Cpu {
     pub slot0: u8,
     /// Page in slot 1 ($2000-$3FFF), or $FF for ROM.
     pub slot1: u8,
+    /// Page in slot 2 ($4000-$5FFF); 10 (bank 5) = `mem`.
+    pub slot2: u8,
     /// Last value written to the Layer 2 port $123B.
     pub l2_port: u8,
     /// Bytes written to the zxnDMA port since the last "enable".
@@ -115,7 +117,7 @@ impl Cpu {
             keys: [0x1F; 8], kempston: 0, halted: false,
             patterns: vec![0; 16384], pattern_ptr: 0, sprite_attr: [[0; 5]; 128],
             palettes: [[0; 256]; 8], pal_idx: 0,
-            pages: std::collections::HashMap::new(), slot0: 0xFF, slot1: 0xFF, l2_port: 0,
+            pages: std::collections::HashMap::new(), slot0: 0xFF, slot1: 0xFF, slot2: 10, l2_port: 0,
             dma_buf: Vec::new(), dma_transfers: 0, nr44_second: false,
             iff: false, ei_delay: false, int_pending: false,
             ay: [[0; 16]; 3], ay_chip: 0, ay_reg: 0,
@@ -130,6 +132,7 @@ impl Cpu {
         match a {
             0x0000..=0x1FFF if self.slot0 != 0xFF => Some(self.slot0),
             0x2000..=0x3FFF if self.slot1 != 0xFF => Some(self.slot1),
+            0x4000..=0x5FFF if self.slot2 != 10 => Some(self.slot2),
             _ => None,
         }
     }
@@ -313,6 +316,7 @@ impl Cpu {
         match r {
             0x50 => self.slot0 = v,
             0x51 => self.slot1 = v,
+            0x52 => self.slot2 = v,
             0x60 => {
                 self.copper[self.copper_idx] = v;
                 self.copper_idx = (self.copper_idx + 1) & 2047;

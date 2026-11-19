@@ -1655,3 +1655,33 @@ rt_img_dy:   db 0
 rt_img_ch:   db 0
 rt_img_mask: db 0
 "#;
+
+/// Banked code: functions in 8K pages, called through `rt_bcall`.
+pub const BANKED: &str = r#"
+; ---- banked code: functions in 8K pages mapped into MMU slot 2 ($4000) ----
+; Every banked function has a stub in the resident area:
+;     f: ld hl,f_bank / ld a,page / jp rt_bcall
+; A = page, HL = address. The caller's page is mapped back afterwards; the
+; return value in A or HL is kept. rt_codepage mirrors NR $52 (interrupts
+; save and restore it, and rt_bret).
+rt_bcall:
+    ld c,a
+    ld a,(rt_codepage)
+    push af
+    ld a,c
+    ld (rt_codepage),a
+    nextreg $52,a
+    ld de,.back
+    push de
+    jp (hl)
+.back:
+    ld (rt_bret),a
+    pop af
+    ld (rt_codepage),a
+    nextreg $52,a
+    ld a,(rt_bret)
+    ret
+
+rt_codepage: db 10           ; bank 5, the normal contents of $4000
+rt_bret:     db 0
+"#;
