@@ -4,8 +4,10 @@
 //! * 8-bit values are computed in `A`, 16-bit values in `HL`.
 //! * Binary operators: right operand in `B` (8-bit) or `DE` (16-bit).
 //! * Functions use static frames: parameters and locals live at fixed
-//!   addresses, arguments are stored there by the caller. Recursion is
-//!   rejected at compile time.
+//!   addresses, arguments are stored there by the caller. Recursion works
+//!   by saving the caller's frame on the stack around each call that can
+//!   come back to the caller (same cycle of the call graph); other calls
+//!   cost nothing extra (see `expand_recursion`).
 //! * No value is kept in a register across statements, so inline `asm`
 //!   blocks may clobber every register except `SP` (and `I`/interrupt mode).
 
@@ -137,6 +139,7 @@ pub fn compile(prog: &Program, opts: &Options) -> Result<Output, Vec<Diag>> {
     let mut g = Gen::default();
     g.run(prog, opts);
     if g.errors.is_empty() {
+        g.expand_recursion();
         Ok(Output { asm: g.finish_banked(opts) })
     } else {
         Err(g.errors)
@@ -181,6 +184,12 @@ struct Gen {
     fn_chunks: Vec<(String, String, String)>,
     base_dir: std::path::PathBuf,
     file_dirs: Vec<std::path::PathBuf>,
+    /// Static frame of the function being compiled: (label, bytes).
+    frame_slots: Option<Vec<(String, u32)>>,
+    /// Static frame of every function (parameters, locals, temporaries).
+    frames: HashMap<String, Vec<(String, u32)>>,
+    /// Some call is recursive: the stack overflow handler is needed.
+    uses_recursion: bool,
 }
 
 const INTRINSICS: &[&str] = &[
@@ -223,6 +232,40 @@ fn builtin_consts() -> Vec<(String, i64)> {
         v.push((n.to_string(), val));
     }
     v
+}
+
+/// Code that saves (`save`) or restores a static frame on the stack.
+/// Saving checks for a stack overflow first. Restoring keeps the return
+/// value (A, HL) in the shadow registers.
+fn frame_code(frame: &[(String, u32)], save: bool) -> String {
+    let mut s = String::new();
+    let total: u32 = frame.iter().map(|f| if f.1 <= 2 { 2 } else { f.1 }).sum();
+    if save {
+        let _ = writeln!(s, "    ; save the frame for a recursive call ({total} bytes)");
+        let _ = writeln!(s, "    ld hl,-({total}+64)\n    add hl,sp\n    ld de,__program_end\n    or a\n    sbc hl,de\n    jp c,rt_stack_overflow");
+        for (l, n) in frame {
+            match n {
+                1 => { let _ = writeln!(s, "    ld a,({l})\n    push af"); }
+                2 => { let _ = writeln!(s, "    ld hl,({l})\n    push hl"); }
+                _ => {
+                    let _ = writeln!(s, "    ld hl,-{n}\n    add hl,sp\n    ld sp,hl\n    ex de,hl\n    ld hl,{l}\n    ld bc,{n}\n    ldir");
+                }
+            }
+        }
+    } else {
+        let _ = writeln!(s, "    ; restore the frame after a recursive call\n    ex af,af'\n    exx");
+        for (l, n) in frame.iter().rev() {
+            match n {
+                1 => { let _ = writeln!(s, "    pop af\n    ld ({l}),a"); }
+                2 => { let _ = writeln!(s, "    pop hl\n    ld ({l}),hl"); }
+                _ => {
+                    let _ = writeln!(s, "    ld hl,0\n    add hl,sp\n    ld de,{l}\n    ld bc,{n}\n    ldir\n    ld sp,hl");
+                }
+            }
+        }
+        let _ = writeln!(s, "    exx\n    ex af,af'");
+    }
+    s
 }
 
 fn mask(v: i64, ty: Ty) -> i64 {
@@ -505,6 +548,9 @@ impl Gen {
 
     fn alloc_bytes(&mut self, label: &str, bytes: u32) {
         let _ = writeln!(self.data, "{label}: ds {}", bytes.max(1));
+        if let Some(f) = &mut self.frame_slots {
+            f.push((label.to_string(), bytes.max(1)));
+        }
     }
 
     fn safe(name: &str) -> String {
@@ -623,7 +669,6 @@ impl Gen {
                 self.errors.push(d);
             }
         }
-        self.check_recursion();
         self.check_interrupt_sharing();
     }
 
@@ -984,7 +1029,15 @@ impl Gen {
         }
         self.scopes.push(params);
         self.scopes.push(HashMap::new());
+        self.frame_slots = Some(
+            sig.params
+                .iter()
+                .map(|(_, lay, slot)| (slot.clone(), if let Lay::Prim(t) = lay { t.size() } else { 2 }))
+                .collect(),
+        );
         let r = self.block_noscope(&f.body);
+        let frame = self.frame_slots.take().unwrap_or_default();
+        self.frames.insert(key.clone(), frame);
         self.scopes.clear();
         self.e("ret");
         let text = self.code.split_off(start);
@@ -1138,56 +1191,6 @@ impl Gen {
         }
         isr.push_str("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n");
         (isr, init)
-    }
-
-    fn check_recursion(&mut self) {
-        fn dfs(
-            n: &str,
-            calls: &HashMap<String, (Pos, HashSet<String>)>,
-            state: &mut HashMap<String, u8>,
-            path: &mut Vec<String>,
-        ) -> Option<Vec<String>> {
-            match state.get(n) {
-                Some(1) => {
-                    let i = path.iter().position(|p| p == n).unwrap();
-                    let mut cyc = path[i..].to_vec();
-                    cyc.push(n.to_string());
-                    return Some(cyc);
-                }
-                Some(2) => return None,
-                _ => {}
-            }
-            state.insert(n.to_string(), 1);
-            path.push(n.to_string());
-            if let Some((_, cs)) = calls.get(n) {
-                let mut cs: Vec<_> = cs.iter().collect();
-                cs.sort();
-                for c in cs {
-                    if let Some(cyc) = dfs(c, calls, state, path) {
-                        return Some(cyc);
-                    }
-                }
-            }
-            path.pop();
-            state.insert(n.to_string(), 2);
-            None
-        }
-        let mut names: Vec<_> = self.calls.keys().cloned().collect();
-        names.sort();
-        let mut state = HashMap::new();
-        for n in names {
-            if let Some(cyc) = dfs(&n, &self.calls, &mut state, &mut Vec::new()) {
-                let pos = self.calls[&cyc[0]].0;
-                self.errors.push(Diag::new(
-                    pos,
-                    format!(
-                        "recursion is not supported (static frames): {}",
-                        cyc.join(" -> ")
-                    ),
-                ));
-                return;
-            }
-        }
     }
 
     // ---------------------------------------------------------- statements
@@ -3750,10 +3753,14 @@ impl Gen {
             ));
         }
         let caller = self.cur_fn.clone();
-        self.calls.entry(caller).or_insert((pos, HashSet::new())).1.insert(key.to_string());
+        self.calls.entry(caller.clone()).or_insert((pos, HashSet::new())).1.insert(key.to_string());
+        // replaced by a frame save/restore if the call is recursive
+        let _ = writeln!(self.code, "    ;@rec_save {caller}|{key}");
         // If no argument contains a call, store each one directly into the
         // callee's frame; otherwise evaluate all onto the stack first.
-        let has_call = args.iter().any(|a| contains_call(a));
+        // A function calling itself must not overwrite a parameter that a
+        // later argument still reads: `gcd(b, a % b)`.
+        let has_call = args.iter().any(|a| contains_call(a)) || (key == caller && args.len() > 1);
         if !has_call {
             for (a, (_, lay, slot)) in args.iter().zip(&sig.params) {
                 let t = self.gen_arg(a, *lay)?;
@@ -3772,7 +3779,66 @@ impl Gen {
             }
         }
         self.e(&format!("call {}", sig.label));
+        let _ = writeln!(self.code, "    ;@rec_restore {caller}|{key}");
         Ok(sig.ret)
+    }
+
+    /// Recursion with static frames: a call from `f` to `g` where `g` can
+    /// call back into `f` saves `f`'s frame on the stack before the
+    /// arguments are evaluated and restores it after the call (the return
+    /// value waits in the shadow registers). The markers left by `call_fn`
+    /// become that code, or nothing for an ordinary call.
+    fn expand_recursion(&mut self) {
+        let mut reach: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut reaches = |from: &str, to: &str| -> bool {
+            let set = reach.entry(from.to_string()).or_insert_with(|| {
+                let mut seen = HashSet::new();
+                let mut stack = vec![from.to_string()];
+                while let Some(n) = stack.pop() {
+                    if let Some((_, cs)) = self.calls.get(&n) {
+                        for c in cs {
+                            if seen.insert(c.clone()) {
+                                stack.push(c.clone());
+                            }
+                        }
+                    }
+                }
+                seen
+            });
+            set.contains(to)
+        };
+        let mut used = false;
+        let mut expand = |text: &str| -> String {
+            if !text.contains(";@rec_") {
+                return text.to_string();
+            }
+            let mut out = String::with_capacity(text.len());
+            for line in text.lines() {
+                let t = line.trim_start();
+                let (save, rest) = if let Some(r) = t.strip_prefix(";@rec_save ") {
+                    (true, r)
+                } else if let Some(r) = t.strip_prefix(";@rec_restore ") {
+                    (false, r)
+                } else {
+                    out.push_str(line);
+                    out.push('\n');
+                    continue;
+                };
+                let (caller, callee) = rest.split_once('|').unwrap();
+                if caller == "main" || !reaches(callee, caller) {
+                    continue;
+                }
+                let Some(frame) = self.frames.get(caller) else { continue };
+                used = true;
+                out.push_str(&frame_code(frame, save));
+            }
+            out
+        };
+        self.code = expand(&self.code);
+        for c in &mut self.fn_chunks {
+            c.2 = expand(&c.2);
+        }
+        self.uses_recursion = used;
     }
 
     fn string_label(&mut self, s: &str) -> String {
@@ -3917,6 +3983,9 @@ impl Gen {
                 let row: Vec<String> = chunk.iter().map(|b| b.to_string()).collect();
                 let _ = writeln!(out, "    db {}", row.join(","));
             }
+        }
+        if self.uses_recursion {
+            out.push_str(runtime::RECURSION);
         }
         if self.uses_notes {
             out.push_str(runtime::NOTES);

@@ -414,11 +414,19 @@ end
   The caller stores arguments directly into the callee's parameter slots
   (via the stack when an argument itself contains a call).
 * Return value: `A` (8-bit/bool) or `HL` (16-bit).
-* Consequence: **recursion is rejected** at compile time (call-graph
-  cycle check), and functions are not reentrant: a function reachable
-  both from the main program and from an `interrupt` handler is a
-  compile-time error.
-  A stack-frame ABI may be added later as an opt-in (`recursive function`).
+* Recursion: `call_fn` leaves `;@rec_save caller|callee` /
+  `;@rec_restore` markers around every call. After code generation
+  (`expand_recursion`), a call where the callee can reach the caller in the
+  call graph becomes: stack check (`SP - frame - 64 < __program_end` ->
+  `rt_stack_overflow`), push the caller's whole frame (params, locals,
+  string temporaries; 1/2-byte slots with push, larger ones copied with
+  `ldir`), the call, then restore with the return value (`A`, `HL`) parked
+  in `af'` / `exx`. Other calls drop the markers. A self-call with more than
+  one argument evaluates its arguments onto the stack first
+  (`gcd(b, a % b)`).
+* Functions are not reentrant from interrupts: a function reachable both
+  from the main program and from an `interrupt` handler is a compile-time
+  error.
 * All registers except `SP` are caller-clobbered.
 
 ## Inline assembly contract

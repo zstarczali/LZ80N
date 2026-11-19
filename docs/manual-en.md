@@ -486,18 +486,42 @@ clear_line(5)
   works on the caller's variable and can change it (like tables in Lua).
 * A function can return a `string` (`-> string`) but not a struct yet.
 
-### 7.1 No recursion
+### 7.1 Recursion
 
-To make calls fast, every function's parameters and local variables live at
-**fixed memory addresses** (static frames). As a result:
+A function may call itself, directly or through other functions:
 
-* A function cannot call itself, directly or through other functions. The
-  compiler reports this as an error.
+```lua
+function factorial(word n) -> word
+    if n <= 1 then return 1 end
+    return n * factorial(n - 1)
+end
+
+function hanoi(byte n, byte from, byte to, byte via)
+    if n == 0 then return end
+    hanoi(n - 1, from, via, to)
+    hanoi(n - 1, via, to, from)
+end
+```
+
+How it works, and what it costs:
+
+* To make calls fast, every function's parameters and local variables live
+  at **fixed memory addresses** (static frames). Before a call that can come
+  back to the caller (the callee is the caller itself, or can call it
+  again), the caller copies its frame onto the stack, and restores it after
+  the call. Ordinary calls do not pay anything for this.
+* The cost of a recursive call grows with the caller's frame: about
+  10 T-states per byte of parameters and locals. Keep big local arrays out
+  of recursive functions (make them global).
+* The stack has room for about 1–2 KB below the program, depending on the
+  program's size. Recursion that goes too deep stops the program with
+  "stack overflow (recursion too deep)" instead of corrupting memory.
 * A function cannot be used both by the main program and by an interrupt
-  handler (chapter 18). The compiler reports this too.
+  handler (chapter 18): an interrupt could arrive while the main program is
+  inside it. The compiler reports this as an error.
 
-In practice, games and demos rarely need recursion. Loops and explicit stacks
-(arrays) replace it.
+The example `recursion.lz80n` draws a fractal tree and solves the Towers of
+Hanoi.
 
 ---
 
@@ -1287,7 +1311,6 @@ automatically, largest first. Nothing changes in the source.
 
 Not supported yet:
 
-* recursion (static frames)
 * `long` (32-bit), `fixed16` (16.16)
 * returning structs, constructors, inheritance, initialisers for arrays of structs
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
@@ -1352,6 +1375,7 @@ register allocation.
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2, transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `recursion.lz80n` | recursion: a fractal tree, the Towers of Hanoi, mutual recursion |
 | `modules.lz80n` | a program in three files: `include`, `lib/screen.lz80n`, `lib/ball.lz80n` |
 | `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
