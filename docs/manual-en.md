@@ -1182,6 +1182,8 @@ $4000..$5AFF  ULA screen (unused, cleared)
 $6000..$69FF  tilemap (text layer)
 $6C00..$6FFF  text font
 $2000..$3FFF  MMU slot 1: picture pages (only inside draw_image)
+banks 8-10    Layer 2 buffer 1, banks 11-13: buffer 2 (set at startup)
+banks 14..    pictures (asset ... = image(...))
 $8000..$FCFF  program code and data (checked at compile time)
 $FDFC..       stack (grows downwards)
 $FDFD..$FDFF  JP to the interrupt handler

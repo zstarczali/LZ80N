@@ -1061,19 +1061,16 @@ rt_text_palette:
 ; Pixels are written through MMU slot 0 ($0000-$1FFF): 8K page = base + y/32,
 ; offset = (y & 31) * 256 + x. The mapped page is cached in rt_l2page.
 rt_l2_init:
-    ld a,$13                ; shadow Layer 2 bank (NextReg $13): back buffer
-    ld bc,$243B
-    out (c),a
-    inc b
-    in a,(c)
+    ; fixed buffers: banks 8-10 shown, 11-13 drawn into. They are set, not
+    ; read: NextZXOS leaves NR $12 = 9, which overlaps the default shadow
+    ; bank 11 (the two buffers would share a bank). Pictures start at bank 14.
+    nextreg $12,8
+    nextreg $13,11
+    ld a,11
     ld (rt_l2alt),a
-    dec b
-    ld a,$12                ; visible Layer 2 16K bank (NextReg $12)
-    out (c),a
-    inc b
-    in a,(c)
+    ld a,8
     ld (rt_l2bank),a
-    add a,a                 ; -> first 8K page
+    ld a,16
     ld (rt_l2base),a
     ld a,$FF
     ld (rt_l2page),a

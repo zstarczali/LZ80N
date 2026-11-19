@@ -1839,3 +1839,19 @@ print(point(100, 20), point(120, 20), point(120, 60), point(110, 40), point(120,
 "#;
     expect("r_triangles", src, "5 5 5 5 0 0\n6 6 6 6 0\n7 7 7 7\n8 8 8 8 0\n");
 }
+
+/// NextZXOS leaves the Layer 2 bank at 9 (NR $12), overlapping the shadow
+/// bank 11: the runtime must set both buffers itself.
+#[test]
+fn layer2_buffers_do_not_overlap_under_nextzxos() {
+    // frame 1: only the bottom third; frame 2 (other buffer): only the middle.
+    // With overlapping buffers frame 1's bottom lands in frame 2's top third.
+    let src = "fill_rect(0, 128, 256, 64, 3)\nlayer2_flip()\nfill_rect(0, 64, 256, 64, 2)\nlayer2_flip()";
+    let Some((_, cpu)) = run_with("r_l2_nextzxos", src, |c| {
+        c.nextreg[0x12] = 9;
+        c.nextreg[0x13] = 11;
+    }) else { return };
+    assert_eq!(cpu.l2_pixel(10, 100), 2);
+    assert_eq!(cpu.l2_pixel(10, 10), 0, "top third shows another frame");
+    assert_eq!(cpu.l2_pixel(10, 150), 0);
+}

@@ -1195,6 +1195,8 @@ $4000..$5AFF  ULA képernyő (nem használt, törölve)
 $6000..$69FF  tilemap (szövegréteg)
 $6C00..$6FFF  betűkészlet
 $2000..$3FFF  MMU 1. slot: képlapok (csak a draw_image futása alatt)
+8-10. bank    Layer 2 1. puffer, 11-13. bank: 2. puffer (induláskor beállítva)
+14. banktól   képek (asset ... = image(...))
 $8000..$FCFF  programkód és adatok (fordításkor ellenőrizve)
 $FDFC..       verem (lefelé nő)
 $FDFD..$FDFF  JP a megszakításkezelőre
