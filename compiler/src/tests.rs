@@ -2727,3 +2727,28 @@ print(frames() - t)
     assert_eq!(cpu.ay[0][7] & 0x3F, 0x3F);
     assert!(err("asset x = \"ships.png\"\nmusic_play(x)").contains("not music"));
 }
+
+/// T-states between calls of `bench_start()` and `bench_stop(n)` in the
+/// program named by BENCH (run with --ignored --nocapture).
+#[test]
+#[ignore]
+fn bench() {
+    let path = std::env::var("BENCH").expect("BENCH=file.lz80n");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let (nex, syms) = build("bench", &src).unwrap();
+    let mut cpu = load_nex(&nex).unwrap();
+    let (start, stop, end) = (syms["f_bench_start"], syms["f_bench_stop"], syms["__main_end"]);
+    let mut t0 = 0;
+    for _ in 0..2_000_000_000u64 {
+        if cpu.pc == end {
+            return;
+        }
+        if cpu.pc == start {
+            t0 = cpu.t_states;
+        } else if cpu.pc == stop {
+            println!("BENCH {:>3} {:>10}", cpu.a, cpu.t_states - t0);
+        }
+        cpu.tick().unwrap();
+    }
+    panic!("did not finish");
+}
