@@ -65,7 +65,7 @@ enum Sym {
     /// `by_ref`: the label holds the *address* of the object (struct params, `self`).
     Var { obj: Obj, label: String, by_ref: bool },
     Const(i64),
-    /// `fixed` constant (raw 8.8 value)
+    /// fixed point constant (raw 16.16; `fixed` uses it rounded to 8.8)
     FConst(i64),
     /// string constant
     SConst(String),
@@ -190,6 +190,8 @@ struct Gen {
     frames: HashMap<String, Vec<(String, u32)>>,
     /// Some call is recursive: the stack overflow handler is needed.
     uses_recursion: bool,
+    /// `long` / `fixed16` arithmetic: the 32-bit runtime is needed.
+    uses_long: bool,
 }
 
 const INTRINSICS: &[&str] = &[
@@ -269,7 +271,22 @@ fn frame_code(frame: &[(String, u32)], save: bool) -> String {
 }
 
 fn mask(v: i64, ty: Ty) -> i64 {
-    if ty.size() == 1 { v & 0xFF } else { v & 0xFFFF }
+    match ty.size() {
+        1 => v & 0xFF,
+        2 => v & 0xFFFF,
+        _ => v & 0xFFFF_FFFF,
+    }
+}
+
+/// Raw 16.16 -> raw 8.8, rounded to the nearest 1/256.
+fn round8(v: i64) -> i64 {
+    if v >= 0 { (v + 128) >> 8 } else { -((-v + 128) >> 8) }
+}
+
+/// Natural type of a fixed point constant (raw 16.16): `fixed` when it
+/// fits in 8.8, else `fixed16`.
+fn fixed_kind(raw16: i64) -> Ty {
+    if (-32768..=32767).contains(&round8(raw16)) { Ty::Fixed } else { Ty::Fixed16 }
 }
 
 fn literal_ty(v: i64) -> Ty {
@@ -279,8 +296,10 @@ fn literal_ty(v: i64) -> Ty {
         Ty::SByte
     } else if (0..=65535).contains(&v) {
         Ty::Word
-    } else {
+    } else if (-32768..0).contains(&v) {
         Ty::SWord
+    } else {
+        Ty::Long
     }
 }
 
@@ -288,6 +307,8 @@ fn join(a: Option<Ty>, b: Option<Ty>) -> Option<Ty> {
     match (a, b) {
         (None, x) | (x, None) => x,
         (Some(Ty::Bool), Some(Ty::Bool)) => Some(Ty::Bool),
+        (Some(Ty::Fixed16), _) | (_, Some(Ty::Fixed16)) => Some(Ty::Fixed16),
+        (Some(Ty::Fixed), Some(Ty::Long)) | (Some(Ty::Long), Some(Ty::Fixed)) => Some(Ty::Fixed16),
         (Some(Ty::Fixed), _) | (_, Some(Ty::Fixed)) => Some(Ty::Fixed),
         (Some(a), Some(b)) => Some(Ty::int(a.size().max(b.size()), a.signed() || b.signed())),
     }
@@ -480,6 +501,7 @@ impl Gen {
                 for e in items {
                     let v = match t {
                         Ty::Fixed => self.fixed_const(e).filter(|v| (-32768..=32767).contains(v)),
+                        Ty::Fixed16 => self.fixed16_const(e).filter(|v| (-0x8000_0000..=0x7FFF_FFFF).contains(v)),
                         Ty::Bool => match &e.kind {
                             ExprKind::Bool(b) => Some(*b as i64),
                             _ => None,
@@ -492,7 +514,7 @@ impl Gen {
                     vals.push(mask(v, t));
                 }
                 vals.resize(len as usize, 0);
-                emit(if t.size() == 1 { "db" } else { "dw" }, &vals);
+                emit(match t.size() { 1 => "db", 2 => "dw", _ => "dd" }, &vals);
             }
             Lay::Str => {
                 for i in 0..len as usize {
@@ -714,6 +736,9 @@ impl Gen {
             _ => return Err(Diag::new(s.pos, "`far` arrays hold numbers or `bool` (not strings or structs yet)")),
         };
         let (len, sub) = self.decl_dims(array, init)?.unwrap();
+        if ty.is_wide() {
+            return Err(Diag::new(s.pos, format!("`far` arrays of `{}` are not supported yet", ty.name())));
+        }
         let total = Self::mk_obj(Lay::Prim(ty), Some((len, sub))).total().unwrap();
         let bytes_len = total as usize * ty.size() as usize;
         if bytes_len > 65536 {
@@ -1123,6 +1148,12 @@ impl Gen {
         let driver = self.funcs.get("sound_tick").map(|f| f.label.clone());
         let mut lines: Vec<(u16, String)> = self.irqs.iter().filter_map(|i| i.0.map(|n| (n, i.1.clone()))).collect();
         let mut isr = String::from("__isr:\n    push af\n    push bc\n    push de\n    push hl\n");
+        // 32-bit arithmetic and recursive calls hold values in the shadow
+        // registers: a handler using them must not destroy them
+        let shadow = self.uses_long || self.uses_recursion;
+        if shadow {
+            isr.push_str("    exx\n    push bc\n    push de\n    push hl\n    exx\n    ex af,af'\n    push af\n    ex af,af'\n");
+        }
         // slot 1 (far data, pictures) may be remapped by the handler
         let slot1 = !self.far_pages.is_empty();
         if slot1 {
@@ -1188,6 +1219,9 @@ impl Gen {
         }
         if slot1 {
             isr.push_str("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n");
+        }
+        if shadow {
+            isr.push_str("    ex af,af'\n    pop af\n    ex af,af'\n    exx\n    pop hl\n    pop de\n    pop bc\n    exx\n");
         }
         isr.push_str("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n");
         (isr, init)
@@ -1440,6 +1474,9 @@ impl Gen {
                 join(Some(literal_ty(a)), Some(literal_ty(b))).unwrap()
             }
         };
+        if ty.is_wide() {
+            return Err(Diag::new(pos, "a `for` loop counts in `byte` or `word` (use `while` for `long`)"));
+        }
         if !ty.literal_fits(step_v) {
             return Err(Diag::new(pos, "`for` step does not fit the loop variable type"));
         }
@@ -1800,6 +1837,17 @@ impl Gen {
         match self.place(e)? {
             Place::Static(a) => self.load(&a, ty),
             Place::Dyn if ty.size() == 1 => self.e("ld a,(hl)"),
+            Place::Dyn if ty.size() == 4 => {
+                self.e("ld e,(hl)");
+                self.e("inc hl");
+                self.e("ld d,(hl)");
+                self.e("inc hl");
+                self.e("ld a,(hl)");
+                self.e("inc hl");
+                self.e("ld h,(hl)");
+                self.e("ld l,a");
+                self.e("ex de,hl");
+            }
             Place::Dyn => {
                 self.e("ld a,(hl)");
                 self.e("inc hl");
@@ -1877,6 +1925,18 @@ impl Gen {
                             self.e(&format!("ld a,({})", simple.unwrap()));
                             self.e("ld (hl),a");
                         }
+                        (None, 4) => {
+                            let src = simple.unwrap();
+                            for half in ["", "+2"] {
+                                self.e(&format!("ld de,({src}{half})"));
+                                self.e("ld (hl),e");
+                                self.e("inc hl");
+                                self.e("ld (hl),d");
+                                if half.is_empty() {
+                                    self.e("inc hl");
+                                }
+                            }
+                        }
                         (None, _) => {
                             self.e(&format!("ld de,({})", simple.unwrap()));
                             self.e("ld (hl),e");
@@ -1892,6 +1952,16 @@ impl Gen {
                 if ty.size() == 1 {
                     self.e("pop af");
                     self.e("ld (hl),a");
+                } else if ty.size() == 4 {
+                    for k in 0..2 {
+                        self.e("pop bc");
+                        self.e("ld (hl),c");
+                        self.e("inc hl");
+                        self.e("ld (hl),b");
+                        if k == 0 {
+                            self.e("inc hl");
+                        }
+                    }
                 } else {
                     self.e("pop de");
                     self.e("ld (hl),e");
@@ -1965,26 +2035,58 @@ impl Gen {
             } else {
                 self.e(&format!("ld a,{}", v & 0xFF));
             }
-        } else {
+        } else if ty.size() == 2 {
             self.e(&format!("ld hl,{}", v & 0xFFFF));
+        } else {
+            let v = mask(v, ty);
+            self.e(&format!("ld hl,{}", v & 0xFFFF));
+            self.e(&format!("ld de,{}", v >> 16));
         }
     }
     fn load(&mut self, label: &str, ty: Ty) {
-        if ty.size() == 1 {
-            self.e(&format!("ld a,({label})"));
-        } else {
-            self.e(&format!("ld hl,({label})"));
+        match ty.size() {
+            1 => self.e(&format!("ld a,({label})")),
+            2 => self.e(&format!("ld hl,({label})")),
+            _ => {
+                self.e(&format!("ld hl,({label})"));
+                self.e(&format!("ld de,({label}+2)"));
+            }
         }
     }
     fn store(&mut self, label: &str, ty: Ty) {
-        if ty.size() == 1 {
-            self.e(&format!("ld ({label}),a"));
-        } else {
-            self.e(&format!("ld ({label}),hl"));
+        match ty.size() {
+            1 => self.e(&format!("ld ({label}),a")),
+            2 => self.e(&format!("ld ({label}),hl")),
+            _ => {
+                self.e(&format!("ld ({label}),hl"));
+                self.e(&format!("ld ({label}+2),de"));
+            }
         }
     }
     fn push(&mut self, ty: Ty) {
-        self.e(if ty.size() == 1 { "push af" } else { "push hl" });
+        match ty.size() {
+            1 => self.e("push af"),
+            2 => self.e("push hl"),
+            _ => {
+                self.e("push de");
+                self.e("push hl");
+            }
+        }
+    }
+    fn pop(&mut self, ty: Ty) {
+        match ty.size() {
+            1 => self.e("pop af"),
+            2 => self.e("pop hl"),
+            _ => {
+                self.e("pop hl");
+                self.e("pop de");
+            }
+        }
+    }
+    /// Call a 32-bit runtime routine.
+    fn call32(&mut self, routine: &str) {
+        self.uses_long = true;
+        self.e(&format!("call {routine}"));
     }
 
     /// Convert the value in A/HL from `from` to `to` (truncating if needed).
@@ -2000,7 +2102,21 @@ impl Gen {
                     self.e("ld h,0");
                 }
             }
-            (2, 1) => self.e("ld a,l"),
+            (2, 1) | (4, 1) => self.e("ld a,l"),
+            (1, 4) | (2, 4) => {
+                if from.size() == 1 {
+                    self.convert(from, Ty::int(2, from.signed()));
+                }
+                if from.signed() {
+                    self.e("ld a,h");
+                    self.e("rla");
+                    self.e("sbc a,a");
+                    self.e("ld e,a");
+                    self.e("ld d,a");
+                } else {
+                    self.e("ld de,0");
+                }
+            }
             _ => {}
         }
     }
@@ -2056,8 +2172,11 @@ impl Gen {
     fn natural(&self, e: &Expr) -> R<Option<Ty>> {
         Ok(match &e.kind {
             ExprKind::Int(_) => None,
-            ExprKind::Fixed(_) => Some(Ty::Fixed),
-            ExprKind::Name(n) if matches!(self.lookup(n), Some(Sym::FConst(_))) => Some(Ty::Fixed),
+            ExprKind::Fixed(v) => Some(fixed_kind(*v)),
+            ExprKind::Name(n) if matches!(self.lookup(n), Some(Sym::FConst(_))) => {
+                let Some(Sym::FConst(v)) = self.lookup(n) else { unreachable!() };
+                Some(fixed_kind(v))
+            }
             ExprKind::Name(n) if matches!(self.lookup(n), Some(Sym::SConst(_))) => {
                 return Err(Diag::new(e.pos, "a string cannot be used as a number here"))
             }
@@ -2177,6 +2296,9 @@ impl Gen {
         }
         if nat == Some(Ty::Bool) {
             return Err(Diag::new(e.pos, format!("expected `{}`, found `bool`", want.name())));
+        }
+        if want.is_wide() {
+            return self.gen_wide(e, want, nat);
         }
         if want == Ty::Fixed {
             return self.gen_fixed(e, nat);
@@ -2431,6 +2553,21 @@ impl Gen {
                 self.gen_expr(e, Ty::Fixed)?;
                 "rt_print_fixed"
             }
+            Some(Ty::Long) => {
+                self.uses_long = true;
+                self.gen_expr(e, Ty::Long)?;
+                "rt_print_s32"
+            }
+            Some(Ty::Fixed16) => {
+                self.uses_long = true;
+                self.gen_expr(e, Ty::Fixed16)?;
+                "rt_print_fixed16"
+            }
+            None if !Ty::SWord.literal_fits(self.const_eval(e).unwrap_or(0)) => {
+                self.uses_long = true;
+                self.gen_expr(e, Ty::Long)?;
+                "rt_print_s32"
+            }
             Some(ty) => {
                 self.gen_expr(e, ty)?;
                 self.convert(ty, Ty::int(2, ty.signed()));
@@ -2442,8 +2579,16 @@ impl Gen {
                 if v < 0 { "rt_print_s16" } else { "rt_print_u16" }
             }
         };
+        // 32-bit values: DE holds the high word
+        let wide = routine.ends_with("32") || routine.ends_with("16");
+        if wide {
+            self.e("push de");
+        }
         self.e(&format!("ld de,{t}"));
         self.e("call rt_fmt_on");
+        if wide {
+            self.e("pop de");
+        }
         self.e(&format!("call {routine}"));
         self.e("call rt_fmt_off");
         Ok(())
@@ -2473,9 +2618,11 @@ impl Gen {
         if let Some(v) = self.const_eval(init) {
             return Ok(Sym::Const(v));
         }
-        if self.natural(init).ok().flatten() == Some(Ty::Fixed) {
-            if let Some(v) = self.fixed_const(init) {
-                Self::check_fixed(v, init.pos)?;
+        if matches!(self.natural(init).ok().flatten(), Some(Ty::Fixed | Ty::Fixed16)) {
+            if let Some(v) = self.fixed16_const(init) {
+                if !(-0x8000_0000..=0x7FFF_FFFF).contains(&v) {
+                    return Err(Diag::new(init.pos, "constant does not fit in `fixed16` (-32768 .. 32767.99)"));
+                }
                 return Ok(Sym::FConst(v));
             }
         }
@@ -2489,9 +2636,9 @@ impl Gen {
             return v.checked_mul(256);
         }
         match &e.kind {
-            ExprKind::Fixed(v) => Some(*v),
+            ExprKind::Fixed(v) => Some(round8(*v)),
             ExprKind::Name(n) => match self.lookup(n) {
-                Some(Sym::FConst(v)) => Some(v),
+                Some(Sym::FConst(v)) => Some(round8(v)),
                 _ => None,
             },
             ExprKind::Unary(UnOp::Neg, x) => self.fixed_const(x).map(|v| -v),
@@ -2609,6 +2756,297 @@ impl Gen {
             }
             _ => unreachable!("comparisons are handled by gen_bool"),
         }
+    }
+
+    // ------------------------------------------------- long and fixed16
+    /// Value of a constant expression as raw 16.16 fixed point.
+    fn fixed16_const(&self, e: &Expr) -> Option<i64> {
+        if let Some(v) = self.const_eval(e) {
+            return v.checked_mul(65536);
+        }
+        match &e.kind {
+            ExprKind::Fixed(v) => Some(*v),
+            ExprKind::Name(n) => match self.lookup(n) {
+                Some(Sym::FConst(v)) => Some(v),
+                _ => None,
+            },
+            ExprKind::Unary(UnOp::Neg, x) => self.fixed16_const(x).map(|v| -v),
+            ExprKind::Binary(op, l, r) => {
+                let (a, b) = (self.fixed16_const(l)?, self.fixed16_const(r)?);
+                match op {
+                    BinOp::Add => Some(a + b),
+                    BinOp::Sub => Some(a - b),
+                    BinOp::Mul => Some(a.checked_mul(b)? / 65536),
+                    BinOp::Div if b != 0 => Some(a.checked_mul(65536)? / b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn is_fixedish(&self, e: &Expr) -> R<bool> {
+        Ok(matches!(self.natural(e)?, Some(Ty::Fixed | Ty::Fixed16)))
+    }
+
+    /// Generate a `long` or `fixed16` value in DE:HL (DE = high word).
+    fn gen_wide(&mut self, e: &Expr, want: Ty, nat: Option<Ty>) -> R<()> {
+        if want == Ty::Long {
+            if let Some(v) = self.const_eval(e) {
+                if !Ty::Long.literal_fits(v) {
+                    return Err(Diag::new(e.pos, format!("constant {v} does not fit in `long`")));
+                }
+                self.load_imm(v, Ty::Long);
+                return Ok(());
+            }
+        } else if let Some(v) = self.fixed16_const(e) {
+            if !(-0x8000_0000..=0x7FFF_FFFF).contains(&v) {
+                return Err(Diag::new(e.pos, "constant does not fit in `fixed16` (-32768 .. 32767.99)"));
+            }
+            self.load_imm(v, Ty::Fixed16);
+            return Ok(());
+        }
+        let Some(nat) = nat else {
+            return Err(Diag::new(e.pos, "invalid constant expression (overflow?)"));
+        };
+        match (want, nat) {
+            (Ty::Long, Ty::Fixed | Ty::Fixed16) => {
+                return Err(Diag::new(e.pos, format!("expected `long`, found `{}` (convert with `long(x)`)", nat.name())))
+            }
+            (Ty::Fixed16, t) if !matches!(t, Ty::Fixed | Ty::Fixed16) => {
+                return Err(Diag::new(
+                    e.pos,
+                    format!("expected `fixed16`, found `{}` (convert with `fixed16(x)`)", t.name()),
+                ))
+            }
+            _ => {}
+        }
+        match &e.kind {
+            ExprKind::Name(_) | ExprKind::Index(..) | ExprKind::Field(..) => {
+                let t = self.load_obj(e)?;
+                self.widen(t, want);
+            }
+            ExprKind::Call(n, args) => {
+                let t = self.call(n, args, e.pos)?.expect("checked by natural()");
+                self.widen(t, want);
+            }
+            ExprKind::MethodCall(obj, m, args) => {
+                let t = self.method_call(obj, m, args, e.pos)?.expect("checked by natural()");
+                self.widen(t, want);
+            }
+            ExprKind::Unary(UnOp::Neg, x) => {
+                self.gen_expr(x, want)?;
+                self.call32("rt_neg32");
+            }
+            ExprKind::Unary(UnOp::BitNot, x) if want == Ty::Long => {
+                self.gen_expr(x, want)?;
+                self.call32("rt_cpl32");
+            }
+            ExprKind::Unary(..) => return Err(Diag::new(e.pos, "bitwise `~` on a `fixed16` value")),
+            ExprKind::Binary(op, l, r) => self.gen_wide_binary(*op, l, r, want, e.pos)?,
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    /// Widen a value just computed as `from` (A, HL or DE:HL) to `to`.
+    fn widen(&mut self, from: Ty, to: Ty) {
+        match (from, to) {
+            (f, t) if f == t => {}
+            (Ty::Fixed, Ty::Fixed16) => {
+                self.e("ld a,h");
+                self.e("rla");
+                self.e("sbc a,a");
+                self.e("ld d,a");
+                self.e("ld e,h");
+                self.e("ld h,l");
+                self.e("ld l,0");
+            }
+            (f, _) => self.convert(f, Ty::Long),
+        }
+    }
+
+    /// Left operand in DE:HL, right operand in DE':HL' (the shadow set).
+    fn gen_wide_operands(&mut self, l: &Expr, r: &Expr, lty: Ty, rty: Ty) -> R<()> {
+        let rconst = if rty == Ty::Long {
+            match self.const_eval(r) {
+                Some(v) if !Ty::Long.literal_fits(v) => {
+                    return Err(Diag::new(r.pos, format!("constant {v} does not fit in `long`")))
+                }
+                c => c,
+            }
+        } else {
+            self.fixed16_const(r)
+        };
+        self.uses_long = true;
+        if let Some(v) = rconst {
+            self.gen_expr(l, lty)?;
+            let v = v & 0xFFFF_FFFF;
+            self.e("exx");
+            self.e(&format!("ld hl,{}", v & 0xFFFF));
+            self.e(&format!("ld de,{}", v >> 16));
+            self.e("exx");
+            return Ok(());
+        }
+        self.gen_expr(l, lty)?;
+        self.e("push de");
+        self.e("push hl");
+        self.gen_expr(r, rty)?;
+        self.e("exx");
+        self.e("pop hl");
+        self.e("pop de");
+        Ok(())
+    }
+
+    fn gen_wide_binary(&mut self, op: BinOp, l: &Expr, r: &Expr, want: Ty, pos: Pos) -> R<()> {
+        let zero = |s: &Self| s.const_eval(r) == Some(0) || s.fixed16_const(r) == Some(0);
+        if matches!(op, BinOp::Div | BinOp::Mod) && zero(self) {
+            return Err(Diag::new(pos, "division by zero"));
+        }
+        match op {
+            BinOp::Shl | BinOp::Shr => {
+                let routine = if op == BinOp::Shl { "rt_shl32" } else { "rt_sar32" };
+                match self.const_eval(r) {
+                    Some(n) if (0..=255).contains(&n) => {
+                        self.gen_expr(l, want)?;
+                        if n > 0 {
+                            self.e(&format!("ld b,{n}"));
+                            self.call32(routine);
+                        }
+                    }
+                    Some(_) => return Err(Diag::new(r.pos, "shift count must be 0..255")),
+                    None => {
+                        self.gen_expr(r, Ty::Byte)?;
+                        self.e("push af");
+                        self.gen_expr(l, want)?;
+                        self.e("pop af");
+                        self.e("ld b,a");
+                        self.call32(routine);
+                    }
+                }
+            }
+            BinOp::And | BinOp::Or | BinOp::Xor if want == Ty::Fixed16 => {
+                return Err(Diag::new(pos, "bitwise operators on `fixed16` values"))
+            }
+            BinOp::Mul | BinOp::Div | BinOp::Mod if want == Ty::Fixed16 => {
+                let (lf, rf) = (self.is_fixedish(l)?, self.is_fixedish(r)?);
+                let lf = lf || (self.const_eval(l).is_none() && self.fixed16_const(l).is_some());
+                let rf = rf || (self.const_eval(r).is_none() && self.fixed16_const(r).is_some());
+                if lf && rf {
+                    self.gen_wide_operands(l, r, Ty::Fixed16, Ty::Fixed16)?;
+                    self.call32(match op {
+                        BinOp::Mul => "rt_fmul32",
+                        BinOp::Div => "rt_fdiv32",
+                        _ => "rt_mods32",
+                    });
+                } else if op == BinOp::Mod {
+                    return Err(Diag::new(pos, "`%` on `fixed16` needs two fixed point values"));
+                } else if op == BinOp::Div && !lf {
+                    return Err(Diag::new(pos, "integer / fixed16: convert the left side with `fixed16(x)`"));
+                } else {
+                    // fixed16 * integer, fixed16 / integer: plain 32-bit arithmetic
+                    let (f, i) = if lf { (l, r) } else { (r, l) };
+                    self.gen_wide_operands(f, i, Ty::Fixed16, Ty::Long)?;
+                    self.call32(if op == BinOp::Mul { "rt_mul32" } else { "rt_divs32" });
+                }
+            }
+            _ => {
+                self.gen_wide_operands(l, r, want, want)?;
+                self.call32(match op {
+                    BinOp::Add => "rt_add32",
+                    BinOp::Sub => "rt_sub32",
+                    BinOp::Mul => "rt_mul32",
+                    BinOp::Div => "rt_divs32",
+                    BinOp::Mod => "rt_mods32",
+                    BinOp::And => "rt_and32",
+                    BinOp::Or => "rt_or32",
+                    BinOp::Xor => "rt_xor32",
+                    _ => unreachable!("comparisons are handled by gen_bool"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// `long(x)`, `fixed16(x)`, and conversions of 32-bit values to the
+    /// other types. Fixed point to integer rounds down (floor).
+    fn cast_wide(&mut self, target: Ty, a: &Expr, pos: Pos) -> R<Ty> {
+        if target == Ty::Bool {
+            return Err(Diag::new(pos, "use a comparison instead of `bool(...)`"));
+        }
+        let from = match self.natural(a)? {
+            Some(Ty::Bool) => return Err(Diag::new(pos, format!("cannot convert `bool` to `{}`", target.name()))),
+            Some(t) => t,
+            None => {
+                // a constant
+                return match target {
+                    Ty::Fixed16 => {
+                        self.gen_wide(a, Ty::Fixed16, None)?;
+                        Ok(target)
+                    }
+                    Ty::Long => {
+                        self.gen_wide(a, Ty::Long, None)?;
+                        Ok(target)
+                    }
+                    _ => unreachable!("only a 32-bit target gets here with a constant"),
+                };
+            }
+        };
+        self.uses_long = true;
+        match (from, target) {
+            (f, t) if f == t => self.gen_expr(a, t)?,
+            (Ty::Fixed16, Ty::Long) => {
+                self.gen_expr(a, Ty::Fixed16)?;
+                self.e("ex de,hl");
+                self.convert(Ty::SWord, Ty::Long);
+            }
+            (Ty::Fixed, Ty::Long) => {
+                self.gen_expr(a, Ty::Fixed)?;
+                self.e("ld l,h");
+                self.e("ld a,h");
+                self.e("rla");
+                self.e("sbc a,a");
+                self.e("ld h,a");
+                self.convert(Ty::SWord, Ty::Long);
+            }
+            (f, Ty::Long) => {
+                self.gen_expr(a, f)?;
+                self.convert(f, Ty::Long);
+            }
+            (Ty::Fixed, Ty::Fixed16) => self.gen_expr(a, Ty::Fixed16)?,
+            (f, Ty::Fixed16) => {
+                // integer -> 16.16: the low word becomes the integer part
+                if f == Ty::Long {
+                    self.gen_expr(a, Ty::Long)?;
+                } else {
+                    self.gen_expr(a, f)?;
+                    self.convert(f, Ty::Long);
+                }
+                self.e("ex de,hl");
+                self.e("ld hl,0");
+            }
+            (Ty::Fixed16, Ty::Fixed) => {
+                self.gen_expr(a, Ty::Fixed16)?;
+                self.e("ld l,h");
+                self.e("ld h,e");
+            }
+            (Ty::Long, Ty::Fixed) => {
+                self.gen_expr(a, Ty::Long)?;
+                self.e("ld h,l");
+                self.e("ld l,0");
+            }
+            (Ty::Fixed16, t) => {
+                self.gen_expr(a, Ty::Fixed16)?;
+                self.e("ex de,hl");
+                self.convert(Ty::SWord, t);
+            }
+            (Ty::Long, t) => {
+                self.gen_expr(a, Ty::Long)?;
+                self.convert(Ty::SWord, t);
+            }
+            _ => unreachable!(),
+        }
+        Ok(target)
     }
 
     /// True if loading `e` cannot clobber B/C/D/E.
@@ -3020,6 +3458,12 @@ impl Gen {
         if (a == Some(Ty::Bool)) != (b == Some(Ty::Bool)) {
             return Err(Diag::new(pos, "cannot compare `bool` with a number"));
         }
+        if ty.is_wide() {
+            // Z: equal, C: left < right (signed)
+            self.gen_wide_operands(l, r, ty, ty)?;
+            self.call32("rt_cmp32");
+            return Ok(());
+        }
         let rhs = self.gen_operands(l, r, ty, ty)?;
         if ty.size() == 1 {
             match (rhs, ty.signed()) {
@@ -3173,6 +3617,9 @@ impl Gen {
         if let Some(target) = Ty::from_name(name) {
             argc(1)?;
             let a = &args[0];
+            if target.is_wide() || self.natural(a)?.is_some_and(|t| t.is_wide()) {
+                return self.cast_wide(target, a, pos).map(Some);
+            }
             if target == Ty::Fixed {
                 if let Some(v) = self.fixed_const(a) {
                     Self::check_fixed(v, a.pos)?;
@@ -3254,6 +3701,18 @@ impl Gen {
                         Some(Ty::Fixed) => {
                             self.gen_expr(a, Ty::Fixed)?;
                             self.e("call rt_print_fixed");
+                        }
+                        Some(Ty::Long) => {
+                            self.gen_expr(a, Ty::Long)?;
+                            self.call32("rt_print_s32");
+                        }
+                        Some(Ty::Fixed16) => {
+                            self.gen_expr(a, Ty::Fixed16)?;
+                            self.call32("rt_print_fixed16");
+                        }
+                        None if !Ty::SWord.literal_fits(self.const_eval(a).unwrap_or(0)) => {
+                            self.gen_expr(a, Ty::Long)?;
+                            self.call32("rt_print_s32");
                         }
                         // evaluated at the expression's own type, then widened
                         Some(t) => {
@@ -3339,6 +3798,12 @@ impl Gen {
                     return Err(Diag::new(pos, "invalid constant expression"));
                 };
                 self.gen_expr(&args[0], ty)?;
+                if ty.is_wide() {
+                    self.e("bit 7,d");
+                    self.uses_long = true;
+                    self.e("call nz,rt_neg32");
+                    return Ok(Some(ty));
+                }
                 if ty.signed() {
                     if ty.size() == 1 {
                         let l = self.new_label();
@@ -3358,6 +3823,11 @@ impl Gen {
                 let Some(ty) = join(self.natural(&args[0])?, self.natural(&args[1])?) else {
                     return Err(Diag::new(pos, "invalid constant expression"));
                 };
+                if ty.is_wide() {
+                    self.gen_wide_operands(&args[0], &args[1], ty, ty)?;
+                    self.call32(&format!("rt_{name}32"));
+                    return Ok(Some(ty));
+                }
                 let wide = if ty == Ty::Fixed { ty } else { Ty::int(2, ty.signed()) };
                 let rhs = self.gen_operands(&args[0], &args[1], wide, wide)?;
                 if let Rhs::Imm(v) = rhs {
@@ -3774,7 +4244,7 @@ impl Gen {
                 tys.push(t);
             }
             for ((_, _, slot), t) in sig.params.iter().zip(tys).rev() {
-                self.e(if t.size() == 1 { "pop af" } else { "pop hl" });
+                self.pop(t);
                 self.store(slot, t);
             }
         }
@@ -3986,6 +4456,9 @@ impl Gen {
         }
         if self.uses_recursion {
             out.push_str(runtime::RECURSION);
+        }
+        if self.uses_long {
+            out.push_str(&runtime::long());
         }
         if self.uses_notes {
             out.push_str(runtime::NOTES);

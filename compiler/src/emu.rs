@@ -1,6 +1,6 @@
 //! Minimal Z80N interpreter used by the test-suite to *run* generated
 //! programs. Covers the unprefixed, CB and ED instruction sets plus the
-//! Z80N extensions emitted by the compiler. IX/IY (DD/FD) are not
+//! Z80N extensions emitted by the compiler. IX/IY (DD/FD) are
 //! implemented. Not cycle accurate: raster timing is approximated per
 //! instruction count (see `tick`), with IM2 frame/line interrupts and copper.
 
@@ -88,6 +88,11 @@ pub struct Cpu {
     /// Display state (NextRegs, palettes) at the end of each line of the
     /// last frame, for rendering raster effects.
     pub line_state: Vec<Box<([u8; 256], [[u8; 256]; 8])>>,
+    /// Index registers, and the (IX+d) / (IY+d) address of the current
+    /// indexed instruction (replaces (HL) as operand 6).
+    pub ix: u16,
+    pub iy: u16,
+    mem_override: Option<u16>,
 }
 
 /// Instructions per raster line (~1792 T-states at 28 MHz).
@@ -124,6 +129,7 @@ impl Cpu {
             t_states: 0, marks: Vec::new(), dma_bytes: 0, line_t: 0,
             line: 0, frame_count: 0,
             copper: vec![0; 2048], copper_idx: 0, copper_pc: 0, line_state: Vec::new(),
+            ix: 0, iy: 0, mem_override: None,
         }
     }
 
@@ -205,13 +211,13 @@ impl Cpu {
     fn r(&self, i: u8) -> u8 {
         match i {
             0 => self.b, 1 => self.c, 2 => self.d, 3 => self.e,
-            4 => self.h, 5 => self.l, 6 => self.rd(self.hl()), _ => self.a,
+            4 => self.h, 5 => self.l, 6 => self.rd(self.mem_override.unwrap_or(self.hl())), _ => self.a,
         }
     }
     fn set_r(&mut self, i: u8, v: u8) {
         match i {
             0 => self.b = v, 1 => self.c = v, 2 => self.d = v, 3 => self.e = v,
-            4 => self.h = v, 5 => self.l = v, 6 => self.wr(self.hl(), v), _ => self.a = v,
+            4 => self.h = v, 5 => self.l = v, 6 => self.wr(self.mem_override.unwrap_or(self.hl()), v), _ => self.a = v,
         }
     }
     fn rp(&self, p: u8) -> u16 {
@@ -625,6 +631,41 @@ impl Cpu {
     fn step_inner(&mut self) -> Result<(), String> {
         let pc = self.pc;
         let op = self.fetch();
+        self.exec(op, pc)
+    }
+
+    /// DD / FD prefix: the next instruction uses IX / IY instead of HL.
+    fn indexed(&mut self, use_ix: bool, pc: u16) -> Result<(), String> {
+        let base = if use_ix { self.ix } else { self.iy };
+        let op = self.fetch();
+        let (x, y, z) = (op >> 6, (op >> 3) & 7, op & 7);
+        let mem = op == 0xCB
+            || (x == 1 && (y == 6 || z == 6) && op != 0x76)
+            || (x == 2 && z == 6)
+            || (x == 0 && y == 6 && (4..=6).contains(&z));
+        if mem {
+            // (IX+d): the displacement follows the opcode
+            let d = self.fetch() as i8;
+            self.mem_override = Some(base.wrapping_add(d as u16));
+            let r = if op == 0xCB { self.cb() } else { self.exec(op, pc) };
+            self.mem_override = None;
+            return r;
+        }
+        // IX / IY in place of HL (ld ix,nn / add ix,rr / push / pop / jp (ix) ...)
+        let saved = self.hl();
+        self.set_hl(base);
+        let r = self.exec(op, pc);
+        let v = self.hl();
+        self.set_hl(saved);
+        if use_ix {
+            self.ix = v;
+        } else {
+            self.iy = v;
+        }
+        r
+    }
+
+    fn exec(&mut self, op: u8, pc: u16) -> Result<(), String> {
         let (x, y, z) = (op >> 6, (op >> 3) & 7, op & 7);
         let (p, q) = (y >> 1, y & 1);
         match x {
@@ -819,7 +860,8 @@ impl Cpu {
                         self.pc = a;
                     }
                     (_, 2) => self.ed(pc)?,
-                    _ => return Err(format!("IX/IY instructions not supported (at {pc:04X})")),
+                    (_, 1) => self.indexed(true, pc)?,
+                    _ => self.indexed(false, pc)?,
                 },
                 6 => {
                     let n = self.fetch();
