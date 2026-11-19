@@ -23,7 +23,7 @@ const MAX_Y = 192 - image_height(badge)
 while true do
     draw_image(landscape, 0, 0)
     draw_image(badge, x, y)
-    fill_circle(x + 32, y + 60, 3, rgb(7, 7, 3))
+    -- fill_circle(x + 32, y + 60, 3, rgb(7, 7, 3))
     layer2_flip()
 
     x += dx

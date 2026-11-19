@@ -1,0 +1,206 @@
+{
+  "name": "lz80n",
+  "displayName": "LZ80N",
+  "description": "LZ80N language support for the ZX Spectrum Next: syntax highlighting, diagnostics, build and run in CSpect.",
+  "version": "0.1.0",
+  "publisher": "zstarczali",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zstarczali/LZ80N"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "zx spectrum next",
+    "z80n",
+    "lz80n",
+    "retro",
+    "8-bit"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.lz80n"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lz80n",
+        "aliases": [
+          "LZ80N",
+          "lz80n"
+        ],
+        "extensions": [
+          ".lz80n"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/icon.png",
+          "dark": "./images/icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lz80n",
+        "scopeName": "source.lz80n",
+        "path": "./syntaxes/lz80n.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "lz80n",
+        "path": "./snippets/lz80n.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "lz80n.build",
+        "title": "LZ80N: Build (.nex)",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "lz80n.run",
+        "title": "LZ80N: Build and Run in Emulator",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lz80n.check",
+        "title": "LZ80N: Check File"
+      },
+      {
+        "command": "lz80n.showAsm",
+        "title": "LZ80N: Show Generated Assembly"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "lz80n.run",
+          "when": "editorLangId == lz80n",
+          "group": "navigation@1"
+        },
+        {
+          "command": "lz80n.build",
+          "when": "editorLangId == lz80n",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "lz80n.build",
+          "when": "editorLangId == lz80n"
+        },
+        {
+          "command": "lz80n.run",
+          "when": "editorLangId == lz80n"
+        },
+        {
+          "command": "lz80n.check",
+          "when": "editorLangId == lz80n"
+        },
+        {
+          "command": "lz80n.showAsm",
+          "when": "editorLangId == lz80n"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "lz80n.run",
+        "key": "f5",
+        "when": "editorLangId == lz80n && !inDebugMode"
+      }
+    ],
+    "configuration": {
+      "title": "LZ80N",
+      "properties": {
+        "lz80n.compilerPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path of `lz80nc`. Empty: look for `compiler/target/release/lz80nc(.exe)` (then `debug`) in the workspace folders, then use `lz80nc` from `PATH`."
+        },
+        "lz80n.sjasmplusPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path of `sjasmplus`, passed as `--sjasmplus`. Empty: the compiler finds it itself (`tools/sjasmplus`, `SJASMPLUS` variable or `PATH`)."
+        },
+        "lz80n.compilerArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra compiler arguments for builds, e.g. `-O0` or `--bank-all`."
+        },
+        "lz80n.emulatorPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path of the emulator used by **Build and Run**, e.g. `C:\\\\CSpect\\\\CSpect.exe`."
+        },
+        "lz80n.emulatorArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-zxnext",
+            "-w3",
+            "${file}"
+          ],
+          "markdownDescription": "Emulator arguments. `${file}` is replaced by the full path of the `.nex` file (it is appended when missing). The emulator runs in its own folder."
+        },
+        "lz80n.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Compile the file (assembly only, into a temporary folder) whenever it is saved and show the errors in the **Problems** panel."
+        },
+        "lz80n.checkOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Also check a file when it is opened."
+        }
+      }
+    },
+    "problemMatchers": [
+      {
+        "name": "lz80nc",
+        "owner": "lz80n",
+        "fileLocation": [
+          "autoDetect",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": "^(.*\\.lz80n):(\\d+):(\\d+): (error|warning): (.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "lz80n",
+        "required": [],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "The .lz80n file to compile (default: the active file)."
+          },
+          "args": {
+            "type": "array",
+            "description": "Extra compiler arguments."
+          }
+        }
+      }
+    ]
+  }
+}

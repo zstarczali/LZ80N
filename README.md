@@ -7,7 +7,7 @@
 <p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
 
 <p align="center">
-  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 0.1.0" src="https://img.shields.io/badge/version-0.1.0-brightgreen"></a>
+  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.0.0" src="https://img.shields.io/badge/version-1.0.0-brightgreen"></a>
   <a href="https://github.com/zstarczali/LZ80N/actions/workflows/ci.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/zstarczali/LZ80N/ci.yml?label=build"></a>
   <a href="https://github.com/zstarczali/LZ80N/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/zstarczali/LZ80N?color=blue"></a>
 </p>
@@ -15,7 +15,7 @@
 <p align="center">
   <a href="compiler/"><img alt="compiler: Rust" src="https://img.shields.io/badge/compiler-Rust-b7410e?logo=rust&logoColor=white"></a>
   <a href="docs/manual-en.md#22-how-a-program-runs"><img alt="target: Z80N / ZX Spectrum Next" src="https://img.shields.io/badge/target-Z80N%20%2F%20ZX%20Spectrum%20Next-6f42c1"></a>
-  <a href="docs/spec-v0.md#toolchain"><img alt="output: .nex" src="https://img.shields.io/badge/output-.nex-6f42c1"></a>
+  <a href="docs/spec.md#toolchain"><img alt="output: .nex" src="https://img.shields.io/badge/output-.nex-6f42c1"></a>
   <a href="https://github.com/z00m128/sjasmplus"><img alt="assembler: SjASMPlus 1.24" src="https://img.shields.io/badge/assembler-SjASMPlus%201.24-555"></a>
 </p>
 
@@ -29,29 +29,31 @@
 <p align="center">
   <a href="docs/manual-en.md"><img alt="manual: English" src="https://img.shields.io/badge/manual-English-0a7bbb"></a>
   <a href="docs/manual-hu.md"><img alt="kézikönyv: Magyar" src="https://img.shields.io/badge/k%C3%A9zik%C3%B6nyv-Magyar-0a7bbb"></a>
-  <a href="docs/spec-v0.md"><img alt="spec: v0" src="https://img.shields.io/badge/spec-v0-0a7bbb"></a>
-  <a href="examples/"><img alt="examples: 16 programs" src="https://img.shields.io/badge/examples-16%20programs-2ea44f"></a>
+  <a href="docs/spec.md"><img alt="spec: 1.0" src="https://img.shields.io/badge/spec-1.0-0a7bbb"></a>
+  <a href="examples/"><img alt="examples: 17 programs" src="https://img.shields.io/badge/examples-17%20programs-2ea44f"></a>
   <a href="benchmarks/"><img alt="benchmark: LZ80N vs NextBASIC" src="https://img.shields.io/badge/benchmark-LZ80N%20vs%20NextBASIC-2ea44f"></a>
 </p>
 
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.
 
-Status: **v0, Phase 1 in progress** — a working command-line compiler for a
-first language subset (typed variables, expressions, `if/while/for`,
-functions, arrays, strings, `fixed` point numbers and math functions, structs, classes with methods, hardware sprites, Layer 2
-graphics, palettes, AY sound and music, zxnDMA, copper, raster interrupts, tilemap text,
-PNG assets, inline `asm`,
-`nextreg[]`, `memory[]`, `print`/`write`/`at`, keyboard and Kempston input), a peephole optimizer, and an execution test
-suite that runs the compiled `.nex` files in a built-in Z80N interpreter.
+Status: **1.0.0** — a complete command-line compiler: typed variables,
+multi-dimensional arrays with initialisers, strings, `fixed` point math,
+structs and classes, hardware sprites, Layer 2 graphics (lines, circles,
+ellipses, triangles, PNG pictures), palettes, AY sound and music, zxnDMA,
+copper and raster interrupts, tilemap text, inline `asm`, data and code
+banking for programs beyond the 31 KB program area, a peephole optimizer,
+and a test suite that runs the compiled `.nex` files in a built-in Z80N
+emulator. See the [changelog](CHANGELOG.md).
 
 ## Layout
 
 ```
 compiler/        Rust compiler (lz80nc): lexer → parser → AST → checks + Z80N codegen
-docs/spec-v0.md  what v0 implements and the decisions behind it
+docs/spec.md     what 1.0 implements and the decisions behind it
 examples/        sample .lz80n programs
 benchmarks/      the same tasks in LZ80N and NextBASIC
+editors/vscode   VS Code extension: highlighting, errors on save, build + run in CSpect
 tools/sjasmplus  SjASMPlus 1.24.0 (not in the repository, see below)
 ```
 
@@ -59,7 +61,9 @@ tools/sjasmplus  SjASMPlus 1.24.0 (not in the repository, see below)
 
 * [Programmer's manual (English)](docs/manual-en.md)
 * [Programozói kézikönyv (magyar)](docs/manual-hu.md)
-* [Specification of v0](docs/spec-v0.md)
+* [Specification](docs/spec.md)
+* [Changelog](CHANGELOG.md)
+* [VS Code extension](editors/vscode/README.md)
 
 ## Build and run
 
@@ -91,6 +95,7 @@ Examples:
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2 with transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `shooter.lz80n` | a little space shooter with sprites cut from a picture |
 | `strings.lz80n` | string values, `..`, `sub`/`find`/`upper`/`str`, user string functions, a ticker |
 | `sound.lz80n` | 3 × AY: background music (`play_loop`), `beep` piano, laser and noise effects |
 | `sprites.lz80n` | hardware sprites, PNG `asset` conversion, a class driving sprites |

@@ -9,8 +9,8 @@ on the Next or in an emulator. There is no interpreter, no virtual machine and
 no garbage collector: what you write becomes Z80N instructions.
 
 This manual describes the language and its libraries as implemented in
-version 0. A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
-The compact technical specification is [`spec-v0.md`](spec-v0.md).
+version 1.0.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
+The compact technical specification is [`spec.md`](spec.md).
 
 ---
 
@@ -73,6 +73,7 @@ lz80nc examples/hello.lz80n            # writes hello.asm and hello.nex
 lz80nc game.lz80n -o build/game.nex    # choose the output file
 lz80nc game.lz80n -S                   # stop after the assembly (.asm)
 lz80nc game.lz80n -O0                  # no peephole optimisation
+lz80nc game.lz80n --bank-all           # every function in its own code page (22.5)
 lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
 ```
 
@@ -1213,6 +1214,7 @@ $4000..$5AFF  ULA screen (unused, cleared)
 $6000..$69FF  tilemap (text layer)
 $6C00..$6FFF  text font
 $2000..$3FFF  MMU slot 1: far data / picture pages, mapped on access
+$4000..$5FFF  MMU slot 2: banked code pages (while a banked function runs)
 banks 8-10    Layer 2 buffer 1, banks 11-13: buffer 2 (set at startup)
 banks 14..    pictures and far arrays
 $8000..$FCFF  program code and data (checked at compile time)
@@ -1237,6 +1239,27 @@ built-in Z80N emulator (with clock cycle counting, raster timing, IM2
 interrupts, copper, DMA and AY registers) and checks the output, the screen
 and the hardware state.
 
+### 22.5 Code banking
+
+Programs can be larger than the 31 KB program area. When the resident part
+would not fit, the compiler moves functions into 8K **code pages**,
+automatically, largest first. Nothing changes in the source.
+
+* A banked function runs in MMU slot 2 (`$4000`–`$5FFF`, unused because
+  the ULA screen is off). A call goes through an 8-byte stub that maps the
+  function's page, calls it and maps the caller's page back, so banked
+  functions can call each other across pages, return values and use
+  everything else as usual. A call costs about 150 T-states extra.
+* Code pages come after the pictures and `far` arrays (from 16K bank 14
+  up). Interrupt handlers stay resident; functions they call may be banked
+  (the mapping is saved and restored).
+* What stays resident: the main program (top-level code), global
+  variables, strings and other data, the runtime. If those alone are too
+  large, the assembler reports it; move top-level code into functions and
+  big tables into `far` arrays (19.1).
+* `lz80nc --bank-all game.lz80n` puts every function into its own page, to
+  try banking with a small program.
+
 ---
 
 ## 23. Limitations and roadmap
@@ -1247,8 +1270,8 @@ Not supported yet:
 * `long` (32-bit), `fixed16` (16.16)
 * returning structs, constructors, inheritance, initialisers for arrays of structs
 * Layer 2 320 × 256 and 640 × 256 modes, second palettes
-* code larger than about 31 KB (code banking: planned next; large data
-  already fits in `far` arrays)
+* a main program (top-level code, globals and data) larger than about
+  31 KB; functions are banked automatically (22.5)
 * sample playback through the Next's DAC, PT3 music import
 
 Planned order: benchmarks against NextBASIC on real hardware →
@@ -1308,6 +1331,7 @@ register allocation.
 | `shapes.lz80n` | circles, ellipses, clipping, double buffering |
 | `images.lz80n` | PNG pictures on Layer 2, transparency |
 | `banks.lz80n` | `far` arrays: a 16 KB cave map in memory banks |
+| `shooter.lz80n` | a little space shooter: player cut from a picture, five kinds of 16x16 pixel-art enemies, stars, sound |
 | `sound.lz80n` | background music, `beep`, sound effects |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |

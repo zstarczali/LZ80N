@@ -1,6 +1,6 @@
 //! Startup code and runtime library (Z80N assembly, sjasmplus syntax).
 //!
-//! Memory layout v0:
+//! Memory layout:
 //!   $8000..$FCFF  code + data (banks 2/0 as mapped by the NEX loader)
 //!   $FDFD..$FDFF  `jp __isr` (IM2 target)
 //!   $FE00..$FF00  IM2 vector table (257 x $FD)
