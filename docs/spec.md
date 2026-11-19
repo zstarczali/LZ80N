@@ -154,6 +154,12 @@ asm ... end             -- raw Z80N assembly lines
   saves rt_codepage, maps NR $52, calls, restores (keeps A via rt_bret, HL;
   flags not kept). The ISR saves/restores rt_codepage and rt_bret.
   `--bank-all` (tests: compile_opts) = one function per page.
+* Large main programs: if the result is still above the limit, the whole
+  program is compiled again with outlining: every main-program statement
+  (innermost first) whose code is >= 48 est. bytes becomes a hidden chunk
+  `mp_N: ... ret` called from where it was, and is bankable like a
+  function. Statements with a `break` leaving them or with `asm` stay.
+  `--bank-all` outlines too.
 * Reserved names: keywords, type names, `self`, built-in functions, built-in
   constants, and the public names of the standard modules (always, even
   when the module is not used) plus the `snd_` prefix

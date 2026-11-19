@@ -143,18 +143,29 @@ pub struct Output {
 }
 
 pub fn compile(prog: &Program, opts: &Options) -> Result<Output, Vec<Diag>> {
-    let mut g = Gen::default();
-    g.run(prog, opts);
-    if g.errors.is_empty() {
+    let build = |outline: bool| -> Result<String, Vec<Diag>> {
+        let mut g = Gen { outline, ..Gen::default() };
+        g.run(prog, opts);
+        if !g.errors.is_empty() {
+            return Err(g.errors);
+        }
         g.expand_recursion();
-        Ok(Output { asm: g.finish_banked(opts) })
-    } else {
-        Err(g.errors)
+        Ok(g.finish_banked(opts))
+    };
+    let asm = build(opts.bank_all)?;
+    if opts.bank_all || resident_size(&asm) <= RESIDENT_LIMIT {
+        return Ok(Output { asm });
     }
+    // the main program itself is too large: move its big statements into
+    // hidden functions, which can then be banked like any other
+    Ok(Output { asm: build(true)? })
 }
 
 #[derive(Default)]
 struct Gen {
+    /// move big statements of the main program into hidden functions
+    outline: bool,
+    outlined: u32,
     /// note period table needed
     uses_notes: bool,
     /// length-prefixed string literals: text -> label
@@ -1623,7 +1634,41 @@ impl Gen {
         Ok(())
     }
 
+    /// Does a statement leave itself other than by finishing (a `break` of
+    /// an outer loop) or contain inline assembly? Then it stays in place.
+    fn pinned(s: &Stmt, in_loop: bool) -> bool {
+        let all = |b: &[Stmt], l: bool| b.iter().any(|x| Self::pinned(x, l));
+        match &s.kind {
+            StmtKind::Break => !in_loop,
+            StmtKind::Asm(_) => true,
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => all(body, true),
+            StmtKind::If { arms, otherwise } => {
+                arms.iter().any(|(_, b)| all(b, in_loop)) || otherwise.as_ref().is_some_and(|b| all(b, in_loop))
+            }
+            _ => false,
+        }
+    }
+
     fn stmt(&mut self, s: &Stmt) -> R<()> {
+        if !self.outline || self.cur_fn != "main" || Self::pinned(s, false) {
+            return self.stmt_inner(s);
+        }
+        let start = self.code.len();
+        let r = self.stmt_inner(s);
+        let text = self.code.split_off(start);
+        if r.is_err() || asm_size(&text) < OUTLINE_MIN {
+            self.code.push_str(&text);
+            return r;
+        }
+        self.outlined += 1;
+        let key = format!("main part {}", self.outlined);
+        let label = format!("mp_{}", self.outlined);
+        self.e(&format!("call {label}"));
+        self.fn_chunks.push((key, label.clone(), format!("\n; {label}: part of the main program\n{label}:\n{text}    ret\n")));
+        Ok(())
+    }
+
+    fn stmt_inner(&mut self, s: &Stmt) -> R<()> {
         self.str_tmp = 0;
         match &s.kind {
             StmtKind::VarDecl { ty, name, array, init, is_const } => {
@@ -5022,6 +5067,8 @@ impl Gen {
 /// Code banking: the resident area ends at $FD00 (32000 bytes from $8000);
 /// sizes are estimates, so leave a margin. A code page holds 8192 bytes.
 const RESIDENT_LIMIT: usize = 30500;
+/// smallest statement of the main program worth moving out (when needed)
+const OUTLINE_MIN: usize = 48;
 const PAGE_CAP: usize = 7800;
 const STUB_SIZE: usize = 8;
 
