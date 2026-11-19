@@ -1,0 +1,254 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "LZ80N",
+  "scopeName": "source.lz80n",
+  "fileTypes": ["lz80n"],
+  "patterns": [
+    { "include": "#asm-block" },
+    { "include": "#comments" },
+    { "include": "#declarations" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#self" },
+    { "include": "#builtins" },
+    { "include": "#constants" },
+    { "include": "#calls" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.lz80n",
+          "begin": "--\\[\\[",
+          "end": "\\]\\]",
+          "captures": { "0": { "name": "punctuation.definition.comment.lz80n" } }
+        },
+        {
+          "name": "comment.line.double-dash.lz80n",
+          "begin": "--",
+          "end": "$",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.lz80n" } }
+        }
+      ]
+    },
+
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "function name(params) -> type   /  method inside a class",
+          "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.lz80n" },
+            "2": { "name": "entity.name.function.lz80n" }
+          }
+        },
+        {
+          "match": "\\b(class|struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.$1.lz80n" },
+            "2": { "name": "entity.name.type.$1.lz80n" }
+          }
+        },
+        {
+          "match": "\\b(interrupt)\\s+(raster|frame)\\b",
+          "captures": {
+            "1": { "name": "storage.type.interrupt.lz80n" },
+            "2": { "name": "entity.name.function.interrupt.lz80n" }
+          }
+        },
+        {
+          "match": "\\b(asset)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.asset.lz80n" },
+            "2": { "name": "variable.other.asset.lz80n" }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.modifier.const.lz80n" },
+            "2": { "name": "variable.other.constant.lz80n" }
+          }
+        },
+        {
+          "match": "(->)\\s*(bool|byte|sbyte|word|sword|fixed|string|[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.operator.arrow.lz80n" },
+            "2": { "name": "storage.type.return.lz80n" }
+          }
+        },
+        {
+          "comment": "user type in a declaration: `Ball balls[N]`, `Vec2 vel`, `Ball b` as parameter",
+          "match": "\\b([A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*|[A-Z][a-z0-9_]*)\\s+(?!(and|or|not|then|do|end|else|elseif)\\b)(?=[A-Za-z_])",
+          "captures": { "1": { "name": "entity.name.type.lz80n" } }
+        }
+      ]
+    },
+
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.lz80n",
+          "begin": "\"",
+          "end": "\"|$",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.lz80n" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.lz80n" } },
+          "patterns": [
+            { "name": "constant.character.escape.lz80n", "match": "\\\\[nt\\\\\"0]" },
+            { "name": "invalid.illegal.escape.lz80n", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.single.char.lz80n",
+          "match": "'(\\\\[nt0\\\\']|[^\\\\'])'",
+          "captures": { "1": { "patterns": [{ "name": "constant.character.escape.lz80n", "match": "\\\\." }] } }
+        }
+      ]
+    },
+
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.lz80n", "match": "\\$[0-9A-Fa-f][0-9A-Fa-f_]*\\b" },
+        { "name": "constant.numeric.hex.lz80n", "match": "\\b0[xX][0-9A-Fa-f_]+\\b" },
+        { "name": "constant.numeric.binary.lz80n", "match": "\\b0[bB][01_]+\\b" },
+        { "name": "constant.numeric.fixed.lz80n", "match": "\\b\\d[\\d_]*\\.\\d+\\b" },
+        { "name": "constant.numeric.decimal.lz80n", "match": "\\b\\d[\\d_]*\\b" }
+      ]
+    },
+
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.lz80n", "match": "\\b(if|then|elseif|else|end|while|do|for|return|break)\\b" },
+        { "name": "keyword.operator.logical.lz80n", "match": "\\b(and|or|not)\\b" },
+        { "name": "constant.language.boolean.lz80n", "match": "\\b(true|false)\\b" },
+        { "name": "storage.modifier.lz80n", "match": "\\b(const|var|far)\\b" },
+        { "name": "storage.type.lz80n", "match": "\\b(function|class|struct|asset|interrupt|asm)\\b" }
+      ]
+    },
+
+    "types": {
+      "name": "storage.type.primitive.lz80n",
+      "match": "\\b(bool|byte|sbyte|word|sword|fixed|string)\\b"
+    },
+
+    "self": {
+      "name": "variable.language.self.lz80n",
+      "match": "\\bself\\b"
+    },
+
+    "builtins": {
+      "patterns": [
+        {
+          "comment": "built-in functions (compiler intrinsics)",
+          "name": "support.function.builtin.lz80n",
+          "match": "\\b(print|write|at|ink|cls|border|vsync|pause|frames|key|kempston|any_key|wait_key|cpu_speed|random|seed|addr|dma_copy|dma_fill|plot|point|hline|layer2_clear|layer2_flip|sprite_load|ay_write|note_period|abs|min|max|clamp|sqrt|sin|cos|atan2|round|len|sub|find|val|asc|chr|str|upper|lower|draw_image|image_width|image_height|image)\\b(?=\\s*\\()"
+        },
+        {
+          "comment": "hardware access arrays",
+          "name": "support.variable.hardware.lz80n",
+          "match": "\\b(memory|nextreg|port|sprite)\\b(?=\\s*\\[)"
+        },
+        {
+          "comment": "standard library (written in LZ80N, always reserved)",
+          "name": "support.function.library.lz80n",
+          "match": "\\b(sprites_visible|layer2_visible|rgb|vline|line|rect|fill_rect|circle|fill_circle|ellipse|fill_ellipse|triangle|fill_triangle|palette|palette9|rgb9|copper_begin|copper_wait|copper_move|copper_start|copper_stop|sound_reset|sound_mix|tone|noise|volume|sound_off|beep|play|play_loop|playing|sound_tick)\\b(?=\\s*\\()"
+        },
+        { "name": "support.class.library.lz80n", "match": "\\bSprite\\b" }
+      ]
+    },
+
+    "constants": {
+      "patterns": [
+        {
+          "name": "support.constant.builtin.lz80n",
+          "match": "\\b(BLACK|BLUE|RED|MAGENTA|GREEN|CYAN|YELLOW|WHITE|BRIGHT_(BLACK|BLUE|RED|MAGENTA|GREEN|CYAN|YELLOW|WHITE)|KEY_[A-Z0-9]+|JOY_(RIGHT|LEFT|DOWN|UP|FIRE)|MHZ_(3|7|14|28)|NOT_FOUND|TRANSPARENT|PAL_(ULA|LAYER2|SPRITES|TEXT))\\b"
+        },
+        { "name": "variable.other.constant.lz80n", "match": "\\b[A-Z][A-Z0-9_]*\\b" }
+      ]
+    },
+
+    "calls": {
+      "patterns": [
+        {
+          "match": "(?<=\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": { "1": { "name": "entity.name.function.method.lz80n" } }
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": { "1": { "name": "entity.name.function.call.lz80n" } }
+        },
+        {
+          "match": "(?<=\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "variable.other.property.lz80n" } }
+        }
+      ]
+    },
+
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.lz80n", "match": "->" },
+        { "name": "keyword.operator.concat.lz80n", "match": "\\.\\." },
+        { "name": "keyword.operator.assignment.compound.lz80n", "match": "(\\+|-|\\*|/|%|&|\\||<<|>>)=" },
+        { "name": "keyword.operator.comparison.lz80n", "match": "==|~=|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.assignment.lz80n", "match": "=" },
+        { "name": "keyword.operator.bitwise.lz80n", "match": "<<|>>|&|\\||~" },
+        { "name": "keyword.operator.arithmetic.lz80n", "match": "\\+|-|\\*|/|%" }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.comma.lz80n", "match": "," },
+        { "name": "punctuation.accessor.lz80n", "match": "\\." }
+      ]
+    },
+
+    "asm-block": {
+      "comment": "asm ... end: the body is Z80N assembly (SjASMPlus syntax), ended by a line holding only `end`",
+      "begin": "\\b(asm)\\s*$",
+      "end": "^\\s*(end)\\b",
+      "beginCaptures": { "1": { "name": "storage.type.asm.lz80n" } },
+      "endCaptures": { "1": { "name": "keyword.control.lz80n" } },
+      "contentName": "meta.embedded.block.z80n",
+      "patterns": [
+        { "include": "#z80" }
+      ]
+    },
+
+    "z80": {
+      "patterns": [
+        { "name": "comment.line.semicolon.z80n", "match": ";.*$" },
+        {
+          "match": "^\\s*([A-Za-z_.@][A-Za-z0-9_.@]*:)",
+          "captures": { "1": { "name": "entity.name.label.z80n" } }
+        },
+        { "include": "#z80-mnemonic" },
+        { "include": "#z80-directive" },
+        {
+          "name": "variable.language.register.z80n",
+          "match": "(?i)\\b(af'|af|bc|de|hl|ix|iy|ixh|ixl|iyh|iyl|sp|pc|a|b|c|d|e|h|l|i|r|nz|nc|z|po|pe|p|m)\\b"
+        },
+        { "name": "constant.numeric.hex.z80n", "match": "(\\$|#)[0-9A-Fa-f]+\\b|\\b0[xX][0-9A-Fa-f]+\\b|\\b[0-9][0-9A-Fa-f]*[hH]\\b" },
+        { "name": "constant.numeric.binary.z80n", "match": "%[01]+\\b|\\b0[bB][01]+\\b|\\b[01]+[bB]\\b" },
+        { "name": "constant.numeric.decimal.z80n", "match": "\\b\\d+\\b" },
+        { "name": "string.quoted.double.z80n", "match": "\"[^\"]*\"" },
+        { "name": "string.quoted.single.z80n", "match": "'[^']*'" },
+        { "name": "keyword.operator.z80n", "match": "[-+*/&|^~<>=!]" }
+      ]
+    },
+
+    "z80-mnemonic": {
+      "name": "keyword.mnemonic.z80n",
+      "match": "(?i)\\b(ld|ldi|ldir|ldd|lddr|cpi|cpir|cpd|cpdr|push|pop|ex|exx|add|adc|sub|sbc|and|or|xor|cp|inc|dec|daa|cpl|neg|ccf|scf|nop|halt|di|ei|im|rlca|rla|rrca|rra|rlc|rl|rrc|rr|sla|sra|srl|sll|sli|rld|rrd|bit|set|res|jp|jr|djnz|call|ret|reti|retn|rst|in|ini|inir|ind|indr|out|outi|otir|outd|otdr|ldix|ldws|ldirx|lddx|lddrx|ldpirx|outinb|mul|swapnib|mirror|nextreg|pixeldn|pixelad|setae|test|bsla|bsra|bsrl|bsrf|brlc)\\b"
+    },
+
+    "z80-directive": {
+      "name": "keyword.directive.z80n",
+      "match": "(?i)(?<![A-Za-z0-9_])\\.?\\b(db|dw|dd|ds|defb|defw|defd|defs|defm|byte|word|block|equ|org|align|include|incbin|macro|endm|if|else|endif|module|endmodule|struct|ends|savenex|device|opt|display|assert|dup|edup|rept|endr|page|mmu|slot)\\b"
+    }
+  }
+}
