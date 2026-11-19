@@ -5,6 +5,10 @@
 --  * far byte roof[720], floor[720]: the cave's outline per column
 --  * the map is generated once, then a 32-column window is shown as 8x8 tiles
 --  * O / P scroll the window (hold SPACE for fast scrolling)
+--  * code banking: `lz80nc --bank-all banks.lz80n` puts the functions and
+--    the big statements of the main program into 8K code pages; the
+--    program runs the same (a program larger than 31 KB gets this
+--    automatically)
 
 const W = 720
 const H = 22

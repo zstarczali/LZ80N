@@ -68,10 +68,15 @@ function sprites_visible(bool on, bool over_border)
 end
 "#;
 
-/// Layer 2 drawing (256x192, colours are RRRGGGBB; $E3 = transparent).
-/// `plot`, `point`, `hline` and `layer2_clear` are built in (assembly).
+/// Layer 2 drawing (256x192, 320x256 or 640x256; colours are RRRGGGBB,
+/// $E3 = transparent; 640x256: palette indices 0..15). `plot`, `point`,
+/// `hline`, `layer2_clear`, `layer2_mode`, `layer2_width` and
+/// `layer2_height` are built in (assembly).
 pub const LAYER2: &str = r#"
 const TRANSPARENT = 0xE3
+const L2_256 = 0
+const L2_320 = 1
+const L2_640 = 2
 
 function layer2_visible(bool on)
     if on then port[0x123B] = 2 else port[0x123B] = 0 end
@@ -81,32 +86,34 @@ function rgb(byte r, byte g, byte b) -> byte
     return (r & 7) << 5 | (g & 7) << 2 | b & 3
 end
 
-function vline(byte x, byte y, byte len, byte c)
+function vline(word x, byte y, word len, byte c)
     while len > 0 do
         plot(x, y, c)
+        if y == 255 then return end
         y += 1
         len -= 1
     end
 end
 
-function fill_rect(byte x, byte y, word w, byte h, byte c)
+function fill_rect(word x, byte y, word w, word h, byte c)
     while h > 0 do
         hline(x, y, w, c)
+        if y == 255 then return end
         y += 1
         h -= 1
     end
 end
 
-function rect(byte x, byte y, word w, byte h, byte c)
+function rect(word x, byte y, word w, word h, byte c)
     if w == 0 or h == 0 then return end
     hline(x, y, w, c)
-    hline(x, y + h - 1, w, c)
+    hline(x, byte(y + h - 1), w, c)
     vline(x, y, h, c)
-    vline(byte(x + w - 1), y, h, c)
+    vline(x + w - 1, y, h, c)
 end
 
 -- Bresenham line
-function line(byte x0, byte y0, byte x1, byte y1, byte c)
+function line(word x0, byte y0, word x1, byte y1, byte c)
     sword dx = x1 - x0
     sword dy = y1 - y0
     sbyte sx = 1
@@ -138,18 +145,19 @@ end
 -- ---- circles and ellipses (clipped; the centre may be off screen) ----
 
 function l2_plot(sword x, sword y, byte c)
-    if x >= 0 and x <= 255 and y >= 0 and y <= 191 then
-        plot(byte(x), byte(y), c)
+    if x >= 0 and y >= 0 and x < sword(layer2_width()) and y < sword(layer2_height()) then
+        plot(word(x), byte(y), c)
     end
 end
 
 -- horizontal span x0..x1 on row y, clipped to the screen
 function l2_span(sword x0, sword x1, sword y, byte c)
-    if y < 0 or y > 191 then return end
+    if y < 0 or y >= sword(layer2_height()) then return end
     if x0 < 0 then x0 = 0 end
-    if x1 > 255 then x1 = 255 end
+    sword right = sword(layer2_width()) - 1
+    if x1 > right then x1 = right end
     if x0 > x1 then return end
-    hline(byte(x0), byte(y), word(x1 - x0 + 1), c)
+    hline(word(x0), byte(y), word(x1 - x0 + 1), c)
 end
 
 -- half width of an ellipse dy rows from its centre
@@ -200,7 +208,7 @@ end
 
 -- ---- triangles ----
 
-function triangle(byte x0, byte y0, byte x1, byte y1, byte x2, byte y2, byte c)
+function triangle(word x0, byte y0, word x1, byte y1, word x2, byte y2, byte c)
     line(x0, y0, x1, y1, c)
     line(x1, y1, x2, y2, c)
     line(x2, y2, x0, y0, c)
@@ -231,7 +239,7 @@ function fill_triangle(sword x0, sword y0, sword x1, sword y1, sword x2, sword y
         t = y1  y1 = y2  y2 = t
     end
     sword ya = max(y0, 0)
-    sword yb = min(y2, 191)
+    sword yb = min(y2, sword(layer2_height()) - 1)
     sword y = ya
     while y <= yb do
         sword xa = l2_lerp(x0, x2, y - y0, y2 - y0)
@@ -249,24 +257,50 @@ end
 
 /// Palettes. `palette(layer, index, colour)` with an 8-bit RRRGGGBB colour,
 /// `palette9(layer, index, colour)` with a 9-bit RRRGGGBBB colour.
-/// Layers: PAL_ULA, PAL_LAYER2, PAL_SPRITES, PAL_TEXT (first palettes).
+/// Layers: PAL_ULA, PAL_LAYER2, PAL_SPRITES, PAL_TEXT (first palettes) and
+/// PAL_ULA_2 .. PAL_TEXT_2 (second palettes). `palette_select(layer, second)`
+/// chooses which of the two a layer shows.
 pub const PALETTE: &str = r#"
 const PAL_ULA = 0
 const PAL_LAYER2 = 1
 const PAL_SPRITES = 2
 const PAL_TEXT = 3
+const PAL_ULA_2 = 4
+const PAL_LAYER2_2 = 5
+const PAL_SPRITES_2 = 6
+const PAL_TEXT_2 = 7
 
+-- NextReg $43 bits 6-4 select the palette written; bits 3-1 (which
+-- palette sprites / Layer 2 / ULA show) are kept
 function palette(byte layer, byte index, byte colour)
-    nextreg[0x43] = (layer & 3) << 4
+    nextreg[0x43] = nextreg[0x43] & 0x0F | (layer & 7) << 4
     nextreg[0x40] = index
     nextreg[0x41] = colour
 end
 
 function palette9(byte layer, byte index, word colour)
-    nextreg[0x43] = (layer & 3) << 4
+    nextreg[0x43] = nextreg[0x43] & 0x0F | (layer & 7) << 4
     nextreg[0x40] = index
     nextreg[0x44] = byte(colour >> 1)
     nextreg[0x44] = byte(colour) & 1
+end
+
+-- show the first (false) or the second (true) palette of a layer
+function palette_select(byte layer, bool second)
+    byte which = layer & 3
+    if which == PAL_TEXT then
+        -- tilemap (text): NextReg $6B bit 4
+        byte t = nextreg[0x6B] & 0xEF
+        if second then t |= 0x10 end
+        nextreg[0x6B] = t
+        return
+    end
+    byte bit = 2                                   -- ULA: bit 1
+    if which == PAL_LAYER2 then bit = 4 end        -- Layer 2: bit 2
+    if which == PAL_SPRITES then bit = 8 end       -- sprites: bit 3
+    byte r = nextreg[0x43] & 0x7F
+    if second then r |= bit else r &= 0xFF - bit end
+    nextreg[0x43] = r
 end
 
 -- r, g, b 0..7 -> 9-bit RRRGGGBBB
@@ -547,10 +581,17 @@ pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
         "Layer 2",
         &[
             "layer2_visible", "rgb", "vline", "line", "rect", "fill_rect", "TRANSPARENT", "circle",
+            "L2_256", "L2_320", "L2_640",
             "fill_circle", "ellipse", "fill_ellipse", "triangle", "fill_triangle",
         ],
     ),
-    ("palette", &["palette", "palette9", "rgb9", "PAL_ULA", "PAL_LAYER2", "PAL_SPRITES", "PAL_TEXT"]),
+    (
+        "palette",
+        &[
+            "palette", "palette9", "palette_select", "rgb9", "PAL_ULA", "PAL_LAYER2", "PAL_SPRITES", "PAL_TEXT",
+            "PAL_ULA_2", "PAL_LAYER2_2", "PAL_SPRITES_2", "PAL_TEXT_2",
+        ],
+    ),
     ("copper", &["copper_begin", "copper_wait", "copper_move", "copper_start", "copper_stop"]),
     (
         "sound",

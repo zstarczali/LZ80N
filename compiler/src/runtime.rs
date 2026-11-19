@@ -1119,8 +1119,22 @@ rt_l2_flip:
     ld (rt_l2page),a
     ret
 
+; ---- Layer 2 modes ----
+; rt_plot, rt_point and rt_hline jump to the routines of the current mode
+; (rt_l2_setmode patches them): D = y, HL = x (0..width-1), A = colour.
+; Pixels outside the screen are ignored.
+rt_plot:    jp rt_plot256
+rt_point:   jp rt_point256
+rt_hline:   jp rt_hline256
+
+; D = y, HL = x, A = colour (256x192)
+rt_plot256:
+    inc h
+    dec h
+    ret nz
+    ld e,l
 ; D = y, E = x, A = colour. Rows >= 192 are ignored. Leaves HL = address.
-rt_plot:
+rt_plot_de:
     ld c,a
     ld a,d
     cp 192
@@ -1129,8 +1143,13 @@ rt_plot:
     ld (hl),c
     ret
 
-; D = y, E = x -> A = colour (0 outside the screen)
-rt_point:
+; D = y, HL = x -> A = colour (0 outside the screen)
+rt_point256:
+    xor a
+    or h
+    ld a,0
+    ret nz
+    ld e,l
     ld a,d
     cp 192
     ld a,0
@@ -1138,6 +1157,279 @@ rt_point:
     call rt_l2_map
     ld a,(hl)
     ret
+
+; 320x256 and 640x256 are stored by columns: 8K page = base + column / 32,
+; offset = (column & 31) * 256 + y. D = y, HL = byte column (< 320) ->
+; page mapped into slot 0, HL = address. Clobbers A, E.
+rt_l2_maphi:
+    ld a,l
+    and 31
+    ld e,a
+    ld a,l
+    rlca
+    rlca
+    rlca
+    and 7
+    bit 0,h
+    jr z,.lo
+    or 8
+.lo:
+    ld hl,rt_l2base
+    add a,(hl)
+    inc hl                  ; rt_l2page
+    cp (hl)
+    jr z,.same
+    ld (hl),a
+    nextreg $50,a
+.same:
+    ld h,e
+    ld l,d
+    ret
+
+; HL < 320? (NC = outside)
+rt_l2_x320:
+    ld a,h
+    or a
+    jr z,.in
+    dec a
+    jr z,.hi
+    or a                    ; >= 512: NC
+    ret
+.hi:
+    ld a,l
+    cp 64
+    ret
+.in:
+    scf
+    ret
+
+; D = y, HL = x, A = colour (320x256)
+rt_plot320:
+    ld c,a
+    call rt_l2_x320
+    ret nc
+    call rt_l2_maphi
+    ld (hl),c
+    ret
+
+rt_point320:
+    call rt_l2_x320
+    ld a,0
+    ret nc
+    call rt_l2_maphi
+    ld a,(hl)
+    ret
+
+; HL < 640? (NC = outside); B = 0 for the left (high) nibble, 1 for the
+; right one; HL = byte column
+rt_l2_x640:
+    ld a,h
+    cp 2
+    jr c,.in
+    ret nz
+    ld a,l
+    cp 128
+    ret nc
+.in:
+    ld a,l
+    and 1
+    ld b,a
+    srl h
+    rr l
+    scf
+    ret
+
+; D = y, HL = x, A = colour 0..15 (640x256, 4 bits per pixel)
+rt_plot640:
+    and 15
+    ld c,a
+    call rt_l2_x640
+    ret nc
+    call rt_l2_maphi
+    bit 0,b
+    jr nz,.right
+    ld a,c
+    add a,a
+    add a,a
+    add a,a
+    add a,a
+    ld c,a
+    ld a,(hl)
+    and $0F
+    or c
+    ld (hl),a
+    ret
+.right:
+    ld a,(hl)
+    and $F0
+    or c
+    ld (hl),a
+    ret
+
+rt_point640:
+    call rt_l2_x640
+    ld a,0
+    ret nc
+    call rt_l2_maphi
+    ld a,(hl)
+    bit 0,b
+    jr nz,.right
+    rrca
+    rrca
+    rrca
+    rrca
+.right:
+    and 15
+    ret
+
+; D = y, HL = x, BC = length, A = colour (320x256): along the columns,
+; one page per 32 pixels
+rt_hline320:
+    ld (rt_l2colour),a
+    ld a,b
+    or c
+    ret z
+    call rt_l2_x320
+    ret nc
+    push hl
+    push de
+    ex de,hl
+    ld hl,320
+    or a
+    sbc hl,de               ; pixels left on the row
+    or a
+    sbc hl,bc
+    jr nc,.fits
+    add hl,bc
+    ld b,h
+    ld c,l
+.fits:
+    pop de
+    pop hl
+.page:
+    push hl
+    call rt_l2_maphi        ; H = column & 31, L = y
+    ld a,(rt_l2colour)
+    ld e,a
+.px:
+    ld (hl),e
+    dec bc
+    ld a,b
+    or c
+    jr z,.done
+    inc h
+    ld a,h
+    cp 32
+    jr nz,.px
+    pop hl                  ; next page: x = (x | 31) + 1
+    ld a,l
+    or 31
+    ld l,a
+    inc hl
+    jr .page
+.done:
+    pop hl
+    ret
+
+; D = y, HL = x, BC = length, A = colour: pixel by pixel (640x256)
+rt_hline_hi:
+    ld (rt_l2colour),a
+.l:
+    ld a,b
+    or c
+    ret z
+    push hl
+    push de
+    ld de,(rt_l2wid)
+    or a
+    sbc hl,de
+    pop de
+    pop hl
+    ret nc                  ; past the right edge
+    push bc
+    push hl
+    push de
+    ld a,(rt_l2colour)
+    call rt_plot
+    pop de
+    pop hl
+    pop bc
+    inc hl
+    dec bc
+    jr .l
+
+; A = mode: 0 = 256x192 (6 pages per buffer), 1 = 320x256, 2 = 640x256
+; (10 pages each). Buffers: bank 8 (shown and drawn into until the first
+; flip) and bank 11 or 13.
+rt_l2_setmode:
+    cp 3
+    ret nc
+    ld (rt_l2mode),a
+    ld e,a
+    ld d,14                 ; bytes per table row
+    mul d,e
+    ld hl,rt_l2_modes
+    add hl,de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld (rt_plot+1),de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld (rt_point+1),de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld (rt_hline+1),de
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld (rt_l2wid),de
+    ld a,(hl)
+    inc hl
+    ld (rt_l2hmax),a
+    ld a,(hl)               ; 8K pages per buffer
+    inc hl
+    ld (rt_l2np),a
+    ld a,(hl)
+    inc hl
+    nextreg $70,a           ; resolution
+    ld a,(hl)               ; second buffer (16K bank)
+    inc hl
+    ld (rt_l2alt),a
+    nextreg $13,a
+    ld c,(hl)               ; clip window: right edge (in 2/4 pixel steps)
+    inc hl
+    ld b,(hl)               ; bottom edge
+    nextreg $1C,1           ; reset the Layer 2 clip index
+    nextreg $18,0
+    ld a,c
+    nextreg $18,a
+    nextreg $18,0
+    ld a,b
+    nextreg $18,a
+    ld a,8
+    ld (rt_l2bank),a
+    nextreg $12,a
+    ld a,16
+    ld (rt_l2base),a
+    ld a,$FF
+    ld (rt_l2page),a
+    ret
+
+; plot, point, hline, width, max y, pages, NR $70, second bank, clip x2, clip y2
+rt_l2_modes:
+    dw rt_plot256, rt_point256, rt_hline256, 256
+    db 191, 6, $00, 11, 255, 191
+    dw rt_plot320, rt_point320, rt_hline320, 320
+    db 255, 10, $10, 13, 159, 255
+    dw rt_plot640, rt_point640, rt_hline_hi, 640
+    db 255, 10, $20, 13, 159, 255
 
 ; D = y (< 192), E = x -> page mapped into slot 0, HL = address
 rt_l2_map:
@@ -1160,8 +1452,12 @@ rt_l2_map:
     ld l,e
     ret
 
-; D = y, E = x, BC = length, A = colour; clipped at the right edge
-rt_hline:
+; D = y, HL = x, BC = length, A = colour; clipped at the right edge
+rt_hline256:
+    inc h
+    dec h
+    ret nz
+    ld e,l
     push af
     ld a,b
     or c
@@ -1182,7 +1478,7 @@ rt_hline:
 .fits:
     pop af
     push bc
-    call rt_plot
+    call rt_plot_de
     pop bc
     ld a,d
     cp 192
@@ -1202,9 +1498,23 @@ rt_hline:
 
 ; A = colour: fill the whole Layer 2 screen (6 pages, DMA)
 rt_l2_clear:
+    ld c,a
+    ld a,(rt_l2mode)
+    cp 2
+    ld a,c
+    jr nz,.full
+    and 15                  ; 640x256: the colour in both nibbles
+    ld c,a
+    add a,a
+    add a,a
+    add a,a
+    add a,a
+    or c
+.full:
     ld (rt_dma_value),a
+    ld a,(rt_l2np)
+    ld b,a
     ld a,(rt_l2base)
-    ld b,6
 .p:
     nextreg $50,a
     ld (rt_l2page),a
@@ -1243,10 +1553,35 @@ rt_dma_go:
     ld (rt_dma_wr1),a
     ld (rt_dma_len),bc
     ld (rt_dma_dst),de
+    ld a,(rt_smp_on)
+    or a
+    jr nz,.cpu
     ld hl,rt_dma_prog
     ld bc,(rt_dma_prog_len << 8) | $6B
     otir
     ret
+
+; the DMA is playing a sample: copy / fill with the CPU instead
+.cpu:
+    ld hl,(rt_dma_src)
+    ld a,(rt_dma_wr1)
+    cp %01010100            ; incrementing source: a copy
+    jr z,.copy
+    ld a,(hl)               ; fill: the value
+    ex de,hl
+    ld (hl),a
+    dec bc
+    ld a,b
+    or c
+    ret z
+    ld d,h
+    ld e,l
+    inc de
+.copy:
+    ldir
+    ret
+
+rt_smp_on:  db 0            ; a sample is playing (the DMA is busy)
 
 rt_dma_prog:
     db %10000011            ; WR6: disable DMA
@@ -1375,6 +1710,11 @@ rt_l2bank:  db 8           ; 16K bank drawn into
 rt_l2alt:   db 11          ; the other buffer
 rt_l2base:  db 16
 rt_l2page:  db $FF          ; must follow rt_l2base
+rt_l2mode:  db 0            ; 0 = 256x192, 1 = 320x256, 2 = 640x256
+rt_l2wid:   dw 256
+rt_l2hmax:  db 191
+rt_l2np:    db 6            ; 8K pages per buffer
+rt_l2colour: db 0
 "#;
 
 /// atan2 (emitted together with the sin/atan tables when used).
@@ -1490,6 +1830,9 @@ rt_draw_image:
     inc hl
     ld a,(hl)
     ld (rt_img_mask),a
+    ld a,(rt_l2mode)
+    or a
+    jp nz,rt_img_hi
     ; horizontal: BC = source columns skipped, HL = screen x
     ld hl,(rt_img_x)
     ld bc,0
@@ -1576,7 +1919,7 @@ rt_draw_image:
     jr z,.row
 .skip:
     push bc
-    call .adv
+    call rt_img_adv
     pop bc
     djnz .skip
 .row:
@@ -1598,7 +1941,7 @@ rt_draw_image:
 .next:
     ld hl,rt_img_dy
     inc (hl)
-    call .adv
+    call rt_img_adv
     ld hl,rt_img_ch
     dec (hl)
     jr nz,.row
@@ -1621,7 +1964,7 @@ rt_draw_image:
     jr nz,.masked
     jr .next
 ; next source row
-.adv:
+rt_img_adv:
     ld hl,(rt_img_ptr)
     ld de,(rt_img_w)
     add hl,de
@@ -1640,6 +1983,78 @@ rt_draw_image:
     ld (rt_img_ptr),hl
     ret
 
+; 320x256 / 640x256: every pixel through rt_plot (which clips)
+rt_img_hi:
+    ld hl,0
+    ld (rt_img_sx),hl
+    xor a
+    ld (rt_img_rip),a
+    ld hl,$2000
+    ld (rt_img_ptr),hl
+    ld hl,(rt_img_y)
+    ld (rt_img_cy),hl
+    ld a,(rt_img_h)
+    or a
+    ret z
+    ld (rt_img_ch),a
+.row:
+    ld hl,(rt_img_cy)
+    ld a,h
+    or a
+    jr nz,.next             ; above or below the screen
+    ld a,(rt_l2hmax)
+    cp l
+    jr c,.next
+    ld a,(rt_img_page)
+    ld (rt_farpage),a
+    nextreg $51,a
+    ld hl,(rt_img_x)
+    ld (rt_img_cx),hl
+    ld hl,(rt_img_ptr)
+    ld bc,(rt_img_w)
+.col:
+    ld a,(hl)
+    inc hl
+    push hl
+    push bc
+    ld c,a
+    ld a,(rt_img_mask)
+    or a
+    jr z,.draw
+    ld a,c
+    cp $E3
+    jr z,.skip
+.draw:
+    ld a,(rt_img_cy)
+    ld d,a
+    ld hl,(rt_img_cx)
+    ld a,c
+    call rt_plot
+.skip:
+    ld hl,(rt_img_cx)
+    inc hl
+    ld (rt_img_cx),hl
+    pop bc
+    pop hl
+    dec bc
+    ld a,b
+    or c
+    jr nz,.col
+.next:
+    ld hl,(rt_img_cy)
+    inc hl
+    ld (rt_img_cy),hl
+    call rt_img_adv
+    ld hl,rt_img_ch
+    dec (hl)
+    jr nz,.row
+    ld a,$FF
+    ld (rt_farpage),a
+    nextreg $51,a
+    ret
+
+rt_img_cx:   dw 0
+rt_img_cy:   dw 0
 rt_img_x:    dw 0
 rt_img_y:    dw 0
 rt_img_w:    dw 0
@@ -2143,4 +2558,245 @@ rt_print_fixed16:
     dec c
     jr nz,.d2
     ret
+"#;
+
+/// Sample playback: the zxnDMA plays a 4K ring buffer at $7000 (two 2K
+/// halves, bank 5) to the Specdrum DAC (port $DF) at 875 kHz / prescaler,
+/// restarting at its end; the frame interrupt refills the half that has
+/// just been played from the sample's 8K pages.
+pub const SAMPLES: &str = r#"
+; ---- samples ----
+SMP_BUF equ $7000
+
+; HL = descriptor (db first page, prescaler; dw length bits 0-15;
+; db length bits 16-23), A = 1: loop
+rt_smp_play:
+    push af
+    push hl
+    call rt_smp_stop
+    pop hl
+    pop af
+    ld (rt_smp_loop),a
+    ld (rt_smp_desc),hl
+    inc hl
+    ld a,(hl)
+    ld (rt_smp_presc),a
+    call rt_smp_load
+    xor a
+    ld (rt_smp_silent),a
+    ld (rt_smp_next),a
+    call rt_smp_fill        ; half 0
+    ld a,1
+    call rt_smp_fill        ; half 1
+    ; NR $08 bit 3: the 8-bit DACs on
+    ld bc,$243B
+    ld a,8
+    out (c),a
+    inc b
+    in a,(c)
+    or 8
+    nextreg $08,a
+    ld hl,rt_smp_prog
+    ld bc,(rt_smp_prog_len << 8) | $6B
+    otir
+    ld a,1
+    ld (rt_smp_on),a
+    ret
+
+rt_smp_stop:
+    xor a
+    ld (rt_smp_on),a
+    ld a,%10000011          ; WR6: disable DMA
+    out ($6B),a
+    ret
+
+; source position = start of the sample
+rt_smp_load:
+    ld hl,(rt_smp_desc)
+    ld a,(hl)
+    ld (rt_smp_page),a
+    inc hl
+    inc hl
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    inc hl
+    ld a,(hl)
+    ld (rt_smp_left),de
+    ld (rt_smp_left+2),a
+    ld hl,0
+    ld (rt_smp_off),hl
+    ret
+
+; HL = min(HL, DE), unsigned
+rt_smp_min:
+    or a
+    sbc hl,de
+    add hl,de
+    ret c
+    ex de,hl
+    ret
+
+; A = half (0 / 1): fill it with the next 2K of the sample (the rest of
+; it with silence once the sample has ended and does not loop)
+rt_smp_fill:
+    ld de,SMP_BUF
+    or a
+    jr z,.h0
+    ld de,SMP_BUF+2048
+.h0:
+    ld bc,2048
+    ld a,(rt_farpage)
+    push af
+.loop:
+    ld a,b
+    or c
+    jp z,.done
+    ld hl,(rt_smp_left)
+    ld a,(rt_smp_left+2)
+    or h
+    or l
+    jr nz,.data
+    ld a,(rt_smp_loop)
+    or a
+    jr z,.silence
+    push bc
+    push de
+    call rt_smp_load
+    pop de
+    pop bc
+    jp .loop
+.silence:
+    ld h,d
+    ld l,e
+    ld (hl),$80
+    dec bc
+    ld a,b
+    or c
+    jr z,.quiet
+    inc de
+    ldir
+.quiet:
+    ld hl,rt_smp_silent
+    inc (hl)
+    jp .done
+.data:
+    ld (rt_smp_need),bc
+    ld (rt_smp_dst),de
+    ld hl,8192
+    ld de,(rt_smp_off)
+    or a
+    sbc hl,de               ; room left in the page
+    ld de,(rt_smp_need)
+    call rt_smp_min
+    ld a,(rt_smp_left+2)
+    or a
+    jr nz,.nok
+    ld de,(rt_smp_left)
+    call rt_smp_min
+.nok:
+    ld b,h
+    ld c,l                  ; BC = bytes in this step
+    ld a,(rt_smp_page)
+    ld (rt_farpage),a       ; (an interrupt restores this page)
+    nextreg $51,a
+    ld hl,(rt_smp_off)
+    ld de,$2000
+    add hl,de
+    ld de,(rt_smp_dst)
+    push bc
+    ldir
+    pop bc
+    ld (rt_smp_dst),de
+    ld hl,(rt_smp_off)
+    add hl,bc
+    ld a,h
+    cp $20
+    jr nz,.same
+    ld hl,0
+    ld a,(rt_smp_page)
+    inc a
+    ld (rt_smp_page),a
+.same:
+    ld (rt_smp_off),hl
+    ld hl,(rt_smp_left)     ; left -= BC (24 bits)
+    or a
+    sbc hl,bc
+    ld (rt_smp_left),hl
+    jr nc,.nb
+    ld hl,rt_smp_left+2
+    dec (hl)
+.nb:
+    ld hl,(rt_smp_need)
+    or a
+    sbc hl,bc
+    ld b,h
+    ld c,l
+    ld de,(rt_smp_dst)
+    xor a
+    ld (rt_smp_silent),a
+    jp .loop
+.done:
+    pop af
+    ld (rt_farpage),a
+    nextreg $51,a
+    ret
+
+; frame interrupt: refill the half the DMA has left
+rt_smp_tick:
+    ld a,(rt_smp_on)
+    or a
+    ret z
+    ld a,$BB                ; WR6: read mask follows
+    out ($6B),a
+    ld a,%00011000          ;   port A address
+    out ($6B),a
+    ld a,$A7                ; WR6: initiate read sequence
+    out ($6B),a
+    in a,($6B)              ; low byte
+    in a,($6B)              ; high byte
+    cp high(SMP_BUF+2048)
+    ld a,0
+    jr c,.h
+    inc a
+.h:
+    ld hl,rt_smp_next
+    cp (hl)
+    ret z                   ; the half to refill is still playing
+    ld a,(rt_smp_silent)
+    cp 2
+    jp nc,rt_smp_stop       ; the end has been played
+    ld a,(hl)
+    xor 1
+    ld (hl),a
+    xor 1
+    jp rt_smp_fill
+
+rt_smp_prog:
+    db %10000011            ; WR6: disable DMA
+    db %01111101            ; WR0: A->B, port A address + length follow
+    dw SMP_BUF
+    dw 4096
+    db %01010100            ; WR1: port A = memory, incrementing, timing follows
+    db %00000010            ;   2 cycles
+    db %01101000            ; WR2: port B = I/O, fixed, timing follows
+    db %00100010            ;   2 cycles, prescaler follows
+rt_smp_presc:
+    db 56                   ;   875 kHz / prescaler
+    db %11001101            ; WR4: burst mode, port B address follows
+    dw $00DF                ;   Specdrum DAC
+    db %10100010            ; WR5: restart at the end of the block
+    db %11001111            ; WR6: load
+    db %10000111            ; WR6: enable DMA
+rt_smp_prog_len equ $ - rt_smp_prog
+
+rt_smp_desc:   dw 0
+rt_smp_loop:   db 0
+rt_smp_page:   db 0
+rt_smp_off:    dw 0
+rt_smp_left:   ds 3
+rt_smp_need:   dw 0
+rt_smp_dst:    dw 0
+rt_smp_next:   db 0
+rt_smp_silent: db 0
 "#;

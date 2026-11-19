@@ -1,0 +1,62 @@
+-- samples.lz80n -- digital sound through the Next's DAC
+--
+--  * asset boom = "assets/boom.wav": 8 or 16 bit PCM .wav files; they
+--    live in memory banks, not in the 31 KB program area
+--  * sample_play(s) plays once, sample_loop(s) repeats until
+--    sample_stop(); sample_playing() tells whether one is sounding
+--  * the zxnDMA plays in the background: the program runs on
+--  * the sound effects of the AY chips (tone, play ...) work at the same time
+--
+-- Keys: 1 = explosion, 2 = laser, 3 = engine (loop), 0 = stop
+
+asset boom = "assets/boom.wav"
+asset zap = "assets/zap.wav"
+asset hum = "assets/hum.wav"
+
+cls()
+ink(BRIGHT_YELLOW)
+at(1, 2)
+write("Samples on the DAC")
+ink(BRIGHT_WHITE)
+at(4, 2)
+write("1  explosion")
+at(5, 2)
+write("2  laser")
+at(6, 2)
+write("3  engine (loops)")
+at(7, 2)
+write("0  stop")
+
+layer2_visible(true)
+byte bar = 0
+word played = 0
+while true do
+    vsync()
+    if key(KEY_1) then
+        sample_play(boom)
+        played += 1
+        while key(KEY_1) do vsync() end
+    end
+    if key(KEY_2) then
+        sample_play(zap)
+        played += 1
+        while key(KEY_2) do vsync() end
+    end
+    if key(KEY_3) then
+        sample_loop(hum)
+        while key(KEY_3) do vsync() end
+    end
+    if key(KEY_0) then
+        sample_stop()
+    end
+    -- a bar that grows while a sample is sounding
+    if sample_playing() then
+        if bar < 200 then bar += 8 end
+    elseif bar > 0 then
+        bar -= 4
+    end
+    fill_rect(28, 120, bar, 16, rgb(7, 4, 0))
+    fill_rect(28 + bar, 120, 200 - bar, 16, rgb(0, 0, 1))
+    at(10, 2)
+    write("played: ", played, "   ")
+end

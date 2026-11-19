@@ -34,7 +34,7 @@ CONTENTS
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
                              as Markdown text
-  examples/                  21 example programs, their pictures and
+  examples/                  23 example programs, their pictures and
                              the include files of modules.lz80n (lib/)
   benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
@@ -225,11 +225,14 @@ Built-in and library functions (selection):
     Layer 2   layer2_visible layer2_clear layer2_flip plot point hline vline
               line rect fill_rect circle fill_circle ellipse fill_ellipse
               triangle fill_triangle rgb draw_image
+              layer2_mode(L2_320 / L2_640) layer2_width layer2_height
     sprites   asset sheet = "ships.png"   sprite_load(0, sheet)
               sprite[n].position(x, y)  sprite[n].show(pattern)
     pictures  asset pic = image("title.png")   draw_image(pic, x, y)
-    palette   palette palette9 rgb9
+    palette   palette palette9 palette_select rgb9 (PAL_..._2: second palettes)
     sound     beep tone noise volume sound_off play play_loop playing
+    samples   asset s = "boom.wav"  sample_play(s) sample_loop sample_stop
+              sample_playing
     hardware  memory[a] port[p] nextreg[r] dma_copy dma_fill addr  asm ... end
 
 Programs larger than the 31 KB program area are fine: functions move into
@@ -251,8 +254,10 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
     layer2     Layer 2 drawing, layers
     shapes     circles and ellipses, clipping
     palette    colour cycling, DMA
+    hires      Layer 2 in 320x256 and 640x256, second palettes
     raster     copper, raster interrupts
     sound      background music, sound effects
+    samples    .wav samples on the DAC
     sprites    hardware sprites from a PNG
     images     PNG pictures on Layer 2 with transparency
     tables     array initialisers
