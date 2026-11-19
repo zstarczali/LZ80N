@@ -74,6 +74,7 @@ lz80nc examples/hello.lz80n            # hello.asm és hello.nex készül
 lz80nc game.lz80n -o build/game.nex    # kimeneti fájl megadása
 lz80nc game.lz80n -S                   # megáll az assemblynél (.asm)
 lz80nc game.lz80n -O0                  # peephole optimalizálás nélkül
+lz80nc game.lz80n --bank-all           # minden függvény külön kódlapon (22.5)
 lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
 ```
 
@@ -1226,6 +1227,7 @@ $4000..$5AFF  ULA képernyő (nem használt, törölve)
 $6000..$69FF  tilemap (szövegréteg)
 $6C00..$6FFF  betűkészlet
 $2000..$3FFF  MMU 1. slot: far adat- és képlapok, hozzáféréskor lapozva
+$4000..$5FFF  MMU 2. slot: bankolt kódlapok (bankolt függvény futása alatt)
 8-10. bank    Layer 2 1. puffer, 11-13. bank: 2. puffer (induláskor beállítva)
 14. banktól   képek és far tömbök
 $8000..$FCFF  programkód és adatok (fordításkor ellenőrizve)
@@ -1250,6 +1252,30 @@ emulátorban futtatja őket (órajelciklus-számlálással, raster-időzítésse
 megszakításokkal, copperrel, DMA-val és AY-regiszterekkel). Ellenőrzi a
 kimenetet, a képernyőt és a hardver állapotát.
 
+### 22.5 Kódbankolás
+
+A program nagyobb lehet a 31 KB-os programterületnél. Ha a rezidens rész
+nem férne el, a fordító a függvényeket 8K-s **kódlapokra** teszi,
+automatikusan, a legnagyobbakkal kezdve. A forrásban semmit nem kell
+változtatni.
+
+* A bankolt függvény az MMU 2. slotjában fut (`$4000`–`$5FFF`, ami szabad,
+  mert az ULA képernyő ki van kapcsolva). A hívás egy 8 bájtos csonkon
+  megy át, ami belapozza a függvény lapját, meghívja, majd visszalapozza a
+  hívó lapját, így a bankolt függvények lapokon át is hívhatják egymást,
+  adhatnak vissza értéket, és minden más is a szokásos módon működik. Egy
+  hívás kb. 150 T-ciklussal drágább.
+* A kódlapok a képek és a `far` tömbök után következnek (a 14. 16K-s
+  banktól felfelé). A megszakításkezelők rezidensek maradnak; az általuk
+  hívott függvények lehetnek bankoltak (a lapozást a kezelő elmenti és
+  visszaállítja).
+* Ami rezidens marad: a főprogram (a legfelső szintű kód), a globális
+  változók, a stringek és a többi adat, a futtatórendszer. Ha ezek
+  önmagukban túl nagyok, az assembler jelzi; ilyenkor tedd a legfelső
+  szintű kódot függvényekbe, a nagy táblákat `far` tömbökbe (19.1).
+* Az `lz80nc --bank-all game.lz80n` minden függvényt külön lapra tesz, így
+  kis programmal is kipróbálható a bankolás.
+
 ---
 
 ## 23. Korlátok és tervek
@@ -1260,8 +1286,8 @@ Még nem támogatott:
 * `long` (32 bites), `fixed16` (16.16)
 * struktúra visszaadása, konstruktor, öröklődés, kezdőérték struktúratömbnek
 * a Layer 2 320 × 256-os és 640 × 256-os módja, második paletták
-* kb. 31 KB-nál több kód (kódbankolás: a következő lépés; a nagy adatok
-  már elférnek `far` tömbökben)
+* kb. 31 KB-nál nagyobb főprogram (legfelső szintű kód, globálisok és
+  adatok); a függvényeket a fordító automatikusan bankolja (22.5)
 * mintalejátszás a Next DAC-ján, PT3 zene importálása
 
 Tervezett sorrend: sebességmérés a NextBASIC ellen valódi gépen →
