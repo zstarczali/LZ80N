@@ -1,4 +1,4 @@
-//! lz80nc — LZ80N compiler (v0).
+//! lz80nc — LZ80N compiler.
 //!
 //! Usage: lz80nc <input.lz80n> [-o out.nex] [-S] [--sjasmplus PATH]
 
@@ -119,8 +119,16 @@ fn find_sjasmplus(explicit: Option<PathBuf>) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("SJASMPLUS") {
         return Some(p.into());
     }
-    // tools/ folder next to the compiler workspace
     let exe = std::env::current_exe().ok()?;
+    // release packages: sjasmplus next to lz80nc
+    let name = if cfg!(windows) { "sjasmplus.exe" } else { "sjasmplus" };
+    if let Some(dir) = exe.parent() {
+        let cand = dir.join(name);
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    // tools/ folder next to the compiler workspace
     for dir in exe.ancestors() {
         let cand = dir.join("tools/sjasmplus/sjasmplus-1.24.0.win/sjasmplus.exe");
         if cand.exists() {
@@ -145,8 +153,12 @@ fn main() -> ExitCode {
             "-O0" => optimize = false,
             "--bank-all" => bank_all = true,
             "--sjasmplus" => sjasm = args.next().map(PathBuf::from),
+            "-V" | "--version" => {
+                println!("lz80nc {}", env!("CARGO_PKG_VERSION"));
+                return ExitCode::SUCCESS;
+            }
             "-h" | "--help" => {
-                println!("lz80nc <input.lz80n> [-o out.nex] [-S (assembly only)] [-O0 (no peephole)] [--bank-all (every function in a code page)] [--sjasmplus PATH]");
+                println!("lz80nc <input.lz80n> [-o out.nex] [-S (assembly only)] [-O0 (no peephole)] [--bank-all (every function in a code page)] [--sjasmplus PATH] [--version]");
                 return ExitCode::SUCCESS;
             }
             _ if input.is_none() => input = Some(PathBuf::from(a)),
