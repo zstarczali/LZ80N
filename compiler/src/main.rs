@@ -172,8 +172,38 @@ fn find_sjasmplus(explicit: Option<PathBuf>) -> Option<PathBuf> {
     Some(PathBuf::from("sjasmplus"))
 }
 
+const USAGE: &str = "usage: lz80nc <input.lz80n> [-o out.nex] [-S] [-O0] [--bank-all] [--sjasmplus PATH]
+       lz80nc --help | --version";
+
+const HELP: &str = "lz80nc — the LZ80N compiler: a Lua-like language for the ZX Spectrum Next
+
+usage:
+  lz80nc <input.lz80n> [options]
+  lz80nc --help | -h
+  lz80nc --version | -V
+
+options:
+  -o FILE           the NEX to write (default: the input with a .nex extension);
+                    the assembly (.asm) and listing (.lst) go next to it
+  -S                stop after writing the assembly (.asm), no NEX
+  -O0               no peephole optimisation of the generated assembly
+  --bank-all        every function in its own 8K code page (to try code banking;
+                    normally only when the program does not fit in the 31K area)
+  --sjasmplus PATH  the SjASMPlus to assemble with (default: $SJASMPLUS, then the
+                    one next to lz80nc, then tools/sjasmplus, then the PATH)
+
+`include` and `asset` paths (.png .bmp .wav .pt3 ...) are relative to the source
+file that names them.
+
+exit status: 0 = built, 1 = compile error (FILE:LINE:COL: error: message on stderr)
+             or SjASMPlus failed, 2 = bad usage";
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
+    if args.len() == 0 {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     let mut input = None;
     let mut output = None;
     let mut asm_only = false;
@@ -182,28 +212,45 @@ fn main() -> ExitCode {
     let mut bank_all = false;
     while let Some(a) = args.next() {
         match a.as_str() {
-            "-o" => output = args.next().map(PathBuf::from),
+            "-o" | "--sjasmplus" => {
+                let Some(v) = args.next() else {
+                    eprintln!("`{a}` needs a value
+{USAGE}");
+                    return ExitCode::from(2);
+                };
+                if a == "-o" {
+                    output = Some(PathBuf::from(v));
+                } else {
+                    sjasm = Some(PathBuf::from(v));
+                }
+            }
             "-S" => asm_only = true,
             "-O0" => optimize = false,
             "--bank-all" => bank_all = true,
-            "--sjasmplus" => sjasm = args.next().map(PathBuf::from),
             "-V" | "--version" => {
                 println!("lz80nc {}", env!("CARGO_PKG_VERSION"));
                 return ExitCode::SUCCESS;
             }
             "-h" | "--help" => {
-                println!("lz80nc <input.lz80n> [-o out.nex] [-S (assembly only)] [-O0 (no peephole)] [--bank-all (every function in a code page)] [--sjasmplus PATH] [--version]");
+                println!("{HELP}");
                 return ExitCode::SUCCESS;
+            }
+            _ if a.starts_with('-') && a.len() > 1 => {
+                eprintln!("unknown option `{a}`
+{USAGE}");
+                return ExitCode::from(2);
             }
             _ if input.is_none() => input = Some(PathBuf::from(a)),
             _ => {
-                eprintln!("unexpected argument `{a}`");
+                eprintln!("unexpected argument `{a}` (one input file)
+{USAGE}");
                 return ExitCode::from(2);
             }
         }
     }
     let Some(input) = input else {
-        eprintln!("usage: lz80nc <input.lz80n> [-o out.nex] [-S]");
+        eprintln!("no input file
+{USAGE}");
         return ExitCode::from(2);
     };
     let src = match std::fs::read_to_string(&input) {
