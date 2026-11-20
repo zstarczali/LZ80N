@@ -1,6 +1,6 @@
 # Teljesítmény-elemzés: hol lehet gyorsítani?
 
-Állapot: 1.1.0 (2026-11-19). A dokumentum azt nézi végig, hogy a **lefordított
+Állapot: 1.1.0 (2026-11-19); az elkészült gyorsítások az 1.2.0-ban (6. szakasz). A dokumentum azt nézi végig, hogy a **lefordított
 programok** hol lassúak, és mit lehetne tenni ellenük. A fordító saját sebessége
 nem gond: a `shooter.lz80n` kb. 0,1 s alatt fordul le, mind a 24 példa kb. 1,7 s
 alatt (ennek nagy része az SjASMPlus indítása).

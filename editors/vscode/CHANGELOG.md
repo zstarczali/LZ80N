@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0
+
+* Follows LZ80N 1.2.0 (a faster compiler; no language changes).
+
 ## 1.1.0
 
 * Follows LZ80N 1.1.0: keywords `extends`, `super`; types `long`,
