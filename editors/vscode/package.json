@@ -3,7 +3,10 @@
   "displayName": "LZ80N",
   "description": "LZ80N language support for the ZX Spectrum Next: syntax highlighting, diagnostics, build and run in CSpect.",
   "version": "1.2.0",
-  "publisher": "zstarczali",
+  "publisher": "zsolt-tarczali",
+  "author": {
+    "name": "Zsolt Tarczali"
+  },
   "license": "MIT",
   "icon": "images/icon.png",
   "repository": {
