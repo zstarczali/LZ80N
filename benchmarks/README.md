@@ -61,7 +61,7 @@ NextBASIC: `benchmark.bas` (floating point) and `benchmark_int.bas`
 | plot | 12 340 ms | | 138 ms | 89x |
 
 CSpect runs LZ80N code about 1.4-1.7x slower than the test emulator above
-(the Next's memory wait states at 28 MHz). `print` is the closest because
+(probably the Next's memory wait states at 28 MHz). `print` is the closest, probably because
 most of the NextBASIC time is in the ROM's printing, which is machine code
 too.
 
