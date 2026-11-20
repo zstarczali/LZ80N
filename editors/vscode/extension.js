@@ -132,18 +132,27 @@ async function check(doc) {
   diagnostics.set(doc.uri, parseDiagnostics(res.out, doc.fileName, doc));
 }
 
-async function activeDoc() {
-  const ed = vscode.window.activeTextEditor;
-  if (!ed || ed.document.languageId !== LANG) {
+/**
+ * The document a command works on: the file right-clicked in the explorer or the
+ * editor (`uri`), else the active editor. Saved first when it has changes.
+ */
+async function activeDoc(uri) {
+  let doc;
+  if (uri instanceof vscode.Uri && uri.scheme === 'file') {
+    doc = await vscode.workspace.openTextDocument(uri);
+  } else {
+    doc = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
+  }
+  if (!doc || (doc.languageId !== LANG && !/\.lz80n$/i.test(doc.fileName))) {
     vscode.window.showWarningMessage('Open an .lz80n file first.');
     return undefined;
   }
-  if (ed.document.isUntitled) {
+  if (doc.isUntitled) {
     vscode.window.showWarningMessage('Save the file first.');
     return undefined;
   }
-  if (ed.document.isDirty) await ed.document.save();
-  return ed.document;
+  if (doc.isDirty) await doc.save();
+  return doc;
 }
 
 /** Full build to .nex next to the source. Returns the .nex path or undefined. */
@@ -164,15 +173,24 @@ async function build(doc, extra = []) {
   return doc.fileName.replace(/\.[^.\\/]*$/, '') + (extra.includes('-S') ? '.asm' : '.nex');
 }
 
-async function cmdBuild() {
-  const doc = await activeDoc();
+async function cmdBuild(uri, extra = []) {
+  const doc = await activeDoc(uri);
   if (!doc) return;
-  const nex = await build(doc);
+  const nex = await build(doc, extra);
   if (nex) vscode.window.setStatusBarMessage(`$(check) LZ80N: wrote ${path.basename(nex)}`, 5000);
 }
 
-async function cmdShowAsm() {
-  const doc = await activeDoc();
+/** Shows the .nex of the file in the system file manager, building it first if there is none. */
+async function cmdRevealNex(uri) {
+  const doc = await activeDoc(uri);
+  if (!doc) return;
+  let nex = doc.fileName.replace(/\.[^.\\/]*$/, '') + '.nex';
+  if (!fs.existsSync(nex)) nex = await build(doc);
+  if (nex) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(nex));
+}
+
+async function cmdShowAsm(uri) {
+  const doc = await activeDoc(uri);
   if (!doc) return;
   const asm = await build(doc, ['-S']);
   if (asm) {
@@ -181,8 +199,8 @@ async function cmdShowAsm() {
   }
 }
 
-async function cmdRun() {
-  const doc = await activeDoc();
+async function cmdRun(uri) {
+  const doc = await activeDoc(uri);
   if (!doc) return;
   let emu = cfg().get('emulatorPath');
   if (!emu) {
@@ -648,11 +666,14 @@ function activate(context) {
   context.subscriptions.push(
     output,
     diagnostics,
-    vscode.commands.registerCommand('lz80n.build', cmdBuild),
+    vscode.commands.registerCommand('lz80n.build', (uri) => cmdBuild(uri)),
+    vscode.commands.registerCommand('lz80n.buildNoOpt', (uri) => cmdBuild(uri, ['-O0'])),
+    vscode.commands.registerCommand('lz80n.buildBankAll', (uri) => cmdBuild(uri, ['--bank-all'])),
     vscode.commands.registerCommand('lz80n.run', cmdRun),
     vscode.commands.registerCommand('lz80n.showAsm', cmdShowAsm),
-    vscode.commands.registerCommand('lz80n.check', async () => {
-      const d = await activeDoc();
+    vscode.commands.registerCommand('lz80n.revealNex', cmdRevealNex),
+    vscode.commands.registerCommand('lz80n.check', async (uri) => {
+      const d = await activeDoc(uri);
       if (d) check(d);
     }),
     vscode.languages.registerHoverProvider(sel, hoverProvider),
