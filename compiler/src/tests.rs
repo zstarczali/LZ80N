@@ -3172,3 +3172,47 @@ print(bad)
 "#;
     expect("r_hline_ref", src, "0\n");
 }
+
+#[test]
+fn run_hline_hires_matches_plots() {
+    let src = r#"
+word bad = 0
+function check(word x, byte y, word len, word w)
+    hline(x, y, len, 2)
+    word i = 0
+    while i < len do
+        if x + i < w then plot(x + i, y, 1) end
+        i += 1
+    end
+    hline(x, y, len, 3)
+    for xx = 0, w - 1 do
+        for yy = 0, 2 do
+            byte p = point(xx, y + byte(yy))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+layer2_visible(true)
+layer2_mode(L2_320)
+check(0, 10, 320, 320)
+check(31, 11, 2, 320)
+check(30, 12, 70, 320)
+check(300, 13, 100, 320)
+check(64, 14, 1, 320)
+check(320, 15, 5, 320)
+check(5, 16, 0, 320)
+layer2_mode(L2_640)
+check(0, 10, 640, 640)
+check(1, 11, 1, 640)
+check(1, 12, 2, 640)
+check(1, 13, 3, 640)
+check(2, 14, 1, 640)
+check(63, 15, 66, 640)
+check(600, 16, 100, 640)
+check(639, 17, 9, 640)
+check(640, 18, 4, 640)
+print(bad)
+"#;
+    expect("r_hline_hi", src, "0\n");
+}
