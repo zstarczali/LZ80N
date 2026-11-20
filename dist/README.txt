@@ -36,7 +36,6 @@ CONTENTS
                              as Markdown text
   examples/                  24 example programs, their pictures and
                              the include files of modules.lz80n (lib/)
-  benchmarks/                speed tests: LZ80N and NextBASIC
   README.txt                 this file
   CHANGELOG.md               what is new in each version
   LICENSE                    LZ80N licence (MIT)
