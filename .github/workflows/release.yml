@@ -150,6 +150,20 @@ jobs:
             # smoke test: the packaged compiler builds an example with the packaged assembler
             (cd "$pkg" && ./lz80nc$exe examples/hello.lz80n && test -f examples/hello.nex && rm examples/hello.asm examples/hello.nex)
           fi
+          if [[ "${{ runner.os }}" == macOS ]]; then
+            # Finder icon of the binary (a plain executable has none of its own): written into
+            # its resource fork; the macOS tar keeps it, Archive Utility and tar restore it
+            osascript -l JavaScript -e '
+              ObjC.import("AppKit");
+              function run(argv) {
+                const image = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
+                if (!image || image.isNil()) throw new Error("cannot read " + argv[0]);
+                if (!$.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[1], 0))
+                  throw new Error("cannot set the icon of " + argv[1]);
+              }' "$PWD/assets/lz80n.icns" "$PWD/$pkg/lz80nc"
+            xattr -p com.apple.ResourceFork "$pkg/lz80nc" > /dev/null
+            echo "Finder icon set on $pkg/lz80nc"
+          fi
           if [[ "${{ runner.os }}" == Windows ]]; then
             7z a -tzip "$pkg.zip" "$pkg" > /dev/null
             echo "file=$pkg.zip" >> "$GITHUB_OUTPUT"
