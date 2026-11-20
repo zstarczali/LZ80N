@@ -42,6 +42,7 @@ class Sprite
     -- mirror_x 8, mirror_y 9, rotate 10, scale 11)
     function update()
         asm
+            push ix                 ; user assembly may keep a value in IX
             ld ix,(p_Sprite_update_self)
             ld a,(ix+4)
             nextreg $34,a           ; sprite number
@@ -86,7 +87,8 @@ class Sprite
             and 1                   ; y bit 8
             or b
             nextreg $39,a
-        end
+            pop ix
+    end
     end
 end
 
@@ -639,6 +641,15 @@ word snd_bufp
 -- every channel: count down the note, or read the next tune commands
 function sound_tick()
     asm
+            ld hl,g_snd_mode        ; nothing sounding: nothing to do
+            ld b,9
+            xor a
+.any:
+            or (hl)
+            inc hl
+            djnz .any
+            or a
+            jp z,.out
             xor a
             ld (g_snd_ch),a
             ld (g_snd_chip),a
