@@ -4,3 +4,4 @@ compiler/target/
 *.nex
 tools/sjasmplus/
 *.vsix
+*.pyc
