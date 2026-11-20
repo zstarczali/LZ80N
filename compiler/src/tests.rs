@@ -747,6 +747,9 @@ sprite[3].scale = 1
 sprite[3].position(300, 260)
 sprite[3].show(11)
 sprite[5].palette = 2
+sprite[5].mirror_y = true
+sprite[5].rotate = true
+sprite[5].scale = 2
 sprite[5].position(40, 50)
 sprite[5].hide()
 print(sprite[3].x, sprite[3].id)
@@ -762,7 +765,7 @@ print(sprite[3].x, sprite[3].id)
         assert_eq!(cpu.patterns[11 * 256], 0xE2);
         // x = 300 = $12C, y = 260 = $104
         assert_eq!(cpu.sprite_attr[3], [0x2C, 0x04, 0x08 | 0x01, 0x80 | 0x40 | 11, (1 << 3) | (1 << 1) | 1]);
-        assert_eq!(cpu.sprite_attr[5], [40, 50, 0x20, 0x40, 0]);
+        assert_eq!(cpu.sprite_attr[5], [40, 50, 0x20 | 4 | 2, 0x40, (2 << 3) | (2 << 1)]);
     }
 }
 
@@ -2726,4 +2729,519 @@ print(frames() - t)
     assert_eq!(&cpu.ay[0][8..11], &[0, 0, 0]);
     assert_eq!(cpu.ay[0][7] & 0x3F, 0x3F);
     assert!(err("asset x = \"ships.png\"\nmusic_play(x)").contains("not music"));
+}
+
+/// T-states between calls of `bench_start()` and `bench_stop(n)` in the
+/// program named by BENCH (run with --ignored --nocapture).
+#[test]
+#[ignore]
+fn bench() {
+    let path = std::env::var("BENCH").expect("BENCH=file.lz80n");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let (nex, syms) = build("bench", &src).unwrap();
+    let mut cpu = load_nex(&nex).unwrap();
+    let (start, stop, end) = (syms["f_bench_start"], syms["f_bench_stop"], syms["__main_end"]);
+    let mut t0 = 0;
+    for _ in 0..2_000_000_000u64 {
+        if cpu.pc == end {
+            return;
+        }
+        if cpu.pc == start {
+            t0 = cpu.t_states;
+        } else if cpu.pc == stop {
+            println!("BENCH {:>3} {:>10}", cpu.a, cpu.t_states - t0);
+        }
+        cpu.tick().unwrap();
+    }
+    panic!("did not finish");
+}
+
+#[test]
+fn run_branches_match_bool_values() {
+    // every condition as a jump (if) and as a value (bool v = ...) must agree
+    let conds = [
+        "x > 100 or not (x < 50 and x ~= 7)",
+        "x > 254",
+        "x <= 3",
+        "not (x == 0)",
+        "s < 0",
+        "s >= 0",
+        "s > -1",
+        "s <= 126",
+        "s > 126 or s < -127",
+        "w == 0",
+        "w ~= 0",
+        "w > 65000",
+        "w <= 1200",
+        "sw < 0",
+        "sw >= 0 and x ~= 3 or s < -100",
+        "not (sw > -2) and not (w == 300)",
+    ];
+    let mut src = String::from("word bad = 0\nfor i = 0, 255 do\n    byte x = byte(i)\n    sbyte s = sbyte(x)\n    word w = word(x) * 300\n    sword sw = sword(w)\n");
+    for (k, c) in conds.iter().enumerate() {
+        src.push_str(&format!(
+            "    bool v{k} = {c}\n    bool j{k} = false\n    if {c} then j{k} = true end\n    if v{k} ~= j{k} then bad += 1 end\n"
+        ));
+    }
+    src.push_str("end\nword n = 0\nwhile n < 10 or n == 12 do n += 1 end\nprint(bad, n)\n");
+    expect("r_branches", &src, "0 10\n");
+}
+
+#[test]
+fn run_update_in_place() {
+    // t op= x on struct array fields (address once) must match plain variables
+    let src = r#"
+struct T
+    byte b
+    sbyte s
+    word w
+    sword sw
+    fixed f
+end
+T t[4]
+byte b = 0
+sbyte s = 0
+word w = 0
+sword sw = 0
+fixed f = 0.0
+word bad = 0
+byte k = 2
+for i = 0, 40 do
+    byte v = byte(i * 37)
+    sbyte sv = sbyte(v)
+    t[k].b += v       b += v
+    t[k].b -= 3       b -= 3
+    t[k].b += 1       b += 1
+    t[k].b -= 255     b -= 255
+    t[k].b &= 0xF7    b &= 0xF7
+    t[k].b |= v       b |= v
+    t[k].s += sv      s += sv
+    t[k].s -= 1       s -= 1
+    t[k].w += v       w += v
+    t[k].w += 1       w += 1
+    t[k].w -= 700     w -= 700
+    t[k].w = t[k].w ~ 0x0F0F   w = w ~ 0x0F0F
+    t[k].w -= word(v) * 3   w -= word(v) * 3
+    t[k].w += sv      w += sv
+    t[k].sw += sv     sw += sv
+    t[k].sw -= 1      sw -= 1
+    t[k].sw -= sw / 4
+    sw -= sw / 4
+    t[k].f += 1.25    f += 1.25
+    t[k].f -= f / 8.0
+    f -= f / 8.0
+    if t[k].b ~= b or t[k].s ~= s or t[k].w ~= w or t[k].sw ~= sw or t[k].f ~= f then bad += 1 end
+end
+print(bad, t[1].w, t[3].b)
+"#;
+    expect("r_inplace", src, "0 0 0\n");
+}
+
+#[test]
+fn run_word_byte_loads() {
+    let src = r#"
+struct Q
+    byte pad
+    word w
+    sword s
+end
+Q q[3]
+word g = 0x1234
+sword n = -2
+q[2].w = 0xABCD
+q[2].s = -300
+word a[4] = {1, 0x0201, 0xFF80, 4}
+byte i = 2
+print(byte(g), byte(g >> 8), byte(n), byte(n >> 8))
+print(byte(q[i].w), byte(q[i].w >> 8), byte(q[i].s), byte(q[i].s >> 8))
+print(byte(a[i]), byte(a[i] >> 8), sbyte(a[i]))
+"#;
+    expect("r_wordbyte", src, "52 18 254 255\n205 171 212 254\n128 255 -128\n");
+}
+
+#[test]
+fn run_field_by_field() {
+    let src = r#"
+struct M
+    word x
+    sword y
+    byte bx
+    sbyte dx
+    word dw
+    fixed f
+    fixed df
+end
+M m[3]
+byte j = 1
+m[j].x = 1000  m[j].y = -5  m[j].bx = 250  m[j].dx = -3  m[j].dw = 0x0F0F
+m[j].f = 1.5  m[j].df = 0.25
+m[j].x += m[j].dx
+m[j].y -= m[j].dx
+m[j].bx += m[j].dx
+m[j].dw = m[j].dw ~ m[j].x
+m[j].dw |= m[j].bx
+m[j].x &= m[j].dw
+m[j].f -= m[j].df
+m[j].dx = -m[j].dx
+m[j].y = -m[j].y
+print(m[j].x, m[j].y, m[j].bx, m[j].dw, m[j].f, m[j].dx)
+print(m[0].x, m[2].y)
+"#;
+    // x = 997; y = -2; bx = 247; dw = $F0F ^ 997 = $CEA, | 247 = $CFF (3327);
+    // x = 997 & 3327 = 229; f = 1.25; dx = 3; y = 2
+    expect("r_fieldfield", src, "229 2 247 3327 1.25 3\n0 0\n");
+}
+
+#[test]
+fn run_sound_loop_flat_volume() {
+    let src = r#"
+play_loop(2, "v9 o5 l3 d- <b")
+while true do vsync() end
+"#;
+    let shots = sound_frames("r_snd_loop", src, 24);
+    if shots.is_empty() {
+        return;
+    }
+    let period = |s: &[[u8; 16]; 3]| s[0][4] as u16 | (s[0][5] as u16) << 8;
+    let p = |n: f64| (1_750_000.0 / (16.0 * 440.0 * 2f64.powf((n - 57.0) / 12.0))).round() as u16;
+    let (db5, b4) = (p(61.0), p(59.0));
+    let seq: Vec<(u16, u8)> = shots.iter().map(|s| (period(s), s[0][10])).collect();
+    let first = seq.iter().position(|&(q, v)| q == db5 && v == 9).expect("d-5 at volume 9");
+    // d-5 3 frames (last silent), b4 3 frames, then again from the start
+    assert_eq!(seq[first + 1], (db5, 9));
+    assert_eq!(seq[first + 2].1, 0);
+    assert_eq!(seq[first + 3], (b4, 9));
+    // the loop restarts in octave 4 (after `<`) only if `o5` is read again: it is
+    assert_eq!(seq[first + 6], (db5, 9), "{seq:?}");
+    assert_eq!(seq[first + 9], (b4, 9));
+}
+
+#[test]
+#[ignore]
+fn bench_sound_tick() {
+    let src = "play_loop(0, \"o4 l2 cdefgab\")\nplay_loop(1, \"o3 l3 cegc\")\nplay_loop(2, \"o5 l1 c\")\nfor j = 1, 20 do\nfor i = 1, 30000 do end\nend\n";
+    let (nex, syms) = build("bench_snd", src).unwrap();
+    let mut cpu = load_nex(&nex).unwrap();
+    let (tick, end) = (syms["f_sound_tick"], syms["__main_end"]);
+    let (mut inside, mut t0, mut sp0, mut total, mut calls) = (false, 0, 0, 0u64, 0);
+    let mut hist: HashMap<u16, u64> = HashMap::new();
+    while cpu.pc != end {
+        if !inside && cpu.pc == tick {
+            inside = true;
+            t0 = cpu.t_states;
+            sp0 = cpu.sp;
+            calls += 1;
+        }
+        let (pc, t1) = (cpu.pc, cpu.t_states);
+        cpu.tick().unwrap();
+        if inside {
+            *hist.entry(pc).or_insert(0u64) += cpu.t_states - t1;
+        }
+        if inside && cpu.sp > sp0 {
+            inside = false;
+            total += cpu.t_states - t0;
+        }
+    }
+    println!("SOUND {calls} calls, {} T per call", total / calls.max(1));
+    let mut v: Vec<_> = hist.into_iter().collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+    let mut names: Vec<(u16, &String)> = syms.iter().map(|(k, v)| (*v, k)).collect();
+    names.sort();
+    for (pc, t) in v.iter().take(25) {
+        let n = names.iter().rev().find(|(a, _)| a <= pc).map(|(a, n)| format!("{n}+{}", pc - a)).unwrap_or_default();
+        println!("  {pc:04X} {t:>8} {n}");
+    }
+}
+
+#[test]
+fn run_print_number_edges() {
+    expect(
+        "r_numedges",
+        "word a[9] = {0, 9, 10, 99, 100, 1000, 10000, 60009, 65535}\nfor i = 0, 8 do write(a[i], \" \") end\nprint()\nsword s = -32768\nprint(s, sword(-1), sword(-10), str(word(40000)))",
+        "0 9 10 99 100 1000 10000 60009 65535 \n-32768 -1 -10 40000\n",
+    );
+}
+
+#[test]
+fn run_sqrt16_all_values() {
+    // floor(sqrt(w)) for every 16-bit w: s*s <= w < (s+1)*(s+1)
+    let src = "word bad = 0\nword w = 0\nwhile true do\n    long s = long(sqrt(w))\n    long v = long(w)\n    if s * s > v or (s + 1) * (s + 1) <= v then bad += 1 end\n    if w == 65535 then break end\n    w += 1\nend\nprint(bad, sqrt(word(65535)), sqrt(word(0)), sqrt(word(48)), sqrt(word(49)))\n";
+    expect("r_sqrt16", src, "0 255 0 6 7\n");
+}
+
+#[test]
+fn run_long_add_constant() {
+    expect(
+        "r_longk",
+        "long x = 65535\nx += 1\nprint(x)\nx -= 65537\nprint(x)\nx += 65536\nprint(x)\nx = x - 0\nx = x + 2147418112\nprint(x)\nfixed16 f = 1.5\nf += 2.75\nprint(f)\nf -= 10\nprint(f)",
+        "65536\n-1\n65535\n2147483647\n4.25\n-5.75\n",
+    );
+}
+
+/// The old LZ80N line, for comparing the assembly version pixel by pixel.
+const LINE_REF: &str = r#"
+function line_ref(word x0, byte y0, word x1, byte y1, byte c)
+    sword dx = x1 - x0
+    sword dy = y1 - y0
+    sbyte sx = 1
+    sbyte sy = 1
+    if dx < 0 then
+        dx = -dx
+        sx = -1
+    end
+    if dy < 0 then
+        dy = -dy
+        sy = -1
+    end
+    sword err = dx - dy
+    while true do
+        plot(x0, y0, c)
+        if x0 == x1 and y0 == y1 then break end
+        sword e2 = err + err
+        if e2 > -dy then
+            err -= dy
+            x0 += sx
+        end
+        if e2 < dx then
+            err += dx
+            y0 += sy
+        end
+    end
+end
+"#;
+
+#[test]
+fn run_line_matches_reference() {
+    let src = format!(
+        "{LINE_REF}
+word bad = 0
+function check(word x0, byte y0, word x1, byte y1, word w, byte h)
+    layer2_clear(0)
+    line(x0, y0, x1, y1, 2)
+    line_ref(x0, y0, x1, y1, 1)       -- 2 left: drawn only by line
+    line(x0, y0, x1, y1, 3)           -- 1 left: drawn only by line_ref
+    for y = 0, h do
+        for x = 0, w - 1 do
+            byte p = point(x, byte(y))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+end
+layer2_visible(true)
+check(10, 10, 200, 40, 256, 191)
+check(200, 40, 10, 10, 256, 191)
+check(30, 180, 35, 0, 256, 191)
+check(250, 5, 290, 150, 256, 191)
+check(0, 0, 255, 191, 256, 191)
+check(100, 100, 100, 100, 256, 191)
+check(120, 50, 20, 51, 256, 191)
+layer2_mode(L2_320)
+check(5, 250, 319, 3, 320, 255)
+check(300, 10, 20, 200, 320, 255)
+print(bad)
+"
+    );
+    expect("r_line_ref", &src, "0\n");
+}
+
+#[test]
+fn run_shapes_match_reference() {
+    let reference = include_str!("../tests/fixtures/shapes_ref.lz80n");
+    let src = format!(
+        "{reference}
+word bad = 0
+function count(word w, byte h)
+    for y = 0, h do
+        for x = 0, w - 1 do
+            byte p = point(x, byte(y))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+function tri(sword a, sword b, sword c, sword d, sword e, sword f, word w, byte h)
+    fill_triangle(a, b, c, d, e, f, 2)
+    fill_triangle_ref(a, b, c, d, e, f, 1)
+    fill_triangle(a, b, c, d, e, f, 3)
+    count(w, h)
+end
+function ell(sword x, sword y, byte rx, byte ry, word w, byte h)
+    ellipse(x, y, rx, ry, 2)
+    ellipse_ref(x, y, rx, ry, 1)
+    ellipse(x, y, rx, ry, 3)
+    count(w, h)
+    fill_ellipse(x, y, rx, ry, 2)
+    fill_ellipse_ref(x, y, rx, ry, 1)
+    fill_ellipse(x, y, rx, ry, 3)
+    count(w, h)
+end
+layer2_visible(true)
+tri(10, 10, 200, 60, 50, 180, 256, 191)
+tri(128, 5, 128, 5, 128, 5, 256, 191)
+tri(0, 100, 255, 100, 128, 100, 256, 191)
+tri(-40, -30, 300, 90, 20, 250, 256, 191)
+tri(250, 0, 3, 7, 140, 190, 256, 191)
+tri(5, 5, 6, 180, 7, 90, 256, 191)
+ell(128, 96, 60, 30, 256, 191)
+ell(20, 20, 40, 9, 256, 191)
+ell(200, 150, 3, 70, 256, 191)
+ell(100, 100, 0, 0, 256, 191)
+layer2_mode(L2_320)
+tri(-10, 255, 330, 10, 160, -5, 320, 255)
+ell(300, 200, 90, 80, 320, 255)
+print(bad)
+"
+    );
+    expect("r_shapes_ref", &src, "0\n");
+}
+
+#[test]
+fn run_vline_matches_plots() {
+    let src = r#"
+word bad = 0
+function vref(word x, byte y, word len, byte c)
+    while len ~= 0 do
+        plot(x, y, c)
+        len -= 1
+        if y == 255 then break end
+        y += 1
+    end
+end
+function check(word x, byte y, word len, word w, byte h)
+    vline(x, y, len, 2)
+    vref(x, y, len, 1)
+    vline(x, y, len, 3)
+    for yy = 0, h do
+        for xx = 0, w - 1 do
+            byte p = point(xx, byte(yy))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+layer2_visible(true)
+check(0, 0, 192, 256, 191)
+check(255, 30, 1000, 256, 191)
+check(17, 31, 2, 256, 191)
+check(40, 191, 5, 256, 191)
+check(40, 200, 5, 256, 191)
+check(300, 10, 50, 256, 191)
+check(9, 9, 0, 256, 191)
+layer2_mode(L2_320)
+check(319, 0, 256, 320, 255)
+check(100, 250, 30, 320, 255)
+check(320, 0, 10, 320, 255)
+layer2_mode(L2_640)
+check(639, 5, 100, 640, 255)
+check(2, 200, 400, 640, 255)
+print(bad)
+"#;
+    expect("r_vline_ref", src, "0\n");
+}
+
+#[test]
+fn run_hline_matches_plots() {
+    let src = r#"
+word bad = 0
+function check(word x, byte y, word len)
+    hline(x, y, len, 2)
+    for i = 0, 300 do
+        if word(i) < len then plot(x + word(i), y, 1) end
+    end
+    hline(x, y, len, 3)
+    for yy = 0, 191 do
+        for xx = 0, 255 do
+            byte p = point(xx, byte(yy))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+layer2_visible(true)
+check(0, 0, 256)
+check(10, 5, 31)
+check(10, 6, 32)
+check(10, 7, 33)
+check(240, 100, 100)
+check(0, 191, 300)
+check(5, 192, 50)
+check(256, 50, 10)
+check(100, 33, 1)
+check(100, 34, 0)
+print(bad)
+"#;
+    expect("r_hline_ref", src, "0\n");
+}
+
+#[test]
+fn run_hline_hires_matches_plots() {
+    let src = r#"
+word bad = 0
+function check(word x, byte y, word len, word w)
+    hline(x, y, len, 2)
+    word i = 0
+    while i < len do
+        if x + i < w then plot(x + i, y, 1) end
+        i += 1
+    end
+    hline(x, y, len, 3)
+    for xx = 0, w - 1 do
+        for yy = 0, 2 do
+            byte p = point(xx, y + byte(yy))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+layer2_visible(true)
+layer2_mode(L2_320)
+check(0, 10, 320, 320)
+check(31, 11, 2, 320)
+check(30, 12, 70, 320)
+check(300, 13, 100, 320)
+check(64, 14, 1, 320)
+check(320, 15, 5, 320)
+check(5, 16, 0, 320)
+layer2_mode(L2_640)
+check(0, 10, 640, 640)
+check(1, 11, 1, 640)
+check(1, 12, 2, 640)
+check(1, 13, 3, 640)
+check(2, 14, 1, 640)
+check(63, 15, 66, 640)
+check(600, 16, 100, 640)
+check(639, 17, 9, 640)
+check(640, 18, 4, 640)
+print(bad)
+"#;
+    expect("r_hline_hi", src, "0\n");
+}
+
+#[test]
+fn run_string_append_in_place() {
+    let src = r#"
+string s = "ab"
+s = s .. s .. "-" .. 42 .. str(word(7)) .. chr(65)
+print(s)
+string t = ""
+for i = 1, 70 do t = t .. "x" end
+print(len(t))
+string u = "q"
+function grab() -> string
+    u = "zz"
+    return "!"
+end
+u = u .. grab()
+print(u)
+"#;
+    expect("r_sappend", src, "abab-427A\n64\nq!\n");
+}
+
+#[test]
+fn run_plot_y_offset() {
+    expect(
+        "r_ploty",
+        "layer2_visible(true)\nbyte y = 10\nword x = 300\nplot(5, y + 3, 7)\nplot(6, y - 2, 8)\nplot(x - 290, y + 250, 9)\nprint(point(5, 13), point(6, 8), point(10, 4))",
+        "7 8 9\n",
+    );
 }

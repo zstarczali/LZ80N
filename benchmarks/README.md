@@ -13,8 +13,9 @@ The same seven tasks in both languages, both at 28 MHz, timed with the
 | sqrt | sum of `floor(sqrt(i))`, i = 1 .. 1000 |
 | plot | 128 × 64 Layer 2 pixels |
 
-Both programs print a check line at the end, which must be the same:
-`arith 500  primes 303  sqrt 20615`.
+Both programs print a check line at the end:
+`arith 500  primes 303  sqrt 20615` (NextBASIC: `sqrt 20607`, see the
+notes below).
 
 ## Running
 
@@ -36,15 +37,33 @@ shows on the Next are the reference.
 |------|-------------:|----:|---------:|
 | loop | 44 ms | 21 ms | 59 T-states per iteration |
 | arith | 346 ms | 115 ms | 645 T per iteration |
-| sieve | 57 ms | 42 ms | |
+| sieve | 57 ms | 41 ms | |
 | print | 95 ms | 49 ms | ~170 T per character incl. `at` |
-| string | 121 ms | 74 ms | |
-| sqrt | 103 ms | 70 ms | |
-| plot | 99 ms | 76 ms | 260 T per pixel |
+| string | 121 ms | 28 ms | appended in place |
+| sqrt | 103 ms | 34 ms | 16-bit root in 8 rounds |
+| plot | 99 ms | 86 ms | 295 T per pixel incl. both loops |
 
-NextBASIC: _to be measured on the Next / in CSpect_, both
-`benchmark.bas` (floating point) and `benchmark_int.bas` (integer
-variables `%a`..`%z`, the fastest NextBASIC form, for `loop` and `arith`).
+## LZ80N vs NextBASIC (CSpect)
+
+Measured on 2026-11-20 in CSpect 3.1 with NextZXOS, 50 Hz, both at 28 MHz.
+NextBASIC: `benchmark.bas` (floating point) and `benchmark_int.bas`
+(integer variables `%a`..`%z`, the fastest NextBASIC form, for `loop` and
+`arith`).
+
+| Task | NextBASIC | NextBASIC integer | LZ80N | LZ80N is faster |
+|------|----------:|------------------:|------:|----------------:|
+| loop | 7 240 ms | 4 460 ms | 34 ms | 213x (integer: 131x) |
+| arith | 12 880 ms | 4 460 ms | 176 ms | 73x (integer: 25x) |
+| sieve | 11 860 ms | | 64 ms | 185x |
+| print | 1 480 ms | | 74 ms | 20x |
+| string | 3 200 ms | | 42 ms | 76x |
+| sqrt | 20 020 ms | | 46 ms | 435x |
+| plot | 12 340 ms | | 138 ms | 89x |
+
+CSpect runs LZ80N code about 1.4-1.7x slower than the test emulator above
+(probably the Next's memory wait states at 28 MHz). `print` is the closest, probably because
+most of the NextBASIC time is in the ROM's printing, which is machine code
+too.
 
 For scale: one iteration of the LZ80N empty loop is 59 T-states, about
 2 µs at 28 MHz. An interpreter has to fetch and decode the tokens of
@@ -58,7 +77,9 @@ iteration, which takes far more than a handful of instructions.
   variables and `REPEAT ... REPEAT UNTIL` (integer variables cannot be
   `FOR` loop counters).
 * `sqrt`: NextBASIC computes `INT SQR i` in floating point; LZ80N uses an
-  integer square root. The results are identical.
+  integer square root. The exact sum is 20615 (LZ80N); NextBASIC prints
+  20607, because `SQR` of some perfect squares comes out just below the
+  integer and `INT` rounds it down.
 * `print`: NextBASIC prints to the ULA screen, LZ80N to the tilemap.
   Both write 16 characters at a fixed position 500 times.
 
@@ -77,4 +98,10 @@ iteration, which takes far more than a handful of instructions.
   tilemap instead of one `rt_putc` call per character.
 * Stores of constants / plain variables into array elements no longer go
   through the stack; `plot`/`point` load simple arguments directly.
-* Integer square root skips the zero top byte of 16-bit values.
+* Integer square root skips the zero top byte of 16-bit values; later a
+  separate 16-bit root (bit pairs, 8 rounds).
+* `s = s .. x` appends to `s` itself instead of building the result in a
+  temporary string and copying it back.
+
+The per-operation measurements (`micro.lz80n`) and what was changed for
+them are in `docs/performance-review.md`, section 6.
