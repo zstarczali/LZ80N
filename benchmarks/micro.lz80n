@@ -138,3 +138,13 @@ bench_stop(24)
 bench_start()
 for i = 0, 255 do f = sin(byte(i)) + cos(byte(i)) end
 bench_stop(25)
+-- 27 hline 320x256, full width x 256
+layer2_mode(L2_320)
+bench_start()
+for y = 0, 255 do hline(0, byte(y), 320, 1) end
+bench_stop(27)
+-- 28 hline 640x256, full width x 256
+layer2_mode(L2_640)
+bench_start()
+for y = 0, 255 do hline(0, byte(y), 640, 1) end
+bench_stop(28)

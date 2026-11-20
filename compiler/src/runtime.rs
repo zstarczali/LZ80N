@@ -1328,57 +1328,123 @@ rt_hline320:
 .fits:
     pop de
     pop hl
+; HL = byte column, D = y, BC = bytes (> 0, on the screen), the value in
+; rt_l2colour: one tight loop per 8K page (32 columns)
+rt_l2_hrun:
 .page:
     push hl
+    push bc
     call rt_l2_maphi        ; H = column & 31, L = y
+    pop bc
+    ld a,32
+    sub h
+    ld e,a                  ; columns left in this page
+    ld a,b
+    or a
+    jr nz,.chunk
+    ld a,c
+    cp e
+    jr nc,.chunk
+    ld e,a                  ; the rest of the line is shorter
+.chunk:
+    ld a,c
+    sub e
+    ld c,a
+    jr nc,.nb
+    dec b
+.nb:
     ld a,(rt_l2colour)
-    ld e,a
+    push bc
+    ld b,e
 .px:
-    ld (hl),e
-    dec bc
+    ld (hl),a
+    inc h
+    djnz .px
+    pop bc
+    pop hl
     ld a,b
     or c
-    jr z,.done
-    inc h
-    ld a,h
-    cp 32
-    jr nz,.px
-    pop hl                  ; next page: x = (x | 31) + 1
-    ld a,l
+    ret z
+    ld a,l                  ; the next page: column = (column | 31) + 1
     or 31
     ld l,a
     inc hl
     jr .page
-.done:
-    pop hl
-    ret
 
-; D = y, HL = x, BC = length, A = colour: pixel by pixel (640x256)
+; D = y, HL = x, BC = length, A = colour (640x256): an odd first and last
+; pixel one by one, the byte pairs between them along the columns
 rt_hline_hi:
+    and 15
     ld (rt_l2colour),a
-.l:
+    ld a,b
+    or c
+    ret z
+    push de
+    ex de,hl
+    ld hl,640
+    or a
+    sbc hl,de               ; pixels left on the row
+    jr c,.out
+    jr z,.out
+    or a
+    sbc hl,bc
+    jr nc,.fits
+    add hl,bc
+    ld b,h
+    ld c,l
+.fits:
+    ex de,hl                ; HL = x
+    pop de
+    bit 0,l
+    jr z,.even
+    call .one
+    inc hl
+    dec bc
+.even:
     ld a,b
     or c
     ret z
     push hl
-    push de
-    ld de,(rt_l2wid)
-    or a
-    sbc hl,de
-    pop de
-    pop hl
-    ret nc                  ; past the right edge
     push bc
+    srl b
+    rr c                    ; whole bytes
+    ld a,b
+    or c
+    jr z,.nobytes
+    srl h
+    rr l                    ; byte column
+    ld a,(rt_l2colour)
+    ld e,a
+    add a,a
+    add a,a
+    add a,a
+    add a,a
+    or e
+    ld (rt_l2colour),a      ; both nibbles
+    push de
+    call rt_l2_hrun
+    pop de
+.nobytes:
+    pop bc
+    pop hl
+    bit 0,c
+    ret z
+    add hl,bc               ; the last pixel: x + length - 1
+    dec hl
+.one:
     push hl
+    push bc
     push de
     ld a,(rt_l2colour)
+    and 15
     call rt_plot
     pop de
-    pop hl
     pop bc
-    inc hl
-    dec bc
-    jr .l
+    pop hl
+    ret
+.out:
+    pop de
+    ret
 
 ; A = mode: 0 = 256x192 (6 pages per buffer), 1 = 320x256, 2 = 640x256
 ; (10 pages each). Buffers: bank 8 (shown and drawn into until the first
