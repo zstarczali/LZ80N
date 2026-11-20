@@ -2977,3 +2977,120 @@ fn run_long_add_constant() {
         "65536\n-1\n65535\n2147483647\n4.25\n-5.75\n",
     );
 }
+
+/// The old LZ80N line, for comparing the assembly version pixel by pixel.
+const LINE_REF: &str = r#"
+function line_ref(word x0, byte y0, word x1, byte y1, byte c)
+    sword dx = x1 - x0
+    sword dy = y1 - y0
+    sbyte sx = 1
+    sbyte sy = 1
+    if dx < 0 then
+        dx = -dx
+        sx = -1
+    end
+    if dy < 0 then
+        dy = -dy
+        sy = -1
+    end
+    sword err = dx - dy
+    while true do
+        plot(x0, y0, c)
+        if x0 == x1 and y0 == y1 then break end
+        sword e2 = err + err
+        if e2 > -dy then
+            err -= dy
+            x0 += sx
+        end
+        if e2 < dx then
+            err += dx
+            y0 += sy
+        end
+    end
+end
+"#;
+
+#[test]
+fn run_line_matches_reference() {
+    let src = format!(
+        "{LINE_REF}
+word bad = 0
+function check(word x0, byte y0, word x1, byte y1, word w, byte h)
+    layer2_clear(0)
+    line(x0, y0, x1, y1, 2)
+    line_ref(x0, y0, x1, y1, 1)       -- 2 left: drawn only by line
+    line(x0, y0, x1, y1, 3)           -- 1 left: drawn only by line_ref
+    for y = 0, h do
+        for x = 0, w - 1 do
+            byte p = point(x, byte(y))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+end
+layer2_visible(true)
+check(10, 10, 200, 40, 256, 191)
+check(200, 40, 10, 10, 256, 191)
+check(30, 180, 35, 0, 256, 191)
+check(250, 5, 290, 150, 256, 191)
+check(0, 0, 255, 191, 256, 191)
+check(100, 100, 100, 100, 256, 191)
+check(120, 50, 20, 51, 256, 191)
+layer2_mode(L2_320)
+check(5, 250, 319, 3, 320, 255)
+check(300, 10, 20, 200, 320, 255)
+print(bad)
+"
+    );
+    expect("r_line_ref", &src, "0\n");
+}
+
+#[test]
+fn run_shapes_match_reference() {
+    let reference = include_str!("../tests/fixtures/shapes_ref.lz80n");
+    let src = format!(
+        "{reference}
+word bad = 0
+function count(word w, byte h)
+    for y = 0, h do
+        for x = 0, w - 1 do
+            byte p = point(x, byte(y))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+function tri(sword a, sword b, sword c, sword d, sword e, sword f, word w, byte h)
+    fill_triangle(a, b, c, d, e, f, 2)
+    fill_triangle_ref(a, b, c, d, e, f, 1)
+    fill_triangle(a, b, c, d, e, f, 3)
+    count(w, h)
+end
+function ell(sword x, sword y, byte rx, byte ry, word w, byte h)
+    ellipse(x, y, rx, ry, 2)
+    ellipse_ref(x, y, rx, ry, 1)
+    ellipse(x, y, rx, ry, 3)
+    count(w, h)
+    fill_ellipse(x, y, rx, ry, 2)
+    fill_ellipse_ref(x, y, rx, ry, 1)
+    fill_ellipse(x, y, rx, ry, 3)
+    count(w, h)
+end
+layer2_visible(true)
+tri(10, 10, 200, 60, 50, 180, 256, 191)
+tri(128, 5, 128, 5, 128, 5, 256, 191)
+tri(0, 100, 255, 100, 128, 100, 256, 191)
+tri(-40, -30, 300, 90, 20, 250, 256, 191)
+tri(250, 0, 3, 7, 140, 190, 256, 191)
+tri(5, 5, 6, 180, 7, 90, 256, 191)
+ell(128, 96, 60, 30, 256, 191)
+ell(20, 20, 40, 9, 256, 191)
+ell(200, 150, 3, 70, 256, 191)
+ell(100, 100, 0, 0, 256, 191)
+layer2_mode(L2_320)
+tri(-10, 255, 330, 10, 160, -5, 320, 255)
+ell(300, 200, 90, 80, 320, 255)
+print(bad)
+"
+    );
+    expect("r_shapes_ref", &src, "0\n");
+}
