@@ -18,6 +18,11 @@ Lua-inspired compiled language for the ZX Spectrum Next.
   starts the emulator (CSpect by default arguments `-zxnext -w3`).
 * **Show Generated Assembly**: compiles with `-S` and opens the `.asm`
   beside the source.
+* **Right-click menus**: in an `.lz80n` editor *Build (.nex)*, *Build and
+  Run in Emulator*, *Build without Optimisation (-O0)*, *Build with Code
+  Banking (--bank-all)*, *Show Generated Assembly*, *Check File* and *Reveal
+  .nex in File Explorer*; on an `.lz80n` file in the Explorer *Build*, *Build
+  and Run*, *Show Generated Assembly* and *Reveal .nex*.
 * **Outline / breadcrumbs / Go to Symbol**: functions, classes and structs
   with their fields and methods, constants, assets, interrupts, globals.
 * **Hover** documentation for built-in functions, types and constants,
