@@ -1,0 +1,98 @@
+-- The 1.1.0 LZ80N shape routines, for pixel comparisons in tests.rs
+-- horizontal span x0..x1 on row y, clipped to the screen
+function ref_span(sword x0, sword x1, sword y, byte c)
+    if y < 0 or y >= sword(layer2_height()) then return end
+    if x0 < 0 then x0 = 0 end
+    sword right = sword(layer2_width()) - 1
+    if x1 > right then x1 = right end
+    if x0 > x1 then return end
+    hline(word(x0), byte(y), word(x1 - x0 + 1), c)
+end
+
+
+-- half width of an ellipse_ref dy rows from its centre
+function ref_halfw(byte rx, byte ry, byte dy) -> byte
+    if dy > ry then return 0 end
+    if ry == 0 then return rx end
+    -- Pythagoras in the space of the larger radius, then scale down, so
+    -- the integer square root's rounding is never magnified
+    if rx >= ry then
+        word k = (word(dy) * rx + ry / 2) / ry
+        return sqrt(word(rx) * rx - k * k)
+    end
+    byte h = sqrt(word(ry) * ry - word(dy) * dy)
+    return byte((word(rx) * h + ry / 2) / ry)
+end
+
+function fill_ellipse_ref(sword x, sword y, byte rx, byte ry, byte c)
+    for dy = 0, ry do
+        byte w = ref_halfw(rx, ry, dy)
+        ref_span(x - w, x + w, y + dy, c)
+        if dy ~= 0 then ref_span(x - w, x + w, y - dy, c) end
+    end
+end
+
+function ellipse_ref(sword x, sword y, byte rx, byte ry, byte c)
+    for dy = 0, ry do
+        byte w = ref_halfw(rx, ry, dy)
+        -- connect to the next row: from just outside its half width to ours
+        byte inner = w
+        if dy < ry then inner = min(ref_halfw(rx, ry, dy + 1) + 1, w) end
+        if dy == ry then inner = 0 end
+        ref_span(x + inner, x + w, y + dy, c)
+        ref_span(x - w, x - inner, y + dy, c)
+        if dy ~= 0 then
+            ref_span(x + inner, x + w, y - dy, c)
+            ref_span(x - w, x - inner, y - dy, c)
+        end
+    end
+end
+
+function circle_ref(sword x, sword y, byte r, byte c)
+    ellipse_ref(x, y, r, r, c)
+end
+
+function fill_circle_ref(sword x, sword y, byte r, byte c)
+    fill_ellipse_ref(x, y, r, r, c)
+end
+
+
+-- a + (b - a) * t / n, rounded towards a
+function ref_lerp(sword a, sword b, sword t, sword n) -> sword
+    if n == 0 then return a end
+    sword d = b - a
+    sword m = sword(long(abs(d)) * long(t) / long(n))   -- 1.1.0 used word here (overflowed)
+    if d < 0 then return a - m end
+    return a + m
+end
+
+function fill_triangle_ref(sword x0, sword y0, sword x1, sword y1, sword x2, sword y2, byte c)
+    sword t = 0
+    -- sort the corners by y
+    if y1 < y0 then
+        t = x0  x0 = x1  x1 = t
+        t = y0  y0 = y1  y1 = t
+    end
+    if y2 < y0 then
+        t = x0  x0 = x2  x2 = t
+        t = y0  y0 = y2  y2 = t
+    end
+    if y2 < y1 then
+        t = x1  x1 = x2  x2 = t
+        t = y1  y1 = y2  y2 = t
+    end
+    sword ya = max(y0, 0)
+    sword yb = min(y2, sword(layer2_height()) - 1)
+    sword y = ya
+    while y <= yb do
+        sword xa = ref_lerp(x0, x2, y - y0, y2 - y0)
+        sword xb = 0
+        if y < y1 then
+            xb = ref_lerp(x0, x1, y - y0, y1 - y0)
+        else
+            xb = ref_lerp(x1, x2, y - y1, y2 - y1)
+        end
+        if xa <= xb then ref_span(xa, xb, y, c) else ref_span(xb, xa, y, c) end
+        y += 1
+    end
+end

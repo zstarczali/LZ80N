@@ -10,6 +10,7 @@ pub fn optimize(code: &str) -> String {
         let before = lines.len();
         let mut changed = false;
         lines = pass(lines, &mut changed);
+        lines = thread_jumps(lines, &mut changed);
         lines = drop_unused_labels(lines, &mut changed);
         if !changed && lines.len() == before {
             break;
@@ -47,6 +48,86 @@ fn drop_unused_labels(lines: Vec<String>, changed: &mut bool) -> Vec<String> {
         *changed = true;
     }
     out
+}
+
+/// A jump to a compiler label whose first instruction is an unconditional
+/// `jp X` goes straight to X.
+fn thread_jumps(mut lines: Vec<String>, changed: &mut bool) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut first: HashMap<String, String> = HashMap::new();
+    let mut in_asm = false;
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim();
+        if t == "; asm begin" {
+            in_asm = true;
+        } else if t == "; asm end" {
+            in_asm = false;
+        }
+        if in_asm || !is_label(l) {
+            continue;
+        }
+        let name = l.trim_end().trim_end_matches(':');
+        if !name.starts_with("__L") {
+            continue;
+        }
+        let next = lines[i + 1..].iter().find(|n| !is_label(n) && !is_comment(n));
+        if let Some(target) = next.and_then(|n| ins(n)).and_then(|n| n.strip_prefix("jp ")) {
+            if target.starts_with("__L") && !target.contains(',') && target != name {
+                first.insert(name.to_string(), target.to_string());
+            }
+        }
+    }
+    let resolve = |t: &str| {
+        let mut t = t.to_string();
+        for _ in 0..8 {
+            match first.get(&t) {
+                Some(n) => t = n.clone(),
+                None => break,
+            }
+        }
+        t
+    };
+    in_asm = false;
+    for l in lines.iter_mut() {
+        let t = l.trim();
+        if t == "; asm begin" {
+            in_asm = true;
+        } else if t == "; asm end" {
+            in_asm = false;
+        }
+        let Some(cur) = (if in_asm { None } else { ins(l) }) else { continue };
+        let Some(rest) = cur.strip_prefix("jp ") else { continue };
+        let (cc, target) = match rest.split_once(',') {
+            Some((c, t)) => (Some(c), t),
+            None => (None, rest),
+        };
+        if !first.contains_key(target) {
+            continue;
+        }
+        let new = resolve(target);
+        if new != target {
+            *l = match cc {
+                Some(c) => format!("    jp {c},{new}"),
+                None => format!("    jp {new}"),
+            };
+            *changed = true;
+        }
+    }
+    lines
+}
+
+fn invert(cc: &str) -> Option<&'static str> {
+    Some(match cc {
+        "z" => "nz",
+        "nz" => "z",
+        "c" => "nc",
+        "nc" => "c",
+        "p" => "m",
+        "m" => "p",
+        "pe" => "po",
+        "po" => "pe",
+        _ => return None,
+    })
 }
 
 fn ins(l: &str) -> Option<&str> {
@@ -125,6 +206,23 @@ fn pass(lines: Vec<String>, changed: &mut bool) -> Vec<String> {
                 continue;
             }
         }
+        // jp cc,L1 ; jp L2 ; L1:  ->  jp !cc,L2 ; L1:
+        if let (Some((cc, l1)), Some(n)) = (cur.strip_prefix("jp ").and_then(|r| r.split_once(',')), next_ins) {
+            if let (Some(inv), Some(l2)) = (invert(cc), n.strip_prefix("jp ")) {
+                let mut k = j + 1;
+                let mut hit = false;
+                while k < lines.len() && (is_label(&lines[k]) || is_comment(&lines[k])) {
+                    hit |= lines[k].trim_end() == format!("{l1}:");
+                    k += 1;
+                }
+                if hit && !l2.contains(',') && !l2.starts_with('(') {
+                    out.push(format!("    jp {inv},{l2}"));
+                    *changed = true;
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
         // ld (X),a ; ld a,(X)  /  ld (X),hl ; ld hl,(X)  -> drop the reload
         if let (Some(dst), Some(n)) = (cur.strip_prefix("ld ("), next_ins) {
             for (suffix, reload) in [("),a", "ld a,("), ("),hl", "ld hl,(")] {
@@ -190,6 +288,22 @@ mod tests {
     fn rules() {
         let src = "    ld (g_x),a\n    ; c\n    ld a,(g_x)\n    jp __L1\n    xor a\n__L1:\n    add a,1\n    ret\n    ret\n";
         assert_eq!(optimize(src), "    ld (g_x),a\n    ; c\n    inc a\n    ret\n");
+    }
+
+    #[test]
+    fn jumps() {
+        let src = "    jp nz,__L1
+    jp __L2
+__L1:
+    inc a
+__L2:
+    jp __L3
+__L4:
+    jp z,__L2
+__L3:
+    ret
+";
+        assert_eq!(optimize(src), "    jp z,__L3\n    inc a\n__L3:\n    ret\n");
     }
 
     #[test]

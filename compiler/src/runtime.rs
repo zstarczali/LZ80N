@@ -795,6 +795,28 @@ rt_print_fixed:
     add a,'0'
     jp rt_emit
 
+; D = floor(sqrt(HL)), 16-bit value (bit pairs, after M. Bazelides)
+rt_isqrt16:
+    ld de,$0040             ; $40 appends binary 01 to D
+    ld a,l
+    ld l,h
+    ld h,d
+    or a
+    ld b,8
+.lp:
+    sbc hl,de
+    jr nc,.keep
+    add hl,de
+.keep:
+    ccf
+    rl d
+    add a,a
+    adc hl,hl
+    add a,a
+    adc hl,hl
+    djnz .lp
+    ret
+
 ; DE = floor(sqrt(A:H:L)) (24-bit value, bit-pair method)
 rt_isqrt24:
     ld c,12                 ; bit pairs
@@ -1306,57 +1328,123 @@ rt_hline320:
 .fits:
     pop de
     pop hl
+; HL = byte column, D = y, BC = bytes (> 0, on the screen), the value in
+; rt_l2colour: one tight loop per 8K page (32 columns)
+rt_l2_hrun:
 .page:
     push hl
+    push bc
     call rt_l2_maphi        ; H = column & 31, L = y
+    pop bc
+    ld a,32
+    sub h
+    ld e,a                  ; columns left in this page
+    ld a,b
+    or a
+    jr nz,.chunk
+    ld a,c
+    cp e
+    jr nc,.chunk
+    ld e,a                  ; the rest of the line is shorter
+.chunk:
+    ld a,c
+    sub e
+    ld c,a
+    jr nc,.nb
+    dec b
+.nb:
     ld a,(rt_l2colour)
-    ld e,a
+    push bc
+    ld b,e
 .px:
-    ld (hl),e
-    dec bc
+    ld (hl),a
+    inc h
+    djnz .px
+    pop bc
+    pop hl
     ld a,b
     or c
-    jr z,.done
-    inc h
-    ld a,h
-    cp 32
-    jr nz,.px
-    pop hl                  ; next page: x = (x | 31) + 1
-    ld a,l
+    ret z
+    ld a,l                  ; the next page: column = (column | 31) + 1
     or 31
     ld l,a
     inc hl
     jr .page
-.done:
-    pop hl
-    ret
 
-; D = y, HL = x, BC = length, A = colour: pixel by pixel (640x256)
+; D = y, HL = x, BC = length, A = colour (640x256): an odd first and last
+; pixel one by one, the byte pairs between them along the columns
 rt_hline_hi:
+    and 15
     ld (rt_l2colour),a
-.l:
+    ld a,b
+    or c
+    ret z
+    push de
+    ex de,hl
+    ld hl,640
+    or a
+    sbc hl,de               ; pixels left on the row
+    jr c,.out
+    jr z,.out
+    or a
+    sbc hl,bc
+    jr nc,.fits
+    add hl,bc
+    ld b,h
+    ld c,l
+.fits:
+    ex de,hl                ; HL = x
+    pop de
+    bit 0,l
+    jr z,.even
+    call .one
+    inc hl
+    dec bc
+.even:
     ld a,b
     or c
     ret z
     push hl
-    push de
-    ld de,(rt_l2wid)
-    or a
-    sbc hl,de
-    pop de
-    pop hl
-    ret nc                  ; past the right edge
     push bc
+    srl b
+    rr c                    ; whole bytes
+    ld a,b
+    or c
+    jr z,.nobytes
+    srl h
+    rr l                    ; byte column
+    ld a,(rt_l2colour)
+    ld e,a
+    add a,a
+    add a,a
+    add a,a
+    add a,a
+    or e
+    ld (rt_l2colour),a      ; both nibbles
+    push de
+    call rt_l2_hrun
+    pop de
+.nobytes:
+    pop bc
+    pop hl
+    bit 0,c
+    ret z
+    add hl,bc               ; the last pixel: x + length - 1
+    dec hl
+.one:
     push hl
+    push bc
     push de
     ld a,(rt_l2colour)
+    and 15
     call rt_plot
     pop de
-    pop hl
     pop bc
-    inc hl
-    dec bc
-    jr .l
+    pop hl
+    ret
+.out:
+    pop de
+    ret
 
 ; A = mode: 0 = 256x192 (6 pages per buffer), 1 = 320x256, 2 = 640x256
 ; (10 pages each). Buffers: bank 8 (shown and drawn into until the first
@@ -1476,13 +1564,19 @@ rt_hline256:
     ld b,h
     ld c,l
 .fits:
-    pop af
-    push bc
-    call rt_plot_de
-    pop bc
     ld a,d
     cp 192
-    ret nc
+    jr nc,.none
+    push bc
+    call rt_l2_map          ; HL = address (a row never crosses an 8K page)
+    pop bc
+    pop af
+    ex de,hl
+    ld hl,-32
+    add hl,bc
+    jp c,rt_dma_fill        ; 32 pixels or more: the DMA fills them
+    ex de,hl
+    ld (hl),a
     dec bc
     ld a,b
     or c
@@ -1490,8 +1584,82 @@ rt_hline256:
     ld d,h
     ld e,l
     inc de
-    ldir                    ; a row never crosses an 8K page
+    ldir
     ret
+.none:
+    pop af
+    ret
+
+; D = y, HL = x, BC = length, A = colour: vertical line, clipped
+rt_vline:
+    push af
+    ld a,b
+    or c
+    jr z,.none
+    ld a,(rt_l2hmax)
+    sub d
+    jr c,.none              ; below the screen
+    ld e,a                  ; rows available - 1
+    dec bc
+    ld a,b
+    or a
+    jr nz,.clip
+    ld a,c
+    cp e
+    jr c,.ok
+.clip:
+    ld c,e
+.ok:
+    ld b,c
+    inc b                   ; B = rows (0 = 256)
+    ld a,(rt_l2mode)
+    or a
+    jr z,.m256
+    dec a
+    jr z,.m320
+    pop af                  ; 640x256: pixel by pixel
+.p640:
+    push af
+    push bc
+    push de
+    push hl
+    call rt_plot
+    pop hl
+    pop de
+    pop bc
+    pop af
+    inc d
+    djnz .p640
+    ret
+.m320:
+    call rt_l2_x320
+    jr nc,.none
+    call rt_l2_maphi        ; a column is one page, y = the low byte
+    pop af
+.l320:
+    ld (hl),a
+    inc l
+    djnz .l320
+    ret
+.m256:
+    ld a,h
+    or a
+    jr nz,.none
+    ld e,l
+    pop af
+    ld c,a
+    call rt_l2_map
+.l256:
+    ld (hl),c
+    inc d
+    dec b
+    ret z
+    inc h
+    ld a,h
+    cp 32
+    jr c,.l256
+    call rt_l2_map          ; the next 8K page
+    jr .l256
 .none:
     pop af
     ret
@@ -1679,23 +1847,38 @@ rt_print_s16:
     call rt_neghl
 ; HL = unsigned 16-bit, printed in decimal
 rt_print_u16:
-    ld a,$FF
-    push af                 ; sentinel
-.div:
-    ld de,10
-    call rt_divu16
-    ld a,e
+    ld e,0                  ; 1 once a digit has been printed
+    ld bc,-10000
+    call .digit
+    ld bc,-1000
+    call .digit
+    ld bc,-100
+    call .digit
+    ld bc,-10
+    call .digit
+    ld a,l
     add a,'0'
-    push af
-    ld a,h
-    or l
-    jr nz,.div
-.out:
-    pop af
-    cp $FF
-    ret z
+    jp rt_emit
+; one decimal digit by repeated subtraction (BC = -power of ten)
+.digit:
+    ld a,'0'-1
+.sub:
+    inc a
+    add hl,bc
+    jr c,.sub
+    sbc hl,bc               ; one subtraction too many (carry is clear)
+    cp '0'
+    jr nz,.emit
+    bit 0,e
+    ret z                   ; no leading zeros
+.emit:
+    ld e,1
+    push de
+    push hl
     call rt_emit
-    jr .out
+    pop hl
+    pop de
+    ret
 
 rt_s_true:  db "true",0
 rt_s_false: db "false",0

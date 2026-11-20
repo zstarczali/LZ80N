@@ -1558,7 +1558,10 @@ impl Gen {
         }
         irqs.sort();
         for (_, _, key) in irqs {
-            let mut shared: Vec<_> = reach(&key).intersection(&main).cloned().collect();
+            // the handler itself counts too (`sound_tick()` from the main program)
+            let mut own = reach(&key);
+            own.insert(key.clone());
+            let mut shared: Vec<_> = own.intersection(&main).cloned().collect();
             shared.sort();
             if let Some(f) = shared.first() {
                 let pos = self.calls.get(&key).map(|c| c.0).unwrap_or_default();
@@ -1587,7 +1590,8 @@ impl Gen {
         let mut isr = String::from("__isr:\n    push af\n    push bc\n    push de\n    push hl\n");
         // 32-bit arithmetic and recursive calls hold values in the shadow
         // registers: a handler using them must not destroy them
-        let shadow = self.uses_long || self.uses_recursion;
+        // (the built-in drivers never touch them: only user handlers count)
+        let shadow = (self.uses_long || self.uses_recursion) && !self.irqs.is_empty();
         if shadow {
             isr.push_str("    exx\n    push bc\n    push de\n    push hl\n    exx\n    ex af,af'\n    push af\n    ex af,af'\n");
         }
@@ -1881,15 +1885,23 @@ impl Gen {
             }
             StmtKind::While { cond, body } => {
                 self.comment(s.pos, "while");
+                // the test at the bottom: one jump per iteration
                 let top = self.new_label();
+                let test = self.new_label();
                 let exit = self.new_label();
+                if self.natural(cond)? != Some(Ty::Bool) {
+                    return Err(Diag::new(cond.pos, "condition must be `bool` (use a comparison, e.g. `x ~= 0`)"));
+                }
+                if !matches!(cond.kind, ExprKind::Bool(true)) {
+                    self.e(&format!("jp {test}"));
+                }
                 self.label(&top);
-                self.branch_false(cond, &exit)?;
                 self.loop_exits.push(exit.clone());
                 let r = self.block(body);
                 self.loop_exits.pop();
                 r?;
-                self.e(&format!("jp {top}"));
+                self.label(&test);
+                self.branch(cond, &top, true)?;
                 self.label(&exit);
                 Ok(())
             }
@@ -2229,9 +2241,58 @@ impl Gen {
         }
     }
 
+    /// `byte(w)` / `byte(w >> 8)` of a 16-bit variable, element or field:
+    /// load just the byte wanted into A. false: not this form.
+    fn load_word_byte(&mut self, a: &Expr) -> R<bool> {
+        let (src, high) = match &a.kind {
+            ExprKind::Binary(BinOp::Shr, x, n) if self.const_eval(n) == Some(8) => (&**x, true),
+            _ => (a, false),
+        };
+        if !matches!(self.natural(src)?, Some(Ty::Word | Ty::SWord)) {
+            return Ok(false);
+        }
+        let storage = match &src.kind {
+            ExprKind::Name(_) => self.static_addr(src)?.is_some(),
+            ExprKind::Field(..) | ExprKind::Index(..) => {
+                !(Self::is_hw(src, "memory") || Self::is_hw(src, "nextreg") || Self::is_hw(src, "port")) && self.far_root(src).is_none()
+            }
+            _ => false,
+        };
+        if !storage {
+            return Ok(false);
+        }
+        match self.place(src)? {
+            Place::Static(addr) => self.e(&format!("ld a,({addr}{})", if high { "+1" } else { "" })),
+            Place::Dyn => {
+                if high {
+                    self.e("inc hl");
+                }
+                self.e("ld a,(hl)");
+            }
+        }
+        Ok(true)
+    }
+
+    /// A byte value that loads into A without touching other registers:
+    /// `(label)` of a static byte variable or a constant.
+    fn simple_byte(&mut self, i: &Expr) -> R<Option<String>> {
+        if self.natural(i)? != Some(Ty::Byte) {
+            return Ok(None);
+        }
+        if let Some(v) = self.const_eval(i) {
+            return Ok(Some((v & 0xFF).to_string()));
+        }
+        if let ExprKind::Name(_) = &i.kind {
+            if let Some(a) = self.static_addr(i)? {
+                return Ok(Some(format!("({a})")));
+            }
+        }
+        Ok(None)
+    }
+
     /// HL = index expression * element size.
     fn scaled_index(&mut self, i: &Expr, esz: u32) -> R<()> {
-        if !esz.is_power_of_two() && esz < 256 && self.natural(i)? == Some(Ty::Byte) {
+        if (!esz.is_power_of_two() || esz >= 4) && esz < 256 && self.natural(i)? == Some(Ty::Byte) {
             // Z80N: one MUL D,E for byte index * small element size
             self.gen_expr(i, Ty::Byte)?;
             self.e("ld d,a");
@@ -2274,8 +2335,32 @@ impl Gen {
                     self.place_hl(b)?;
                     self.add_hl_const(k * esz as i64);
                 } else if let Some(bs) = self.static_addr(b)? {
-                    self.scaled_index(i, esz)?;
-                    self.e(&format!("add hl,{bs}"));
+                    if esz == 1 && self.natural(i)? == Some(Ty::Byte) {
+                        // Z80N ADD HL,A
+                        self.gen_expr(i, Ty::Byte)?;
+                        self.e(&format!("ld hl,{bs}"));
+                        self.e("add hl,a");
+                    } else {
+                        self.scaled_index(i, esz)?;
+                        self.e(&format!("add hl,{bs}"));
+                    }
+                } else if let Some(iv) = self.simple_byte(i)? {
+                    // a byte variable or constant as the index: base first
+                    self.place_hl(b)?;
+                    self.e(&format!("ld a,{iv}"));
+                    if esz == 1 {
+                        self.e("add hl,a");
+                    } else if esz < 256 {
+                        self.e("ld d,a");
+                        self.e(&format!("ld e,{esz}"));
+                        self.e("mul d,e");
+                        self.e("add hl,de");
+                    } else {
+                        self.e("push hl");
+                        self.scaled_index(i, esz)?;
+                        self.e("pop de");
+                        self.e("add hl,de");
+                    }
                 } else {
                     self.scaled_index(i, esz)?;
                     self.e("push hl");
@@ -2421,6 +2506,9 @@ impl Gen {
                     self.store(&a, ty);
                     return Ok(());
                 }
+                if self.update_in_place(target, value, ty)? {
+                    return Ok(());
+                }
                 // constant or plain variable of the same type: address first
                 let cv = if matches!(ty, Ty::Byte | Ty::SByte | Ty::Word | Ty::SWord) { self.const_eval(value).filter(|&v| ty.literal_fits(v)) } else { None };
                 let simple = match &value.kind {
@@ -2486,6 +2574,19 @@ impl Gen {
                 }
             }
             Lay::Str => {
+                // `s = s .. a .. b`: append to s itself, no temporary copy
+                // (only if nothing on the right can call a function, which
+                // could change s first)
+                let mut parts = Vec::new();
+                concat_parts(value, &mut parts);
+                if parts.len() > 1 && same_expr(parts[0], target) && parts[1..].iter().all(|p| no_calls(p)) {
+                    if let Some(a) = self.static_addr(target)? {
+                        for p in &parts[1..] {
+                            self.gen_append(&a, p)?;
+                        }
+                        return Ok(());
+                    }
+                }
                 self.gen_str(value)?;
                 if let Some(a) = self.static_addr(target)? {
                     self.e(&format!("ld de,{a}"));
@@ -2500,6 +2601,234 @@ impl Gen {
             Lay::Struct(id) => self.struct_into(target, id, value, false)?,
         }
         Ok(())
+    }
+
+    /// `t += x` (also -= &= |= ~=) on an element or field: its address is
+    /// worked out once and the value changed in memory. false: not this form.
+    fn update_in_place(&mut self, target: &Expr, value: &Expr, ty: Ty) -> R<bool> {
+        // t = -t
+        if let ExprKind::Unary(UnOp::Neg, x) = &value.kind {
+            if !same_expr(x, target) || !matches!(ty, Ty::SByte | Ty::SWord | Ty::Fixed | Ty::Byte | Ty::Word) {
+                return Ok(false);
+            }
+            self.place(target)?;
+            if ty.size() == 1 {
+                self.e("ld a,(hl)");
+                self.e("neg");
+                self.e("ld (hl),a");
+            } else {
+                self.e("xor a");
+                self.e("sub (hl)");
+                self.e("ld (hl),a");
+                self.e("inc hl");
+                self.e("ld a,0");
+                self.e("sbc a,(hl)");
+                self.e("ld (hl),a");
+            }
+            return Ok(true);
+        }
+        let ExprKind::Binary(op, l, r) = &value.kind else { return Ok(false) };
+        if self.update_field_by_field(target, *op, l, r, ty)? {
+            return Ok(true);
+        }
+        let op = *op;
+        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor) || !same_expr(l, target) {
+            return Ok(false);
+        }
+        if !matches!(ty, Ty::Byte | Ty::SByte | Ty::Word | Ty::SWord | Ty::Fixed) {
+            return Ok(false);
+        }
+        let rt = self.natural(r)?;
+        let int = ty != Ty::Fixed;
+        // a constant (integers), or a value of the same size after widening
+        let k = if int { self.const_eval(r).filter(|&v| ty.literal_fits(v) || (op == BinOp::Sub && ty.literal_fits(-v))) } else { None };
+        let rty = match (k, rt) {
+            (Some(_), _) => ty,
+            (None, Some(t)) => {
+                let j = join(Some(ty), Some(t)).unwrap();
+                let fixed_ok = (ty == Ty::Fixed) == (j == Ty::Fixed);
+                if j.size() != ty.size() || j == Ty::Bool || !fixed_ok || (!int && !matches!(op, BinOp::Add | BinOp::Sub)) {
+                    return Ok(false);
+                }
+                j
+            }
+            (None, None) => return Ok(false),
+        };
+        let mn = match op {
+            BinOp::Add => "add a,",
+            BinOp::Sub => "sub ",
+            BinOp::And => "and ",
+            BinOp::Or => "or ",
+            _ => "xor ",
+        };
+        if ty.size() == 1 {
+            match k {
+                Some(v) => {
+                    self.place(target)?;
+                    let v = v & 0xFF;
+                    if (op == BinOp::Add && v == 1) || (op == BinOp::Sub && v == 255) {
+                        self.e("inc (hl)");
+                    } else if (op == BinOp::Sub && v == 1) || (op == BinOp::Add && v == 255) {
+                        self.e("dec (hl)");
+                    } else {
+                        self.e("ld a,(hl)");
+                        self.e(&format!("{mn}{v}"));
+                        self.e("ld (hl),a");
+                    }
+                }
+                None => {
+                    self.gen_expr(r, rty)?;
+                    self.e("push af");
+                    self.place(target)?;
+                    self.e("pop bc");
+                    self.e("ld a,(hl)");
+                    self.e(&format!("{mn}b"));
+                    self.e("ld (hl),a");
+                }
+            }
+            return Ok(true);
+        }
+        // 16 bits
+        if let Some(v) = k {
+            let v = if op == BinOp::Sub { -v } else { v } & 0xFFFF;
+            self.place(target)?;
+            match op {
+                BinOp::Add | BinOp::Sub if v == 1 => {
+                    let done = self.new_label();
+                    self.e("inc (hl)");
+                    self.e(&format!("jr nz,{done}"));
+                    self.e("inc hl");
+                    self.e("inc (hl)");
+                    self.label(&done);
+                }
+                BinOp::Add | BinOp::Sub => {
+                    self.e("ld e,(hl)");
+                    self.e("inc hl");
+                    self.e("ld d,(hl)");
+                    self.e("ex de,hl");
+                    self.e(&format!("ld bc,{v}"));
+                    self.e("add hl,bc");
+                    self.e("ex de,hl");
+                    self.e("ld (hl),d");
+                    self.e("dec hl");
+                    self.e("ld (hl),e");
+                }
+                _ => {
+                    for (k, part) in [v & 0xFF, v >> 8].into_iter().enumerate() {
+                        if k == 1 {
+                            self.e("inc hl");
+                        }
+                        self.e("ld a,(hl)");
+                        self.e(&format!("{mn}{part}"));
+                        self.e("ld (hl),a");
+                    }
+                }
+            }
+            return Ok(true);
+        }
+        self.gen_expr(r, rty)?;
+        self.e("push hl");
+        self.place(target)?;
+        self.e("pop de");
+        match op {
+            BinOp::Add => {
+                self.e("ld c,(hl)");
+                self.e("inc hl");
+                self.e("ld b,(hl)");
+                self.e("ex de,hl");
+                self.e("add hl,bc");
+                self.e("ex de,hl");
+                self.e("ld (hl),d");
+                self.e("dec hl");
+                self.e("ld (hl),e");
+            }
+            BinOp::Sub => {
+                self.e("ld c,(hl)");
+                self.e("inc hl");
+                self.e("ld b,(hl)");
+                self.e("push hl");
+                self.e("ld h,b");
+                self.e("ld l,c");
+                self.e("or a");
+                self.e("sbc hl,de");
+                self.e("ex de,hl");
+                self.e("pop hl");
+                self.e("ld (hl),d");
+                self.e("dec hl");
+                self.e("ld (hl),e");
+            }
+            _ => {
+                for reg in ["e", "d"] {
+                    if reg == "d" {
+                        self.e("inc hl");
+                    }
+                    self.e("ld a,(hl)");
+                    self.e(&format!("{mn}{reg}"));
+                    self.e("ld (hl),a");
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// `o.x += o.dx` (also -= &= |= and xor): both fields of the same
+    /// element, whose address is worked out once. false: not this form.
+    fn update_field_by_field(&mut self, target: &Expr, op: BinOp, l: &Expr, r: &Expr, ty: Ty) -> R<bool> {
+        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor) || !same_expr(l, target) {
+            return Ok(false);
+        }
+        let (ExprKind::Field(tb, tf), ExprKind::Field(rb, rf)) = (&target.kind, &r.kind) else { return Ok(false) };
+        if !same_expr(tb, rb) || self.static_addr(tb)?.is_some() || self.far_root(target).is_some() {
+            return Ok(false);
+        }
+        let Some(rt) = self.natural(r)? else { return Ok(false) };
+        let int = |t: Ty| matches!(t, Ty::Byte | Ty::SByte | Ty::Word | Ty::SWord);
+        let ok = (int(ty) && int(rt) && rt.size() <= ty.size()) || (ty == Ty::Fixed && rt == Ty::Fixed && matches!(op, BinOp::Add | BinOp::Sub));
+        if !ok {
+            return Ok(false);
+        }
+        let (_, tfd) = self.field(tb, tf, target.pos)?;
+        let (_, rfd) = self.field(rb, rf, r.pos)?;
+        self.place_hl(tb)?;
+        // the other field into C (B: high byte, sign-extended for sbyte)
+        self.e("ld d,h");
+        self.e("ld e,l");
+        if rfd.offset > 0 {
+            self.e(&format!("add de,{}", rfd.offset));
+        }
+        self.e("ld a,(de)");
+        self.e("ld c,a");
+        if ty.size() == 2 {
+            if rt.size() == 2 {
+                self.e("inc de");
+                self.e("ld a,(de)");
+                self.e("ld b,a");
+            } else if rt.signed() {
+                self.e("rla");
+                self.e("sbc a,a");
+                self.e("ld b,a");
+            } else {
+                self.e("ld b,0");
+            }
+        }
+        self.add_hl_const(tfd.offset as i64);
+        let (lo, hi) = match op {
+            BinOp::Add => ("add a,c", "adc a,b"),
+            BinOp::Sub => ("sub c", "sbc a,b"),
+            BinOp::And => ("and c", "and b"),
+            BinOp::Or => ("or c", "or b"),
+            _ => ("xor c", "xor b"),
+        };
+        self.e("ld a,(hl)");
+        self.e(lo);
+        self.e("ld (hl),a");
+        if ty.size() == 2 {
+            self.e("inc hl");
+            self.e("ld a,(hl)");
+            self.e(hi);
+            self.e("ld (hl),a");
+        }
+        Ok(true)
     }
 
     fn nextreg_write(&mut self, reg: &Expr, value: &Expr) -> R<()> {
@@ -3418,6 +3747,15 @@ impl Gen {
         Ok(())
     }
 
+    /// A constant right operand of 32-bit arithmetic in `want`'s raw form.
+    fn wide_const(&self, r: &Expr, want: Ty) -> Option<i64> {
+        if want == Ty::Long {
+            self.const_eval(r).filter(|&v| Ty::Long.literal_fits(v))
+        } else {
+            self.fixed16_const(r)
+        }
+    }
+
     fn gen_wide_binary(&mut self, op: BinOp, l: &Expr, r: &Expr, want: Ty, pos: Pos) -> R<()> {
         let zero = |s: &Self| s.const_eval(r) == Some(0) || s.fixed16_const(r) == Some(0);
         if matches!(op, BinOp::Div | BinOp::Mod) && zero(self) {
@@ -3468,6 +3806,26 @@ impl Gen {
                     let (f, i) = if lf { (l, r) } else { (r, l) };
                     self.gen_wide_operands(f, i, Ty::Fixed16, Ty::Long)?;
                     self.call32(if op == BinOp::Mul { "rt_mul32" } else { "rt_divs32" });
+                }
+            }
+            BinOp::Add | BinOp::Sub if self.wide_const(r, want).is_some() => {
+                // DE:HL += constant, inline
+                let v = self.wide_const(r, want).unwrap();
+                let v = if op == BinOp::Sub { v.wrapping_neg() } else { v } & 0xFFFF_FFFF;
+                self.uses_long = true;
+                self.gen_expr(l, want)?;
+                if v & 0xFFFF != 0 {
+                    self.e(&format!("ld bc,{}", v & 0xFFFF));
+                    self.e("add hl,bc");
+                    self.e("ex de,hl");
+                    self.e(&format!("ld bc,{}", v >> 16));
+                    self.e("adc hl,bc");
+                    self.e("ex de,hl");
+                } else if v != 0 {
+                    self.e("ex de,hl");
+                    self.e(&format!("ld bc,{}", v >> 16));
+                    self.e("add hl,bc");
+                    self.e("ex de,hl");
                 }
             }
             _ => {
@@ -4089,40 +4447,139 @@ impl Gen {
         if self.natural(cond)? != Some(Ty::Bool) {
             return Err(Diag::new(cond.pos, "condition must be `bool` (use a comparison, e.g. `x ~= 0`)"));
         }
+        self.branch(cond, target, false)
+    }
+
+    /// Jump to `target` when `cond` evaluates to `when`; fall through
+    /// otherwise. `and` / `or` / `not` become jumps (short-circuit).
+    fn branch(&mut self, cond: &Expr, target: &str, when: bool) -> R<()> {
         match &cond.kind {
-            ExprKind::Bool(true) => {}
-            ExprKind::Bool(false) => self.e(&format!("jp {target}")),
-            ExprKind::Binary(BinOp::LAnd, l, r) => {
-                self.branch_false(l, target)?;
-                self.branch_false(r, target)?;
+            ExprKind::Bool(b) => {
+                if *b == when {
+                    self.e(&format!("jp {target}"));
+                }
+            }
+            ExprKind::Unary(UnOp::Not, x) => self.branch(x, target, !when)?,
+            ExprKind::Binary(op @ (BinOp::LAnd | BinOp::LOr), l, r) => {
+                // and/false, or/true: either side decides alone
+                if (*op == BinOp::LAnd) != when {
+                    self.branch(l, target, when)?;
+                    self.branch(r, target, when)?;
+                } else {
+                    let skip = self.new_label();
+                    self.branch(l, &skip, !when)?;
+                    self.branch(r, target, when)?;
+                    self.label(&skip);
+                }
             }
             ExprKind::Binary(op, l, r) if op.is_compare() => {
-                self.gen_compare_flags(l, r, cond.pos)?;
+                let op = if when { *op } else { negate_compare(*op) };
+                // jump when `l op r` holds
+                let (op, r) = self.simplify_compare(op, l, r)?;
+                if self.compare_with_zero(op, l, &r, target)? {
+                    return Ok(());
+                }
+                self.gen_compare_flags(l, &r, cond.pos)?;
                 match op {
-                    BinOp::Eq => self.e(&format!("jp nz,{target}")),
-                    BinOp::Ne => self.e(&format!("jp z,{target}")),
-                    BinOp::Lt => self.e(&format!("jp nc,{target}")),
-                    BinOp::Ge => self.e(&format!("jp c,{target}")),
-                    BinOp::Gt => {
+                    BinOp::Eq => self.e(&format!("jp z,{target}")),
+                    BinOp::Ne => self.e(&format!("jp nz,{target}")),
+                    BinOp::Lt => self.e(&format!("jp c,{target}")),
+                    BinOp::Ge => self.e(&format!("jp nc,{target}")),
+                    BinOp::Le => {
                         self.e(&format!("jp c,{target}"));
                         self.e(&format!("jp z,{target}"));
                     }
                     _ => {
-                        // Le: false iff nc and nz
-                        let ok = self.new_label();
-                        self.e(&format!("jp c,{ok}"));
+                        // Gt: neither less nor equal
+                        let skip = self.new_label();
+                        self.e(&format!("jp c,{skip}"));
                         self.e(&format!("jp nz,{target}"));
-                        self.label(&ok);
+                        self.label(&skip);
                     }
                 }
             }
             _ => {
                 self.gen_bool(cond)?;
                 self.e("or a");
-                self.e(&format!("jp z,{target}"));
+                self.e(&format!("jp {},{target}", if when { "nz" } else { "z" }));
             }
         }
         Ok(())
+    }
+
+    /// The integer type a comparison of `l` with the constant `v` is made in
+    /// (None: not a plain byte / word comparison).
+    fn int_compare_ty(&mut self, l: &Expr, r: &Expr) -> R<Option<(Ty, i64)>> {
+        if !matches!(r.kind, ExprKind::Int(_)) && !matches!(&r.kind, ExprKind::Name(_) | ExprKind::Unary(UnOp::Neg, _)) {
+            return Ok(None);
+        }
+        let Some(v) = self.const_eval(r) else { return Ok(None) };
+        if self.is_str(l) || self.is_str(r) || self.const_eval(l).is_some() {
+            return Ok(None);
+        }
+        let ty = match join(self.natural(l)?, self.natural(r)?) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let (min, max) = match ty {
+            Ty::Byte => (0, 255),
+            Ty::SByte => (-128, 127),
+            Ty::Word => (0, 65535),
+            Ty::SWord => (-32768, 32767),
+            _ => return Ok(None),
+        };
+        if self.natural(r)? == Some(Ty::Fixed) || v < min || v > max {
+            return Ok(None);
+        }
+        Ok(Some((ty, v)))
+    }
+
+    /// `x > c` -> `x >= c + 1` and `x <= c` -> `x < c + 1` (one jump instead
+    /// of two) when c + 1 still fits the comparison's type.
+    fn simplify_compare(&mut self, op: BinOp, l: &Expr, r: &Expr) -> R<(BinOp, Expr)> {
+        if matches!(op, BinOp::Gt | BinOp::Le) {
+            if let Some((ty, v)) = self.int_compare_ty(l, r)? {
+                let max = match ty {
+                    Ty::Byte => 255,
+                    Ty::SByte => 127,
+                    Ty::Word => 65535,
+                    _ => 32767,
+                };
+                if v < max {
+                    let op = if op == BinOp::Gt { BinOp::Ge } else { BinOp::Lt };
+                    return Ok((op, Expr { kind: ExprKind::Int(v + 1), pos: r.pos }));
+                }
+            }
+        }
+        Ok((op, r.clone()))
+    }
+
+    /// Comparisons with 0 that need no subtraction: the sign bit of signed
+    /// values, `ld a,h / or l` for words. Emits the jump; false: not handled.
+    fn compare_with_zero(&mut self, op: BinOp, l: &Expr, r: &Expr, target: &str) -> R<bool> {
+        let Some((ty, 0)) = self.int_compare_ty(l, r)? else { return Ok(false) };
+        let word = ty.size() == 2;
+        let jump = match op {
+            BinOp::Lt | BinOp::Ge if ty.signed() => {
+                self.gen_expr(l, ty)?;
+                self.e(if word { "bit 7,h" } else { "bit 7,a" });
+                if op == BinOp::Lt { "nz" } else { "z" }
+            }
+            BinOp::Eq | BinOp::Ne if word => {
+                self.gen_expr(l, ty)?;
+                self.e("ld a,h");
+                self.e("or l");
+                if op == BinOp::Eq { "z" } else { "nz" }
+            }
+            BinOp::Eq | BinOp::Ne => {
+                self.gen_expr(l, ty)?;
+                self.e("or a");
+                if op == BinOp::Eq { "z" } else { "nz" }
+            }
+            _ => return Ok(false),
+        };
+        self.e(&format!("jp {jump},{target}"));
+        Ok(true)
     }
 
     // ---------------------------------------------------------------- calls
@@ -4191,6 +4648,9 @@ impl Gen {
             let from = self.natural(a)?.unwrap();
             if target == Ty::Bool {
                 return Err(Diag::new(pos, "use a comparison instead of `bool(...)`"));
+            }
+            if target.size() == 1 && from.size() == 2 && self.load_word_byte(a)? {
+                return Ok(Some(target));
             }
             if from == Ty::Bool {
                 self.gen_expr(a, Ty::Bool)?;
@@ -4389,9 +4849,8 @@ impl Gen {
                     return Ok(Some(Ty::Fixed));
                 }
                 self.gen_expr(&args[0], Ty::Word)?;
-                self.e("xor a");
-                self.e("call rt_isqrt24");
-                self.e("ld a,e");
+                self.e("call rt_isqrt16");
+                self.e("ld a,d");
                 return Ok(Some(Ty::Byte));
             }
             "sin" | "cos" => {
@@ -4495,10 +4954,27 @@ impl Gen {
                     self.gen_expr(&args[2], Ty::Word)?;
                     self.e("push hl");
                 }
+                // y = a byte variable +- a constant: loaded after x, no push
+                let offset = match &args[1].kind {
+                    ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), l, r) => match (self.trivial8(l)?, self.const_eval(r)) {
+                        (Some(v), Some(k)) if v.starts_with('(') && (0..=255).contains(&k) => {
+                            Some((v, if *op == BinOp::Add { "add a," } else { "sub " }, k))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 match self.trivial8(&args[1])? {
                     Some(y) => {
                         self.gen_expr(&args[0], Ty::Word)?;
                         self.e(&format!("ld a,{y}"));
+                        self.e("ld d,a");
+                    }
+                    None if offset.is_some() => {
+                        let (v, op, k) = offset.unwrap();
+                        self.gen_expr(&args[0], Ty::Word)?;
+                        self.e(&format!("ld a,{v}"));
+                        self.e(&format!("{op}{k}"));
                         self.e("ld d,a");
                     }
                     None => {
@@ -5378,4 +5854,59 @@ fn udiv_magic(d: u64) -> Option<(bool, u64, u32)> {
         }
     }
     None
+}
+
+/// The comparison that holds exactly when `op` does not.
+fn negate_compare(op: BinOp) -> BinOp {
+    match op {
+        BinOp::Eq => BinOp::Ne,
+        BinOp::Ne => BinOp::Eq,
+        BinOp::Lt => BinOp::Ge,
+        BinOp::Ge => BinOp::Lt,
+        BinOp::Gt => BinOp::Le,
+        _ => BinOp::Gt,
+    }
+}
+
+/// Structurally equal expressions (positions ignored).
+/// The operands of a `..` chain, left to right.
+fn concat_parts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let ExprKind::Binary(BinOp::Concat, l, r) = &e.kind {
+        concat_parts(l, out);
+        concat_parts(r, out);
+    } else {
+        out.push(e);
+    }
+}
+
+/// No user function or method is called while `e` is evaluated (the
+/// built-in pure functions are fine).
+fn no_calls(e: &Expr) -> bool {
+    use ExprKind as K;
+    const PURE: &[&str] = &[
+        "str", "chr", "sub", "upper", "lower", "len", "abs", "min", "max", "sqrt", "sin", "cos", "byte", "sbyte",
+        "word", "sword", "long", "fixed", "fixed16",
+    ];
+    match &e.kind {
+        K::Int(_) | K::Fixed(_) | K::Bool(_) | K::Str(_) | K::Name(_) => true,
+        K::Index(a, b) | K::Binary(_, a, b) => no_calls(a) && no_calls(b),
+        K::Field(a, _) | K::Unary(_, a) => no_calls(a),
+        K::Call(n, args) => PURE.contains(&n.as_str()) && args.iter().all(no_calls),
+        K::MethodCall(..) => false,
+        K::List(xs) => xs.iter().all(no_calls),
+    }
+}
+
+fn same_expr(a: &Expr, b: &Expr) -> bool {
+    use ExprKind as K;
+    match (&a.kind, &b.kind) {
+        (K::Int(x), K::Int(y)) | (K::Fixed(x), K::Fixed(y)) => x == y,
+        (K::Bool(x), K::Bool(y)) => x == y,
+        (K::Str(x), K::Str(y)) | (K::Name(x), K::Name(y)) => x == y,
+        (K::Index(a1, a2), K::Index(b1, b2)) => same_expr(a1, b1) && same_expr(a2, b2),
+        (K::Field(a1, f), K::Field(b1, g)) => f == g && same_expr(a1, b1),
+        (K::Unary(o, x), K::Unary(p, y)) => std::mem::discriminant(o) == std::mem::discriminant(p) && same_expr(x, y),
+        (K::Binary(o, a1, a2), K::Binary(p, b1, b2)) => o == p && same_expr(a1, b1) && same_expr(a2, b2),
+        _ => false,
+    }
 }

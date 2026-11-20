@@ -1,0 +1,150 @@
+-- micro.lz80n -- T-state measurements of single operations, for the test
+-- emulator: BENCH=../benchmarks/micro.lz80n cargo test --release bench -- --ignored --nocapture
+-- (from compiler/; prints the T-states between bench_start() and bench_stop(n))
+
+function bench_start() end
+function bench_stop(byte n) end
+
+function addb(byte a, byte b) -> byte
+    return a + b
+end
+struct P
+    word x
+    word y
+    sbyte dx
+    sbyte dy
+end
+P ps[16]
+byte grid[16][16]
+word w = 0
+byte b = 0
+fixed f = 1.5
+long big = 0
+
+layer2_visible(true)
+-- 1 empty word loop x1000
+bench_start()
+for i = 1, 1000 do end
+bench_stop(1)
+-- 2 byte function call x1000
+bench_start()
+for i = 1, 1000 do b = addb(b, 3) end
+bench_stop(2)
+-- 3 2D array fill 16x16
+bench_start()
+for y = 0, 15 do
+    for x = 0, 15 do grid[y][x] = x + y end
+end
+bench_stop(3)
+-- 4 struct array move x16 objects
+bench_start()
+for i = 0, 15 do
+    ps[i].x += ps[i].dx
+    ps[i].y += ps[i].dy
+    if ps[i].x > 300 then ps[i].dx = -ps[i].dx end
+end
+bench_stop(4)
+-- 5 word divide x1000
+w = 50000
+bench_start()
+for i = 1, 1000 do w = w / 3 + 40000 end
+bench_stop(5)
+-- 6 word * word x1000
+bench_start()
+for i = 1, 1000 do w = w * 3 end
+bench_stop(6)
+-- 7 fixed mul x1000
+bench_start()
+for i = 1, 1000 do f = f * 1.01 end
+bench_stop(7)
+-- 8 long add x1000
+bench_start()
+for i = 1, 1000 do big += 12345 end
+bench_stop(8)
+-- 9 print a word x100
+bench_start()
+for i = 1, 100 do at(0, 0) write(w) end
+bench_stop(9)
+-- 10 plot 1000 pixels
+bench_start()
+for i = 0, 999 do plot(i & 255, byte(i >> 2), 7) end
+bench_stop(10)
+-- 11 line: 10 lines of ~190 pixels
+bench_start()
+for i = 0, 9 do line(i, 0, 200 + i, 190, 3) end
+bench_stop(11)
+-- 12 vline 10 x 190
+bench_start()
+for i = 0, 9 do vline(word(i), 0, 190, 5) end
+bench_stop(12)
+-- 13 fill_rect 100 x 100
+bench_start()
+fill_rect(20, 20, 100, 100, 9)
+bench_stop(13)
+-- 14 circle r 60
+bench_start()
+circle(128, 96, 60, 11)
+bench_stop(14)
+-- 15 fill_circle r 60
+bench_start()
+fill_circle(128, 96, 60, 12)
+bench_stop(15)
+-- 16 fill_triangle ~ 150 rows
+bench_start()
+fill_triangle(10, 10, 240, 60, 100, 160, 13)
+bench_stop(16)
+-- 17 sprite position x 64
+bench_start()
+for i = 0, 63 do sprite[i].position(word(i) * 4, 100) end
+bench_stop(17)
+-- 18 layer2_clear
+bench_start()
+layer2_clear(0)
+bench_stop(18)
+-- 19 string build
+string s = ""
+bench_start()
+for i = 1, 50 do s = s .. "x" end
+bench_stop(19)
+-- 20 sound_tick with 3 looping tunes x 50
+play_loop(0, "o4 l2 cdefgab")
+play_loop(1, "o3 l3 cegc")
+play_loop(2, "o5 l1 c")
+bench_start()
+for i = 1, 30000 do end
+bench_stop(20)
+sound_off(0) sound_off(1) sound_off(2)
+bench_start()
+for i = 1, 30000 do end
+bench_stop(26)
+-- 21 sqrt x 1000
+bench_start()
+for i = 1, 1000 do b = sqrt(w) end
+bench_stop(21)
+-- 22 key() x 1000
+bench_start()
+for i = 1, 1000 do if key(KEY_SPACE) then b += 1 end end
+bench_stop(22)
+-- 23 hline full width x 192
+bench_start()
+for y = 0, 191 do hline(0, byte(y), 256, 1) end
+bench_stop(23)
+-- 24 word while-loop with compare x 1000
+w = 0
+bench_start()
+while w < 1000 do w += 1 end
+bench_stop(24)
+-- 25 sin / cos x 256
+bench_start()
+for i = 0, 255 do f = sin(byte(i)) + cos(byte(i)) end
+bench_stop(25)
+-- 27 hline 320x256, full width x 256
+layer2_mode(L2_320)
+bench_start()
+for y = 0, 255 do hline(0, byte(y), 320, 1) end
+bench_stop(27)
+-- 28 hline 640x256, full width x 256
+layer2_mode(L2_640)
+bench_start()
+for y = 0, 255 do hline(0, byte(y), 640, 1) end
+bench_stop(28)
