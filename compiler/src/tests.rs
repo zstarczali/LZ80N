@@ -3216,3 +3216,23 @@ print(bad)
 "#;
     expect("r_hline_hi", src, "0\n");
 }
+
+#[test]
+fn run_string_append_in_place() {
+    let src = r#"
+string s = "ab"
+s = s .. s .. "-" .. 42 .. str(word(7)) .. chr(65)
+print(s)
+string t = ""
+for i = 1, 70 do t = t .. "x" end
+print(len(t))
+string u = "q"
+function grab() -> string
+    u = "zz"
+    return "!"
+end
+u = u .. grab()
+print(u)
+"#;
+    expect("r_sappend", src, "abab-427A\n64\nq!\n");
+}

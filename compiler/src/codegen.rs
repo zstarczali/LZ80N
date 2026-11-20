@@ -1590,7 +1590,8 @@ impl Gen {
         let mut isr = String::from("__isr:\n    push af\n    push bc\n    push de\n    push hl\n");
         // 32-bit arithmetic and recursive calls hold values in the shadow
         // registers: a handler using them must not destroy them
-        let shadow = self.uses_long || self.uses_recursion;
+        // (the built-in drivers never touch them: only user handlers count)
+        let shadow = (self.uses_long || self.uses_recursion) && !self.irqs.is_empty();
         if shadow {
             isr.push_str("    exx\n    push bc\n    push de\n    push hl\n    exx\n    ex af,af'\n    push af\n    ex af,af'\n");
         }
@@ -2573,6 +2574,19 @@ impl Gen {
                 }
             }
             Lay::Str => {
+                // `s = s .. a .. b`: append to s itself, no temporary copy
+                // (only if nothing on the right can call a function, which
+                // could change s first)
+                let mut parts = Vec::new();
+                concat_parts(value, &mut parts);
+                if parts.len() > 1 && same_expr(parts[0], target) && parts[1..].iter().all(|p| no_calls(p)) {
+                    if let Some(a) = self.static_addr(target)? {
+                        for p in &parts[1..] {
+                            self.gen_append(&a, p)?;
+                        }
+                        return Ok(());
+                    }
+                }
                 self.gen_str(value)?;
                 if let Some(a) = self.static_addr(target)? {
                     self.e(&format!("ld de,{a}"));
@@ -5838,6 +5852,34 @@ fn negate_compare(op: BinOp) -> BinOp {
 }
 
 /// Structurally equal expressions (positions ignored).
+/// The operands of a `..` chain, left to right.
+fn concat_parts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let ExprKind::Binary(BinOp::Concat, l, r) = &e.kind {
+        concat_parts(l, out);
+        concat_parts(r, out);
+    } else {
+        out.push(e);
+    }
+}
+
+/// No user function or method is called while `e` is evaluated (the
+/// built-in pure functions are fine).
+fn no_calls(e: &Expr) -> bool {
+    use ExprKind as K;
+    const PURE: &[&str] = &[
+        "str", "chr", "sub", "upper", "lower", "len", "abs", "min", "max", "sqrt", "sin", "cos", "byte", "sbyte",
+        "word", "sword", "long", "fixed", "fixed16",
+    ];
+    match &e.kind {
+        K::Int(_) | K::Fixed(_) | K::Bool(_) | K::Str(_) | K::Name(_) => true,
+        K::Index(a, b) | K::Binary(_, a, b) => no_calls(a) && no_calls(b),
+        K::Field(a, _) | K::Unary(_, a) => no_calls(a),
+        K::Call(n, args) => PURE.contains(&n.as_str()) && args.iter().all(no_calls),
+        K::MethodCall(..) => false,
+        K::List(xs) => xs.iter().all(no_calls),
+    }
+}
+
 fn same_expr(a: &Expr, b: &Expr) -> bool {
     use ExprKind as K;
     match (&a.kind, &b.kind) {
