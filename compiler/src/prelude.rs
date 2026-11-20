@@ -37,20 +37,56 @@ class Sprite
         self.update()
     end
 
+    -- the five attribute registers, written from the fields through IX
+    -- (field offsets: x 0, y 2, id 4, pattern 5, palette 6, visible 7,
+    -- mirror_x 8, mirror_y 9, rotate 10, scale 11)
     function update()
-        nextreg[0x34] = self.id
-        nextreg[0x35] = byte(self.x)
-        nextreg[0x36] = byte(self.y)
-        byte a2 = (self.palette << 4) | byte(self.x >> 8) & 1
-        if self.mirror_x then a2 |= 8 end
-        if self.mirror_y then a2 |= 4 end
-        if self.rotate then a2 |= 2 end
-        nextreg[0x37] = a2
-        byte a3 = self.pattern & 63 | 0x40
-        if self.visible then a3 |= 0x80 end
-        nextreg[0x38] = a3
-        byte s = self.scale & 3
-        nextreg[0x39] = s << 3 | s << 1 | byte(self.y >> 8) & 1
+        asm
+            ld ix,(p_Sprite_update_self)
+            ld a,(ix+4)
+            nextreg $34,a           ; sprite number
+            ld a,(ix+0)
+            nextreg $35,a           ; x low
+            ld a,(ix+2)
+            nextreg $36,a           ; y low
+            ld a,(ix+8)             ; mirror x * 8 + mirror y * 4 + rotate * 2
+            add a,a
+            add a,(ix+9)
+            add a,a
+            add a,(ix+10)
+            add a,a
+            ld b,a
+            ld a,(ix+1)
+            and 1                   ; x bit 8
+            or b
+            ld b,a
+            ld a,(ix+6)
+            swapnib
+            and $F0                 ; palette offset
+            or b
+            nextreg $37,a
+            ld a,(ix+7)
+            rrca
+            and $80                 ; visible
+            ld b,a
+            ld a,(ix+5)
+            and 63
+            or $40                  ; pattern, 4th attribute byte follows
+            or b
+            nextreg $38,a
+            ld a,(ix+11)
+            and 3
+            ld b,a
+            add a,a
+            add a,a
+            or b
+            add a,a                 ; x and y scale
+            ld b,a
+            ld a,(ix+3)
+            and 1                   ; y bit 8
+            or b
+            nextreg $39,a
+        end
     end
 end
 
@@ -443,104 +479,323 @@ end
 
 -- ---- background driver (runs in the frame interrupt) ----
 
--- character p of the tune on channel ch (0 past the end)
-function snd_char(byte ch, byte p) -> byte
-    word base = word(ch) << 8
-    if p >= snd_buf[base] then return 0 end
-    return snd_buf[base + p + 1]
-end
+byte snd_ch
+byte snd_chip
+byte snd_v
+byte snd_wraps
+byte snd_semi
+word snd_bufp
 
--- digits at the current tune position, or `fallback`
-function snd_num(byte ch, byte fallback) -> byte
-    byte p = snd_pos[ch]
-    byte c = snd_char(ch, p)
-    if c < '0' or c > '9' then return fallback end
-    byte n = 0
-    while c >= '0' and c <= '9' do
-        n = n * 10 + (c - '0')
-        p += 1
-        c = snd_char(ch, p)
-    end
-    snd_pos[ch] = p
-    return n
-end
-
--- read tune commands until the next note or rest
-function snd_step(byte ch, byte chip, byte v)
-    byte wraps = 0
-    while true do
-        byte p = snd_pos[ch]
-        if p >= snd_buf[word(ch) << 8] then
-            if snd_mode[ch] == 3 and wraps < 2 then
-                snd_pos[ch] = 0
-                wraps += 1
-            else
-                snd_mode[ch] = 0
-                ay_write(chip, 8 + v, 0)
-                return
-            end
-        else
-            byte c = snd_char(ch, p) | 0x20          -- lower case
-            snd_pos[ch] = p + 1
-            if c >= 'a' and c <= 'g' or c == 'r' then
-                byte semi = 0
-                if c ~= 'r' then
-                    semi = asc("JLACEFH", c - 'a') - 'A'
-                    byte acc = snd_char(ch, snd_pos[ch])
-                    if acc == '#' or acc == '+' then
-                        semi += 1
-                        snd_pos[ch] += 1
-                    elseif acc == '-' then
-                        semi -= 1
-                        snd_pos[ch] += 1
-                    end
-                end
-                byte dur = snd_num(ch, snd_dur[ch])
-                if c == 'r' then
-                    ay_write(chip, 8 + v, 0)
-                else
-                    word per = note_period(snd_oct[ch] * 12 + semi)
-                    ay_write(chip, v * 2, byte(per))
-                    ay_write(chip, v * 2 + 1, byte(per >> 8))
-                    ay_write(chip, 8 + v, snd_vol[ch])
-                end
-                snd_timer[ch] = dur
-                return
-            elseif c == 'o' then
-                snd_oct[ch] = min(snd_num(ch, 4), 8)
-            elseif c == '>' then
-                if snd_oct[ch] < 8 then snd_oct[ch] += 1 end
-            elseif c == '<' then
-                if snd_oct[ch] > 0 then snd_oct[ch] -= 1 end
-            elseif c == 'l' then
-                snd_dur[ch] = max(snd_num(ch, 10), 1)
-            elseif c == 'v' then
-                snd_vol[ch] = min(snd_num(ch, 12), 15)
-            end
-        end
-    end
-end
-
+-- every channel: count down the note, or read the next tune commands
 function sound_tick()
-    byte ch = 0
-    for chip = 0, 2 do
-        for v = 0, 2 do
-            byte m = snd_mode[ch]
-            if m ~= 0 then
-                byte t = snd_timer[ch]
-                if t > 1 then
-                    snd_timer[ch] = t - 1
-                    -- a short gap at the end of each tune note
-                    if t == 2 and m >= 2 then ay_write(chip, 8 + v, 0) end
-                elseif m == 1 then
-                    snd_mode[ch] = 0
-                    ay_write(chip, 8 + v, 0)
-                else
-                    snd_step(ch, chip, v)
-                end
-            end
-            ch += 1
-        end
+    asm
+            xor a
+            ld (g_snd_ch),a
+            ld (g_snd_chip),a
+            ld (g_snd_v),a
+.chan:
+            ld hl,g_snd_mode
+            call .ix
+            ld a,(hl)
+            or a
+            jr z,.next
+            ld c,a                  ; mode
+            ld hl,g_snd_timer
+            call .ix
+            ld a,(hl)
+            cp 2
+            jr c,.expired
+            dec (hl)
+            cp 2                    ; a short gap at the end of each tune note
+            jr nz,.next
+            ld a,c
+            cp 2
+            jr c,.next
+            call .silence
+            jr .next
+.expired:
+            ld a,c
+            dec a
+            jr nz,.step
+            ld hl,g_snd_mode        ; a beep has ended
+            call .ix
+            ld (hl),0
+            call .silence
+            jr .next
+.step:
+            call .stepch
+.next:
+            ld a,(g_snd_v)
+            inc a
+            cp 3
+            jr c,.same
+            ld a,(g_snd_chip)
+            inc a
+            ld (g_snd_chip),a
+            xor a
+.same:
+            ld (g_snd_v),a
+            ld a,(g_snd_ch)
+            inc a
+            ld (g_snd_ch),a
+            cp 9
+            jp c,.chan
+            jp .out
+
+; HL += channel
+.ix:
+            ld a,(g_snd_ch)
+            add hl,a
+            ret
+
+; volume register of the channel = 0
+.silence:
+            ld a,(g_snd_chip)
+            ld d,a
+            ld a,(g_snd_v)
+            add a,8
+            ld e,0
+            jp rt_ay_write
+
+; A = the tune character at the channel's position (0 past the end)
+.peek:
+            ld hl,g_snd_pos
+            call .ix
+            ld a,(hl)
+            ld hl,(g_snd_bufp)
+            cp (hl)
+            jr nc,.peek0
+            inc a
+            add hl,a
+            ld a,(hl)
+            ret
+.peek0:
+            xor a
+            ret
+
+.adv:
+            ld hl,g_snd_pos
+            call .ix
+            inc (hl)
+            ret
+
+; A = the number at the position (advanced past it), or E if no digit
+.num:
+            call .peek
+            sub '0'
+            cp 10
+            jr c,.ndig
+            ld a,e
+            ret
+.ndig:
+            ld e,a
+.nloop:
+            call .adv
+            call .peek
+            sub '0'
+            cp 10
+            jr nc,.ndone
+            ld d,a
+            ld a,e
+            add a,a
+            ld b,a
+            add a,a
+            add a,a
+            add a,b                 ; n * 10
+            add a,d
+            ld e,a
+            jr .nloop
+.ndone:
+            ld a,e
+            ret
+
+; read tune commands until the next note or rest
+.stepch:
+            ld a,(g_snd_ch)
+            ld h,a
+            ld l,0
+            ld de,g_snd_buf
+            add hl,de
+            ld (g_snd_bufp),hl
+            xor a
+            ld (g_snd_wraps),a
+.sl:
+            ld hl,g_snd_pos
+            call .ix
+            ld a,(hl)
+            ld hl,(g_snd_bufp)
+            cp (hl)
+            jr c,.sc
+            ld hl,g_snd_mode        ; the end of the tune
+            call .ix
+            ld a,(hl)
+            cp 3
+            jr nz,.sstop
+            ld a,(g_snd_wraps)
+            cp 2
+            jr nc,.sstop
+            inc a
+            ld (g_snd_wraps),a
+            ld hl,g_snd_pos
+            call .ix
+            ld (hl),0
+            jr .sl
+.sstop:
+            ld hl,g_snd_mode
+            call .ix
+            ld (hl),0
+            jp .silence
+.sc:
+            call .peek
+            or $20                  ; lower case
+            ld c,a
+            call .adv
+            ld a,c
+            cp 'r'
+            jr z,.note
+            sub 'a'
+            cp 7
+            jp nc,.cmd
+            ld hl,.semis
+            add hl,a
+            ld a,(hl)
+            ld (g_snd_semi),a
+            call .peek
+            cp '#'
+            jr z,.sharp
+            cp '+'
+            jr z,.sharp
+            cp '-'
+            jr nz,.note
+            ld hl,g_snd_semi
+            dec (hl)
+            call .adv
+            jr .note
+.sharp:
+            ld hl,g_snd_semi
+            inc (hl)
+            call .adv
+.note:
+            push bc
+            ld hl,g_snd_dur
+            call .ix
+            ld e,(hl)
+            call .num               ; duration
+            pop bc
+            push af
+            ld a,c
+            cp 'r'
+            jr nz,.tone
+            call .silence
+            jr .settime
+.tone:
+            ld hl,g_snd_oct
+            call .ix
+            ld a,(hl)
+            ld b,a
+            add a,a
+            add a,b
+            add a,a
+            add a,a                 ; octave * 12
+            ld hl,g_snd_semi
+            add a,(hl)
+            call rt_note_period
+            push hl
+            ld a,(g_snd_chip)
+            ld d,a
+            ld e,l
+            ld a,(g_snd_v)
+            add a,a
+            call rt_ay_write        ; period low
+            pop hl
+            ld a,(g_snd_chip)
+            ld d,a
+            ld e,h
+            ld a,(g_snd_v)
+            add a,a
+            inc a
+            call rt_ay_write        ; period high
+            ld hl,g_snd_vol
+            call .ix
+            ld e,(hl)
+            ld a,(g_snd_chip)
+            ld d,a
+            ld a,(g_snd_v)
+            add a,8
+            call rt_ay_write        ; volume
+.settime:
+            pop af
+            ld b,a
+            ld hl,g_snd_timer
+            call .ix
+            ld (hl),b
+            ret
+.cmd:
+            ld a,c
+            cp 'o'
+            jr nz,.c1
+            ld e,4
+            call .num
+            cp 9
+            jr c,.o1
+            ld a,8
+.o1:
+            ld b,a
+            ld hl,g_snd_oct
+            call .ix
+            ld (hl),b
+            jp .sl
+.c1:
+            cp '>'
+            jr nz,.c2
+            ld hl,g_snd_oct
+            call .ix
+            ld a,(hl)
+            cp 8
+            jp nc,.sl
+            inc (hl)
+            jp .sl
+.c2:
+            cp '<'
+            jr nz,.c3
+            ld hl,g_snd_oct
+            call .ix
+            ld a,(hl)
+            or a
+            jp z,.sl
+            dec (hl)
+            jp .sl
+.c3:
+            cp 'l'
+            jr nz,.c4
+            ld e,10
+            call .num
+            or a
+            jr nz,.l1
+            inc a
+.l1:
+            ld b,a
+            ld hl,g_snd_dur
+            call .ix
+            ld (hl),b
+            jp .sl
+.c4:
+            cp 'v'
+            jp nz,.sl
+            ld e,12
+            call .num
+            cp 16
+            jr c,.v1
+            ld a,15
+.v1:
+            ld b,a
+            ld hl,g_snd_vol
+            call .ix
+            ld (hl),b
+            jp .sl
+.semis:
+            db 9, 11, 0, 2, 4, 5, 7  ; a b c d e f g
+.out:
     end
 end
 "#;

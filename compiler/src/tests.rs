@@ -747,6 +747,9 @@ sprite[3].scale = 1
 sprite[3].position(300, 260)
 sprite[3].show(11)
 sprite[5].palette = 2
+sprite[5].mirror_y = true
+sprite[5].rotate = true
+sprite[5].scale = 2
 sprite[5].position(40, 50)
 sprite[5].hide()
 print(sprite[3].x, sprite[3].id)
@@ -762,7 +765,7 @@ print(sprite[3].x, sprite[3].id)
         assert_eq!(cpu.patterns[11 * 256], 0xE2);
         // x = 300 = $12C, y = 260 = $104
         assert_eq!(cpu.sprite_attr[3], [0x2C, 0x04, 0x08 | 0x01, 0x80 | 0x40 | 11, (1 << 3) | (1 << 1) | 1]);
-        assert_eq!(cpu.sprite_attr[5], [40, 50, 0x20, 0x40, 0]);
+        assert_eq!(cpu.sprite_attr[5], [40, 50, 0x20 | 4 | 2, 0x40, (2 << 3) | (2 << 1)]);
     }
 }
 
@@ -2887,4 +2890,90 @@ print(m[0].x, m[2].y)
     // x = 997; y = -2; bx = 247; dw = $F0F ^ 997 = $CEA, | 247 = $CFF (3327);
     // x = 997 & 3327 = 229; f = 1.25; dx = 3; y = 2
     expect("r_fieldfield", src, "229 2 247 3327 1.25 3\n0 0\n");
+}
+
+#[test]
+fn run_sound_loop_flat_volume() {
+    let src = r#"
+play_loop(2, "v9 o5 l3 d- <b")
+while true do vsync() end
+"#;
+    let shots = sound_frames("r_snd_loop", src, 24);
+    if shots.is_empty() {
+        return;
+    }
+    let period = |s: &[[u8; 16]; 3]| s[0][4] as u16 | (s[0][5] as u16) << 8;
+    let p = |n: f64| (1_750_000.0 / (16.0 * 440.0 * 2f64.powf((n - 57.0) / 12.0))).round() as u16;
+    let (db5, b4) = (p(61.0), p(59.0));
+    let seq: Vec<(u16, u8)> = shots.iter().map(|s| (period(s), s[0][10])).collect();
+    let first = seq.iter().position(|&(q, v)| q == db5 && v == 9).expect("d-5 at volume 9");
+    // d-5 3 frames (last silent), b4 3 frames, then again from the start
+    assert_eq!(seq[first + 1], (db5, 9));
+    assert_eq!(seq[first + 2].1, 0);
+    assert_eq!(seq[first + 3], (b4, 9));
+    // the loop restarts in octave 4 (after `<`) only if `o5` is read again: it is
+    assert_eq!(seq[first + 6], (db5, 9), "{seq:?}");
+    assert_eq!(seq[first + 9], (b4, 9));
+}
+
+#[test]
+#[ignore]
+fn bench_sound_tick() {
+    let src = "play_loop(0, \"o4 l2 cdefgab\")\nplay_loop(1, \"o3 l3 cegc\")\nplay_loop(2, \"o5 l1 c\")\nfor j = 1, 20 do\nfor i = 1, 30000 do end\nend\n";
+    let (nex, syms) = build("bench_snd", src).unwrap();
+    let mut cpu = load_nex(&nex).unwrap();
+    let (tick, end) = (syms["f_sound_tick"], syms["__main_end"]);
+    let (mut inside, mut t0, mut sp0, mut total, mut calls) = (false, 0, 0, 0u64, 0);
+    let mut hist: HashMap<u16, u64> = HashMap::new();
+    while cpu.pc != end {
+        if !inside && cpu.pc == tick {
+            inside = true;
+            t0 = cpu.t_states;
+            sp0 = cpu.sp;
+            calls += 1;
+        }
+        let (pc, t1) = (cpu.pc, cpu.t_states);
+        cpu.tick().unwrap();
+        if inside {
+            *hist.entry(pc).or_insert(0u64) += cpu.t_states - t1;
+        }
+        if inside && cpu.sp > sp0 {
+            inside = false;
+            total += cpu.t_states - t0;
+        }
+    }
+    println!("SOUND {calls} calls, {} T per call", total / calls.max(1));
+    let mut v: Vec<_> = hist.into_iter().collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+    let mut names: Vec<(u16, &String)> = syms.iter().map(|(k, v)| (*v, k)).collect();
+    names.sort();
+    for (pc, t) in v.iter().take(25) {
+        let n = names.iter().rev().find(|(a, _)| a <= pc).map(|(a, n)| format!("{n}+{}", pc - a)).unwrap_or_default();
+        println!("  {pc:04X} {t:>8} {n}");
+    }
+}
+
+#[test]
+fn run_print_number_edges() {
+    expect(
+        "r_numedges",
+        "word a[9] = {0, 9, 10, 99, 100, 1000, 10000, 60009, 65535}\nfor i = 0, 8 do write(a[i], \" \") end\nprint()\nsword s = -32768\nprint(s, sword(-1), sword(-10), str(word(40000)))",
+        "0 9 10 99 100 1000 10000 60009 65535 \n-32768 -1 -10 40000\n",
+    );
+}
+
+#[test]
+fn run_sqrt16_all_values() {
+    // floor(sqrt(w)) for every 16-bit w: s*s <= w < (s+1)*(s+1)
+    let src = "word bad = 0\nword w = 0\nwhile true do\n    long s = long(sqrt(w))\n    long v = long(w)\n    if s * s > v or (s + 1) * (s + 1) <= v then bad += 1 end\n    if w == 65535 then break end\n    w += 1\nend\nprint(bad, sqrt(word(65535)), sqrt(word(0)), sqrt(word(48)), sqrt(word(49)))\n";
+    expect("r_sqrt16", src, "0 255 0 6 7\n");
+}
+
+#[test]
+fn run_long_add_constant() {
+    expect(
+        "r_longk",
+        "long x = 65535\nx += 1\nprint(x)\nx -= 65537\nprint(x)\nx += 65536\nprint(x)\nx = x - 0\nx = x + 2147418112\nprint(x)\nfixed16 f = 1.5\nf += 2.75\nprint(f)\nf -= 10\nprint(f)",
+        "65536\n-1\n65535\n2147483647\n4.25\n-5.75\n",
+    );
 }
