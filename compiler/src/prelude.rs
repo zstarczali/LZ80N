@@ -124,24 +124,12 @@ end
 
 function vline(word x, byte y, word len, byte c)
     asm
-            ld hl,(p_vline_len)
-.lp:
-            ld a,h
-            or l
-            jr z,.out
-            push hl
             ld hl,(p_vline_x)
             ld a,(p_vline_y)
             ld d,a
+            ld bc,(p_vline_len)
             ld a,(p_vline_c)
-            call rt_plot
-            pop hl
-            dec hl
-            ld a,(p_vline_y)
-            inc a
-            ld (p_vline_y),a
-            jr nz,.lp               ; stops after row 255
-.out:
+            call rt_vline
     end
 end
 

@@ -1498,13 +1498,19 @@ rt_hline256:
     ld b,h
     ld c,l
 .fits:
-    pop af
-    push bc
-    call rt_plot_de
-    pop bc
     ld a,d
     cp 192
-    ret nc
+    jr nc,.none
+    push bc
+    call rt_l2_map          ; HL = address (a row never crosses an 8K page)
+    pop bc
+    pop af
+    ex de,hl
+    ld hl,-32
+    add hl,bc
+    jp c,rt_dma_fill        ; 32 pixels or more: the DMA fills them
+    ex de,hl
+    ld (hl),a
     dec bc
     ld a,b
     or c
@@ -1512,8 +1518,82 @@ rt_hline256:
     ld d,h
     ld e,l
     inc de
-    ldir                    ; a row never crosses an 8K page
+    ldir
     ret
+.none:
+    pop af
+    ret
+
+; D = y, HL = x, BC = length, A = colour: vertical line, clipped
+rt_vline:
+    push af
+    ld a,b
+    or c
+    jr z,.none
+    ld a,(rt_l2hmax)
+    sub d
+    jr c,.none              ; below the screen
+    ld e,a                  ; rows available - 1
+    dec bc
+    ld a,b
+    or a
+    jr nz,.clip
+    ld a,c
+    cp e
+    jr c,.ok
+.clip:
+    ld c,e
+.ok:
+    ld b,c
+    inc b                   ; B = rows (0 = 256)
+    ld a,(rt_l2mode)
+    or a
+    jr z,.m256
+    dec a
+    jr z,.m320
+    pop af                  ; 640x256: pixel by pixel
+.p640:
+    push af
+    push bc
+    push de
+    push hl
+    call rt_plot
+    pop hl
+    pop de
+    pop bc
+    pop af
+    inc d
+    djnz .p640
+    ret
+.m320:
+    call rt_l2_x320
+    jr nc,.none
+    call rt_l2_maphi        ; a column is one page, y = the low byte
+    pop af
+.l320:
+    ld (hl),a
+    inc l
+    djnz .l320
+    ret
+.m256:
+    ld a,h
+    or a
+    jr nz,.none
+    ld e,l
+    pop af
+    ld c,a
+    call rt_l2_map
+.l256:
+    ld (hl),c
+    inc d
+    dec b
+    ret z
+    inc h
+    ld a,h
+    cp 32
+    jr c,.l256
+    call rt_l2_map          ; the next 8K page
+    jr .l256
 .none:
     pop af
     ret
