@@ -1,0 +1,74 @@
+name: publish
+
+# Uploads the archives of a successful `release` run to the FTP download area
+# (Actions -> publish -> Run workflow). Leave the run ID empty to take the
+# latest successful release run. Needs the FTP_PASSWORD repository secret.
+#
+# Uploaded: lz80n-<version>-<platform>.zip / .tar.gz, README.txt,
+# CHANGELOG.md, LICENSE, SHA256SUMS.txt. Archives of older versions are
+# removed from the target directory, everything else there is kept.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Successful release run ID (from its Actions URL); empty = latest"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-lz80n-ftp
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish archives to FTP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate source run
+        id: run
+        run: python3 scripts/publish-ftp.py --validate-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          BUILD_RUN_ID: ${{ inputs.run_id }}
+
+      # the documents come from the commit the archives were built from
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.run.outputs.sha }}
+          path: src
+
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.run.outputs.run_id }}
+          path: publish-artifacts
+          merge-multiple: true
+
+      - name: Documents and checksums
+        working-directory: publish-artifacts
+        run: |
+          v=$(grep -m1 '^version' ../src/compiler/Cargo.toml | cut -d'"' -f2)
+          sjasm=$(grep -m1 'SJASMPLUS_VERSION:' ../src/.github/workflows/release.yml | cut -d'"' -f2)
+          rm -f *.pdf
+          sed "s/@VERSION@/$v/g; s/@PLATFORM@/all platforms/g; s/@SJASM@/$sjasm/g" ../src/dist/README.txt > README.txt
+          cp ../src/CHANGELOG.md ../src/LICENSE .
+          sha256sum lz80n-* > SHA256SUMS.txt
+          ls -l
+
+      - name: Upload to FTP
+        run: python3 scripts/publish-ftp.py publish-artifacts
+        env:
+          FTP_HOST: ftpx.forpsi.com
+          FTP_USERNAME: www.c64va.pro
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_DIRECTORY: /www/downloads/LZ80N/
