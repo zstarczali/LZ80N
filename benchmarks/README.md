@@ -36,11 +36,11 @@ shows on the Next are the reference.
 |------|-------------:|----:|---------:|
 | loop | 44 ms | 21 ms | 59 T-states per iteration |
 | arith | 346 ms | 115 ms | 645 T per iteration |
-| sieve | 57 ms | 42 ms | |
+| sieve | 57 ms | 41 ms | |
 | print | 95 ms | 49 ms | ~170 T per character incl. `at` |
-| string | 121 ms | 74 ms | |
-| sqrt | 103 ms | 70 ms | |
-| plot | 99 ms | 76 ms | 260 T per pixel |
+| string | 121 ms | 28 ms | appended in place |
+| sqrt | 103 ms | 34 ms | 16-bit root in 8 rounds |
+| plot | 99 ms | 86 ms | 295 T per pixel incl. both loops |
 
 NextBASIC: _to be measured on the Next / in CSpect_, both
 `benchmark.bas` (floating point) and `benchmark_int.bas` (integer
@@ -77,4 +77,10 @@ iteration, which takes far more than a handful of instructions.
   tilemap instead of one `rt_putc` call per character.
 * Stores of constants / plain variables into array elements no longer go
   through the stack; `plot`/`point` load simple arguments directly.
-* Integer square root skips the zero top byte of 16-bit values.
+* Integer square root skips the zero top byte of 16-bit values; later a
+  separate 16-bit root (bit pairs, 8 rounds).
+* `s = s .. x` appends to `s` itself instead of building the result in a
+  temporary string and copying it back.
+
+The per-operation measurements (`micro.lz80n`) and what was changed for
+them are in `docs/performance-review.md`, section 6.

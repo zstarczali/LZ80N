@@ -197,6 +197,61 @@ Ezek minden programot gyorsítanak, nem csak a könyvtárat.
 Minden lépés után: a teljes tesztkészlet, a `micro.lz80n` újramérése, és a
 `benchmarks/README.md` táblázatának frissítése.
 
+## 6. Eredmények (elkészült)
+
+`micro.lz80n`, T-állapot, a tesztemulátorban (a 2026-11-19-i állapothoz képest):
+
+| # | Mérés | előtte | most | gyorsulás |
+|---|-------|-------:|-----:|----------:|
+| 3 | 2D tömb feltöltése 16×16 | 65 172 | 48 020 | 1,36× |
+| 4 | 16 objektum mozgatása (`ps[i].x += ps[i].dx`) | 12 404 | 7 380 | 1,68× |
+| 8 | `long += konstans` ×1000 | 272 187 | 185 183 | 1,47× |
+| 9 | `write(word)` ×100 | 677 291 | 249 647 | 2,71× |
+| 11 | 10 vonal, ~190 pixel | 1 720 256 | 1 373 744 | 1,25× |
+| 12 | `vline` 10 × 190 | 788 552 | 101 574 | 7,76× |
+| 13 | `fill_rect` 100 × 100 | 272 033 | 146 333 | 1,86× |
+| 14 | `circle` r = 60 | 812 431 | 417 286 | 1,95× |
+| 15 | `fill_circle` r = 60 | 637 495 | 387 678 | 1,64× |
+| 16 | `fill_triangle` ~150 sor | 1 132 047 | 692 820 | 1,63× |
+| 17 | 64 sprite pozíciója | 87 252 | 44 884 | 1,94× |
+| 19 | string építése, 50 karakter | 77 281 | 12 087 | 6,39× |
+| 21 | `sqrt(word)` ×1000 | 2 013 199 | 873 643 | 2,30× |
+| 23 | `hline` teljes szélesség ×192 | 1 131 054 | 380 358 | 2,97× |
+| 24 | `while w < 1000` | 103 102 | 93 112 | 1,11× |
+| 27 | `hline` 320×256, ×256 | 5 167 161 | 2 933 328 | 1,76× |
+| 28 | `hline` 640×256, ×256 | 87 268 480 | 2 978 640 | 29,3× |
+
+A hangmeghajtó (`sound_tick`) három szóló dallammal képkockánként kb.
+13 900 T helyett 9 600 T, és ha semmi sem szól, azonnal visszatér.
+
+Ami elkészült:
+
+* **A:** `Sprite.update`, a hangmeghajtó, a `line`, `vline` és a vágott
+  vízszintes szakasz assemblyben. A `fill_triangle` soronként osztás nélkül
+  lépteti az éleket (ez egy `word`-túlcsordulást is javít a nagy 320/640-es
+  háromszögeknél). Az `ellipse` újrahasználja a következő sor félszélességét.
+  Mindegyiket pixelpontos teszt veti össze az 1.1.0-s rutinnal.
+* **B.1–B.4, B.6, B.7:** számkiírás 10-hatványok kivonásával; 16 bites
+  `sqrt`; DMA-s `hline` 32 pixeltől (256-os mód; minta közben CPU); 320-as
+  és 640-es `hline` lapomként egy szűk ciklussal; `long`/`fixed16` ± konstans
+  inline; `s = s .. x` helyben.
+* **C.1–C.5, C.8:** lásd a 2026-11-19-i kört (rövidzáras feltételek,
+  konstans-összehasonlítások, `op=` helyben, `add hl,a` indexelés,
+  ugrás-peephole-ok). `plot(x, y + k, c)` verem nélkül.
+* **D:** az ISR csak felhasználói kezelő esetén menti az árnyékregisztereket.
+
+Ami kimaradt, és miért:
+
+* **B.5** (előjeles `fixed` szorzás): a javasolt előjelkorrekció lefelé
+  kerekít, a mostani rutin nulla felé csonkol; negatív szorzatoknál más
+  eredményt adna.
+* **C.7** (regisztertartalom-követés): a 24 példa generált kódjában
+  51 582 utasításból csak 93 felesleges `ld a,(x)` maradt, a nyereség 0,2%.
+* **C.6** (`self` IX-ben), **C.9–C.11**: a példákban kevés a metóduson
+  belüli mezőelérés (~200), a `djnz`-s ciklus kb. 10 T-t nyerne, de a
+  `break` miatt kockázatos. Akkor érdemes, ha egy valódi játék mérése ezt
+  mutatja.
+
 ## 5. Ami már jó
 
 * Konstanssal való osztás és maradék szorzással (`udiv_magic`), kettő-hatvány
