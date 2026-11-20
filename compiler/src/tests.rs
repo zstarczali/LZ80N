@@ -3236,3 +3236,12 @@ print(u)
 "#;
     expect("r_sappend", src, "abab-427A\n64\nq!\n");
 }
+
+#[test]
+fn run_plot_y_offset() {
+    expect(
+        "r_ploty",
+        "layer2_visible(true)\nbyte y = 10\nword x = 300\nplot(5, y + 3, 7)\nplot(6, y - 2, 8)\nplot(x - 290, y + 250, 9)\nprint(point(5, 13), point(6, 8), point(10, 4))",
+        "7 8 9\n",
+    );
+}

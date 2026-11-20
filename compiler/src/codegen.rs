@@ -4954,10 +4954,27 @@ impl Gen {
                     self.gen_expr(&args[2], Ty::Word)?;
                     self.e("push hl");
                 }
+                // y = a byte variable +- a constant: loaded after x, no push
+                let offset = match &args[1].kind {
+                    ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), l, r) => match (self.trivial8(l)?, self.const_eval(r)) {
+                        (Some(v), Some(k)) if v.starts_with('(') && (0..=255).contains(&k) => {
+                            Some((v, if *op == BinOp::Add { "add a," } else { "sub " }, k))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 match self.trivial8(&args[1])? {
                     Some(y) => {
                         self.gen_expr(&args[0], Ty::Word)?;
                         self.e(&format!("ld a,{y}"));
+                        self.e("ld d,a");
+                    }
+                    None if offset.is_some() => {
+                        let (v, op, k) = offset.unwrap();
+                        self.gen_expr(&args[0], Ty::Word)?;
+                        self.e(&format!("ld a,{v}"));
+                        self.e(&format!("{op}{k}"));
                         self.e("ld d,a");
                     }
                     None => {

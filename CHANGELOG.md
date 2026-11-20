@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+**Speed** (measurements: `docs/performance-review.md`, section 6)
+
+* In assembly: `Sprite.update`, the sound driver, `line`, `vline`.
+* `vline` 7.8x, `hline` 3x (DMA from 32 pixels), 640x256 `hline` 29x,
+  circles and triangles 1.6-2x, number output 2.7x, `sqrt(word)` 2.3x,
+  string appending 6.4x, `long`/`fixed16` += constant inline.
+* Shorter branches: `and`/`or`/`not` jump directly, comparisons with
+  constants, rotated `while` loops; `x op= y` on elements and fields works
+  in memory.
+
+**Fixes**
+
+* `fill_triangle`: big triangles in 320x256 / 640x256 were drawn wrong
+  (a 16-bit overflow).
+* Calling `sound_tick()` from the main program is reported as an error.
+
 ## 1.1.0 — 2026-11-19
 
 **Language**
