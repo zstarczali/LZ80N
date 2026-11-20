@@ -1,18 +1,5 @@
 -- shooter.lz80n -- a little space shooter
 --
--- Sprites (assets/ships.png, made by assets/make_ship_sprites.py):
---  * the player is cut from assets/space-ship.png: 32x32, four hardware
---    sprites, with an animated engine flame
---  * five kinds of enemies, drawn as 16x16 pixel art with two animation
---    frames each
---
---   crab    slow, sways wide                     10 points
---   wasp    zigzags fast                         20 points
---   arrow   dives and steers towards you         30 points
---   orb     floats and shoots                    40 points
---   bomber  slow, shoots, takes three hits       50 points
---
--- New kinds join as the score grows. Three layers of stars scroll on
 -- Layer 2 (double buffered). O / P / Q / A or a Kempston joystick to fly,
 -- SPACE / fire to shoot.
 
