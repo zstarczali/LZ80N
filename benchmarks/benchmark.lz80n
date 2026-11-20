@@ -96,6 +96,7 @@ function report(string name)
     row += 1
 end
 
+layer2_clear(0)            -- NextZXOS leaves data in the Layer 2 banks
 layer2_visible(true)
 ink(BRIGHT_YELLOW)
 at(1, 2)
