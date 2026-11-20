@@ -1558,7 +1558,10 @@ impl Gen {
         }
         irqs.sort();
         for (_, _, key) in irqs {
-            let mut shared: Vec<_> = reach(&key).intersection(&main).cloned().collect();
+            // the handler itself counts too (`sound_tick()` from the main program)
+            let mut own = reach(&key);
+            own.insert(key.clone());
+            let mut shared: Vec<_> = own.intersection(&main).cloned().collect();
             shared.sort();
             if let Some(f) = shared.first() {
                 let pos = self.calls.get(&key).map(|c| c.0).unwrap_or_default();
@@ -3730,6 +3733,15 @@ impl Gen {
         Ok(())
     }
 
+    /// A constant right operand of 32-bit arithmetic in `want`'s raw form.
+    fn wide_const(&self, r: &Expr, want: Ty) -> Option<i64> {
+        if want == Ty::Long {
+            self.const_eval(r).filter(|&v| Ty::Long.literal_fits(v))
+        } else {
+            self.fixed16_const(r)
+        }
+    }
+
     fn gen_wide_binary(&mut self, op: BinOp, l: &Expr, r: &Expr, want: Ty, pos: Pos) -> R<()> {
         let zero = |s: &Self| s.const_eval(r) == Some(0) || s.fixed16_const(r) == Some(0);
         if matches!(op, BinOp::Div | BinOp::Mod) && zero(self) {
@@ -3780,6 +3792,26 @@ impl Gen {
                     let (f, i) = if lf { (l, r) } else { (r, l) };
                     self.gen_wide_operands(f, i, Ty::Fixed16, Ty::Long)?;
                     self.call32(if op == BinOp::Mul { "rt_mul32" } else { "rt_divs32" });
+                }
+            }
+            BinOp::Add | BinOp::Sub if self.wide_const(r, want).is_some() => {
+                // DE:HL += constant, inline
+                let v = self.wide_const(r, want).unwrap();
+                let v = if op == BinOp::Sub { v.wrapping_neg() } else { v } & 0xFFFF_FFFF;
+                self.uses_long = true;
+                self.gen_expr(l, want)?;
+                if v & 0xFFFF != 0 {
+                    self.e(&format!("ld bc,{}", v & 0xFFFF));
+                    self.e("add hl,bc");
+                    self.e("ex de,hl");
+                    self.e(&format!("ld bc,{}", v >> 16));
+                    self.e("adc hl,bc");
+                    self.e("ex de,hl");
+                } else if v != 0 {
+                    self.e("ex de,hl");
+                    self.e(&format!("ld bc,{}", v >> 16));
+                    self.e("add hl,bc");
+                    self.e("ex de,hl");
                 }
             }
             _ => {
@@ -4803,9 +4835,8 @@ impl Gen {
                     return Ok(Some(Ty::Fixed));
                 }
                 self.gen_expr(&args[0], Ty::Word)?;
-                self.e("xor a");
-                self.e("call rt_isqrt24");
-                self.e("ld a,e");
+                self.e("call rt_isqrt16");
+                self.e("ld a,d");
                 return Ok(Some(Ty::Byte));
             }
             "sin" | "cos" => {

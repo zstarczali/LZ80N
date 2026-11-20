@@ -795,6 +795,28 @@ rt_print_fixed:
     add a,'0'
     jp rt_emit
 
+; D = floor(sqrt(HL)), 16-bit value (bit pairs, after M. Bazelides)
+rt_isqrt16:
+    ld de,$0040             ; $40 appends binary 01 to D
+    ld a,l
+    ld l,h
+    ld h,d
+    or a
+    ld b,8
+.lp:
+    sbc hl,de
+    jr nc,.keep
+    add hl,de
+.keep:
+    ccf
+    rl d
+    add a,a
+    adc hl,hl
+    add a,a
+    adc hl,hl
+    djnz .lp
+    ret
+
 ; DE = floor(sqrt(A:H:L)) (24-bit value, bit-pair method)
 rt_isqrt24:
     ld c,12                 ; bit pairs
@@ -1679,23 +1701,38 @@ rt_print_s16:
     call rt_neghl
 ; HL = unsigned 16-bit, printed in decimal
 rt_print_u16:
-    ld a,$FF
-    push af                 ; sentinel
-.div:
-    ld de,10
-    call rt_divu16
-    ld a,e
+    ld e,0                  ; 1 once a digit has been printed
+    ld bc,-10000
+    call .digit
+    ld bc,-1000
+    call .digit
+    ld bc,-100
+    call .digit
+    ld bc,-10
+    call .digit
+    ld a,l
     add a,'0'
-    push af
-    ld a,h
-    or l
-    jr nz,.div
-.out:
-    pop af
-    cp $FF
-    ret z
+    jp rt_emit
+; one decimal digit by repeated subtraction (BC = -power of ten)
+.digit:
+    ld a,'0'-1
+.sub:
+    inc a
+    add hl,bc
+    jr c,.sub
+    sbc hl,bc               ; one subtraction too many (carry is clear)
+    cp '0'
+    jr nz,.emit
+    bit 0,e
+    ret z                   ; no leading zeros
+.emit:
+    ld e,1
+    push de
+    push hl
     call rt_emit
-    jr .out
+    pop hl
+    pop de
+    ret
 
 rt_s_true:  db "true",0
 rt_s_false: db "false",0
