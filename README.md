@@ -7,7 +7,7 @@
 <p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
 
 <p align="center">
-  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.2.0" src="https://img.shields.io/badge/version-1.2.0-brightgreen"></a>
+  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.2.1" src="https://img.shields.io/badge/version-1.2.1-brightgreen"></a>
   <a href="https://github.com/zstarczali/LZ80N/actions/workflows/ci.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/zstarczali/LZ80N/ci.yml?label=build"></a>
   <a href="https://github.com/zstarczali/LZ80N/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/zstarczali/LZ80N?color=blue"></a>
 </p>
@@ -37,7 +37,7 @@
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.
 
-Status: **1.2.0** — a complete command-line compiler: typed variables,
+Status: **1.2.1** — a complete command-line compiler: typed variables,
 multi-dimensional arrays with initialisers, strings, `fixed` point math,
 structs and classes, hardware sprites, Layer 2 graphics (lines, circles,
 ellipses, triangles, PNG pictures), palettes, AY sound and music, ProTracker 3 modules,
