@@ -3094,3 +3094,81 @@ print(bad)
     );
     expect("r_shapes_ref", &src, "0\n");
 }
+
+#[test]
+fn run_vline_matches_plots() {
+    let src = r#"
+word bad = 0
+function vref(word x, byte y, word len, byte c)
+    while len ~= 0 do
+        plot(x, y, c)
+        len -= 1
+        if y == 255 then break end
+        y += 1
+    end
+end
+function check(word x, byte y, word len, word w, byte h)
+    vline(x, y, len, 2)
+    vref(x, y, len, 1)
+    vline(x, y, len, 3)
+    for yy = 0, h do
+        for xx = 0, w - 1 do
+            byte p = point(xx, byte(yy))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+layer2_visible(true)
+check(0, 0, 192, 256, 191)
+check(255, 30, 1000, 256, 191)
+check(17, 31, 2, 256, 191)
+check(40, 191, 5, 256, 191)
+check(40, 200, 5, 256, 191)
+check(300, 10, 50, 256, 191)
+check(9, 9, 0, 256, 191)
+layer2_mode(L2_320)
+check(319, 0, 256, 320, 255)
+check(100, 250, 30, 320, 255)
+check(320, 0, 10, 320, 255)
+layer2_mode(L2_640)
+check(639, 5, 100, 640, 255)
+check(2, 200, 400, 640, 255)
+print(bad)
+"#;
+    expect("r_vline_ref", src, "0\n");
+}
+
+#[test]
+fn run_hline_matches_plots() {
+    let src = r#"
+word bad = 0
+function check(word x, byte y, word len)
+    hline(x, y, len, 2)
+    for i = 0, 300 do
+        if word(i) < len then plot(x + word(i), y, 1) end
+    end
+    hline(x, y, len, 3)
+    for yy = 0, 191 do
+        for xx = 0, 255 do
+            byte p = point(xx, byte(yy))
+            if p == 1 or p == 2 then bad += 1 end
+        end
+    end
+    layer2_clear(0)
+end
+layer2_visible(true)
+check(0, 0, 256)
+check(10, 5, 31)
+check(10, 6, 32)
+check(10, 7, 33)
+check(240, 100, 100)
+check(0, 191, 300)
+check(5, 192, 50)
+check(256, 50, 10)
+check(100, 33, 1)
+check(100, 34, 0)
+print(bad)
+"#;
+    expect("r_hline_ref", src, "0\n");
+}
