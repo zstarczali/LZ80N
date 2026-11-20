@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-11-20
 
 **Speed** (measurements: `docs/performance-review.md`, section 6)
 
@@ -17,6 +17,9 @@
 * `fill_triangle`: big triangles in 320x256 / 640x256 were drawn wrong
   (a 16-bit overflow).
 * Calling `sound_tick()` from the main program is reported as an error.
+
+**Benchmarks**: LZ80N vs NextBASIC measured in CSpect: LZ80N is 20-435x
+faster (`benchmarks/README.md`).
 
 ## 1.1.0 — 2026-11-19
 
