@@ -3,6 +3,7 @@
 ## 1.2.1
 
 * Follows LZ80N 1.2.1 (program icon; no language changes).
+* New extension icon: the neon LZ80N emblem.
 * Right-click menus, as in the Ultimate Basic extension: in the editor
   Build, Build and Run, Build without Optimisation (`-O0`), Build with Code
   Banking (`--bank-all`), Show Generated Assembly, Check File and Reveal .nex
