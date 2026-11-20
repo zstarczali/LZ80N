@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.1 — 2026-11-20
+
+**Tools**
+
+* Program icon: `lz80nc.exe` carries the LZ80N icon on Windows, and the
+  macOS packages set it as the Finder icon of `lz80nc`.
+* VS Code extension 1.2.1: right-click menus in the editor and the Explorer
+  (Build, Build and Run, Build without optimisation `-O0`, Build with code
+  banking `--bank-all`, Show Generated Assembly, Check File, Reveal .nex).
+* Release archives are published to the c64va.pro download area by the
+  `publish` workflow.
+
+No language or compiler changes.
+
 ## 1.2.0 — 2026-11-20
 
 **Speed** (measurements: `docs/performance-review.md`, section 6)

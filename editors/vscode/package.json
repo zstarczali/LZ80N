@@ -2,7 +2,7 @@
   "name": "lz80n",
   "displayName": "LZ80N",
   "description": "LZ80N language support for the ZX Spectrum Next: syntax highlighting, diagnostics, build and run in CSpect.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "zsolt-tarczali",
   "author": {
     "name": "Zsolt Tarczali"
@@ -44,8 +44,8 @@
         ],
         "configuration": "./language-configuration.json",
         "icon": {
-          "light": "./images/icon.png",
-          "dark": "./images/icon.png"
+          "light": "./images/file-icon.png",
+          "dark": "./images/file-icon.png"
         }
       }
     ],
@@ -65,21 +65,45 @@
     "commands": [
       {
         "command": "lz80n.build",
-        "title": "LZ80N: Build (.nex)",
+        "title": "Build (.nex)",
+        "category": "LZ80N",
         "icon": "$(tools)"
       },
       {
         "command": "lz80n.run",
-        "title": "LZ80N: Build and Run in Emulator",
+        "title": "Build and Run in Emulator",
+        "category": "LZ80N",
         "icon": "$(play)"
       },
       {
-        "command": "lz80n.check",
-        "title": "LZ80N: Check File"
+        "command": "lz80n.buildNoOpt",
+        "title": "Build without Optimisation (-O0)",
+        "category": "LZ80N",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "lz80n.buildBankAll",
+        "title": "Build with Code Banking (--bank-all)",
+        "category": "LZ80N",
+        "icon": "$(tools)"
       },
       {
         "command": "lz80n.showAsm",
-        "title": "LZ80N: Show Generated Assembly"
+        "title": "Show Generated Assembly",
+        "category": "LZ80N",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "lz80n.check",
+        "title": "Check File",
+        "category": "LZ80N",
+        "icon": "$(check)"
+      },
+      {
+        "command": "lz80n.revealNex",
+        "title": "Reveal .nex in File Explorer",
+        "category": "LZ80N",
+        "icon": "$(folder-opened)"
       }
     ],
     "menus": {
@@ -95,6 +119,65 @@
           "group": "navigation@2"
         }
       ],
+      "editor/context": [
+        {
+          "command": "lz80n.build",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@1"
+        },
+        {
+          "command": "lz80n.run",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@2"
+        },
+        {
+          "command": "lz80n.buildNoOpt",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@3"
+        },
+        {
+          "command": "lz80n.buildBankAll",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@4"
+        },
+        {
+          "command": "lz80n.showAsm",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@5"
+        },
+        {
+          "command": "lz80n.check",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@6"
+        },
+        {
+          "command": "lz80n.revealNex",
+          "when": "editorLangId == lz80n",
+          "group": "lz80n@7"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "lz80n.build",
+          "when": "resourceExtname == .lz80n",
+          "group": "lz80n@1"
+        },
+        {
+          "command": "lz80n.run",
+          "when": "resourceExtname == .lz80n",
+          "group": "lz80n@2"
+        },
+        {
+          "command": "lz80n.showAsm",
+          "when": "resourceExtname == .lz80n",
+          "group": "lz80n@3"
+        },
+        {
+          "command": "lz80n.revealNex",
+          "when": "resourceExtname == .lz80n",
+          "group": "lz80n@4"
+        }
+      ],
       "commandPalette": [
         {
           "command": "lz80n.build",
@@ -105,11 +188,23 @@
           "when": "editorLangId == lz80n"
         },
         {
-          "command": "lz80n.check",
+          "command": "lz80n.buildNoOpt",
+          "when": "editorLangId == lz80n"
+        },
+        {
+          "command": "lz80n.buildBankAll",
           "when": "editorLangId == lz80n"
         },
         {
           "command": "lz80n.showAsm",
+          "when": "editorLangId == lz80n"
+        },
+        {
+          "command": "lz80n.check",
+          "when": "editorLangId == lz80n"
+        },
+        {
+          "command": "lz80n.revealNex",
           "when": "editorLangId == lz80n"
         }
       ]
