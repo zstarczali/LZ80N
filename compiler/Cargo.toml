@@ -6,3 +6,6 @@ license = "MIT"
 
 [dependencies]
 png = "0.17"
+
+[build-dependencies]
+embed-resource = "3"
