@@ -2752,3 +2752,139 @@ fn bench() {
     }
     panic!("did not finish");
 }
+
+#[test]
+fn run_branches_match_bool_values() {
+    // every condition as a jump (if) and as a value (bool v = ...) must agree
+    let conds = [
+        "x > 100 or not (x < 50 and x ~= 7)",
+        "x > 254",
+        "x <= 3",
+        "not (x == 0)",
+        "s < 0",
+        "s >= 0",
+        "s > -1",
+        "s <= 126",
+        "s > 126 or s < -127",
+        "w == 0",
+        "w ~= 0",
+        "w > 65000",
+        "w <= 1200",
+        "sw < 0",
+        "sw >= 0 and x ~= 3 or s < -100",
+        "not (sw > -2) and not (w == 300)",
+    ];
+    let mut src = String::from("word bad = 0\nfor i = 0, 255 do\n    byte x = byte(i)\n    sbyte s = sbyte(x)\n    word w = word(x) * 300\n    sword sw = sword(w)\n");
+    for (k, c) in conds.iter().enumerate() {
+        src.push_str(&format!(
+            "    bool v{k} = {c}\n    bool j{k} = false\n    if {c} then j{k} = true end\n    if v{k} ~= j{k} then bad += 1 end\n"
+        ));
+    }
+    src.push_str("end\nword n = 0\nwhile n < 10 or n == 12 do n += 1 end\nprint(bad, n)\n");
+    expect("r_branches", &src, "0 10\n");
+}
+
+#[test]
+fn run_update_in_place() {
+    // t op= x on struct array fields (address once) must match plain variables
+    let src = r#"
+struct T
+    byte b
+    sbyte s
+    word w
+    sword sw
+    fixed f
+end
+T t[4]
+byte b = 0
+sbyte s = 0
+word w = 0
+sword sw = 0
+fixed f = 0.0
+word bad = 0
+byte k = 2
+for i = 0, 40 do
+    byte v = byte(i * 37)
+    sbyte sv = sbyte(v)
+    t[k].b += v       b += v
+    t[k].b -= 3       b -= 3
+    t[k].b += 1       b += 1
+    t[k].b -= 255     b -= 255
+    t[k].b &= 0xF7    b &= 0xF7
+    t[k].b |= v       b |= v
+    t[k].s += sv      s += sv
+    t[k].s -= 1       s -= 1
+    t[k].w += v       w += v
+    t[k].w += 1       w += 1
+    t[k].w -= 700     w -= 700
+    t[k].w = t[k].w ~ 0x0F0F   w = w ~ 0x0F0F
+    t[k].w -= word(v) * 3   w -= word(v) * 3
+    t[k].w += sv      w += sv
+    t[k].sw += sv     sw += sv
+    t[k].sw -= 1      sw -= 1
+    t[k].sw -= sw / 4
+    sw -= sw / 4
+    t[k].f += 1.25    f += 1.25
+    t[k].f -= f / 8.0
+    f -= f / 8.0
+    if t[k].b ~= b or t[k].s ~= s or t[k].w ~= w or t[k].sw ~= sw or t[k].f ~= f then bad += 1 end
+end
+print(bad, t[1].w, t[3].b)
+"#;
+    expect("r_inplace", src, "0 0 0\n");
+}
+
+#[test]
+fn run_word_byte_loads() {
+    let src = r#"
+struct Q
+    byte pad
+    word w
+    sword s
+end
+Q q[3]
+word g = 0x1234
+sword n = -2
+q[2].w = 0xABCD
+q[2].s = -300
+word a[4] = {1, 0x0201, 0xFF80, 4}
+byte i = 2
+print(byte(g), byte(g >> 8), byte(n), byte(n >> 8))
+print(byte(q[i].w), byte(q[i].w >> 8), byte(q[i].s), byte(q[i].s >> 8))
+print(byte(a[i]), byte(a[i] >> 8), sbyte(a[i]))
+"#;
+    expect("r_wordbyte", src, "52 18 254 255\n205 171 212 254\n128 255 -128\n");
+}
+
+#[test]
+fn run_field_by_field() {
+    let src = r#"
+struct M
+    word x
+    sword y
+    byte bx
+    sbyte dx
+    word dw
+    fixed f
+    fixed df
+end
+M m[3]
+byte j = 1
+m[j].x = 1000  m[j].y = -5  m[j].bx = 250  m[j].dx = -3  m[j].dw = 0x0F0F
+m[j].f = 1.5  m[j].df = 0.25
+m[j].x += m[j].dx
+m[j].y -= m[j].dx
+m[j].bx += m[j].dx
+m[j].dw = m[j].dw ~ m[j].x
+m[j].dw |= m[j].bx
+m[j].x &= m[j].dw
+m[j].f -= m[j].df
+m[j].dx = -m[j].dx
+m[j].y = -m[j].y
+print(m[j].x, m[j].y, m[j].bx, m[j].dw, m[j].f, m[j].dx)
+print(m[0].x, m[2].y)
+"#;
+    // x = 997; y = -2; bx = 247; dw = $F0F ^ 997 = $CEA, | 247 = $CFF (3327);
+    // x = 997 & 3327 = 229; f = 1.25; dx = 3; y = 2
+    expect("r_fieldfield", src, "229 2 247 3327 1.25 3\n0 0\n");
+}
