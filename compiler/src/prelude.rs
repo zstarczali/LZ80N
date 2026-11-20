@@ -123,11 +123,25 @@ function rgb(byte r, byte g, byte b) -> byte
 end
 
 function vline(word x, byte y, word len, byte c)
-    while len > 0 do
-        plot(x, y, c)
-        if y == 255 then return end
-        y += 1
-        len -= 1
+    asm
+            ld hl,(p_vline_len)
+.lp:
+            ld a,h
+            or l
+            jr z,.out
+            push hl
+            ld hl,(p_vline_x)
+            ld a,(p_vline_y)
+            ld d,a
+            ld a,(p_vline_c)
+            call rt_plot
+            pop hl
+            dec hl
+            ld a,(p_vline_y)
+            inc a
+            ld (p_vline_y),a
+            jr nz,.lp               ; stops after row 255
+.out:
     end
 end
 
@@ -148,33 +162,101 @@ function rect(word x, byte y, word w, word h, byte c)
     vline(x + w - 1, y, h, c)
 end
 
--- Bresenham line
+-- Bresenham line, in assembly (plots through the current mode's rt_plot)
+word l2_ln_dx
+sword l2_ln_err
+sword l2_ln_e2
+byte l2_ln_dy
+byte l2_ln_sx
+byte l2_ln_sy
+
 function line(word x0, byte y0, word x1, byte y1, byte c)
-    sword dx = x1 - x0
-    sword dy = y1 - y0
-    sbyte sx = 1
-    sbyte sy = 1
-    if dx < 0 then
-        dx = -dx
-        sx = -1
-    end
-    if dy < 0 then
-        dy = -dy
-        sy = -1
-    end
-    sword err = dx - dy
-    while true do
-        plot(x0, y0, c)
-        if x0 == x1 and y0 == y1 then break end
-        sword e2 = err + err
-        if e2 > -dy then
-            err -= dy
-            x0 += sx
-        end
-        if e2 < dx then
-            err += dx
-            y0 += sy
-        end
+    asm
+            ld hl,(p_line_x1)       ; dx = |x1 - x0|, sx = direction
+            ld de,(p_line_x0)
+            or a
+            sbc hl,de
+            ld a,1
+            jr nc,.sx
+            call rt_neghl
+            ld a,255
+.sx:
+            ld (g_l2_ln_sx),a
+            ld (g_l2_ln_dx),hl
+            ld a,(p_line_y0)        ; dy = |y1 - y0|, sy = direction
+            ld b,a
+            ld a,(p_line_y1)
+            sub b
+            ld b,1
+            jr nc,.sy
+            neg
+            ld b,255
+.sy:
+            ld (g_l2_ln_dy),a
+            ld e,a
+            ld d,0
+            ld a,b
+            ld (g_l2_ln_sy),a
+            or a
+            sbc hl,de               ; err = dx - dy
+            ld (g_l2_ln_err),hl
+.loop:
+            ld hl,(p_line_x0)
+            ld a,(p_line_y0)
+            ld d,a
+            ld a,(p_line_c)
+            call rt_plot
+            ld hl,(p_line_x0)       ; at the end point?
+            ld de,(p_line_x1)
+            or a
+            sbc hl,de
+            jr nz,.go
+            ld a,(p_line_y1)
+            ld b,a
+            ld a,(p_line_y0)
+            cp b
+            jr z,.out
+.go:
+            ld hl,(g_l2_ln_err)
+            add hl,hl
+            ld (g_l2_ln_e2),hl
+            ld a,(g_l2_ln_dy)       ; e2 > -dy: e2 + dy > 0
+            ld e,a
+            ld d,0
+            add hl,de
+            bit 7,h
+            jr nz,.noX
+            ld a,h
+            or l
+            jr z,.noX
+            ld hl,(g_l2_ln_err)
+            or a
+            sbc hl,de
+            ld (g_l2_ln_err),hl
+            ld hl,(p_line_x0)
+            ld a,(g_l2_ln_sx)
+            dec a
+            jr z,.xinc
+            dec hl
+            dec hl
+.xinc:
+            inc hl
+            ld (p_line_x0),hl
+.noX:
+            ld hl,(g_l2_ln_e2)      ; e2 < dx
+            ld de,(g_l2_ln_dx)
+            or a
+            sbc hl,de
+            jp p,.loop
+            ld hl,(g_l2_ln_err)
+            add hl,de
+            ld (g_l2_ln_err),hl
+            ld a,(g_l2_ln_sy)
+            ld hl,p_line_y0
+            add a,(hl)
+            ld (hl),a
+            jp .loop
+.out:
     end
 end
 
@@ -188,12 +270,47 @@ end
 
 -- horizontal span x0..x1 on row y, clipped to the screen
 function l2_span(sword x0, sword x1, sword y, byte c)
-    if y < 0 or y >= sword(layer2_height()) then return end
-    if x0 < 0 then x0 = 0 end
-    sword right = sword(layer2_width()) - 1
-    if x1 > right then x1 = right end
-    if x0 > x1 then return end
-    hline(word(x0), byte(y), word(x1 - x0 + 1), c)
+    asm
+            ld hl,(p_l2_span_y)
+            ld a,h
+            or a
+            jr nz,.out              ; y < 0 or y > 255
+            ld a,(rt_l2hmax)
+            cp l
+            jr c,.out               ; below the screen
+            ld hl,(p_l2_span_x0)
+            bit 7,h
+            jr z,.x0
+            ld hl,0                 ; x0 = max(x0, 0)
+.x0:
+            ex de,hl                ; DE = x0
+            ld bc,(p_l2_span_x1)
+            bit 7,b
+            jr nz,.out              ; x1 < 0
+            ld hl,(rt_l2wid)
+            dec hl                  ; the right edge
+            or a
+            sbc hl,bc
+            jr nc,.x1
+            add hl,bc
+            ld b,h
+            ld c,l                  ; x1 = right
+.x1:
+            ld h,b
+            ld l,c
+            or a
+            sbc hl,de
+            jr c,.out               ; x0 > x1
+            inc hl
+            ld b,h
+            ld c,l                  ; BC = length
+            ex de,hl                ; HL = x0
+            ld a,(p_l2_span_y)
+            ld d,a
+            ld a,(p_l2_span_c)
+            call rt_hline
+.out:
+    end
 end
 
 -- half width of an ellipse dy rows from its centre
@@ -219,18 +336,22 @@ function fill_ellipse(sword x, sword y, byte rx, byte ry, byte c)
 end
 
 function ellipse(sword x, sword y, byte rx, byte ry, byte c)
+    byte w = l2_halfw(rx, ry, 0)
     for dy = 0, ry do
-        byte w = l2_halfw(rx, ry, dy)
         -- connect to the next row: from just outside its half width to ours
-        byte inner = w
-        if dy < ry then inner = min(l2_halfw(rx, ry, dy + 1) + 1, w) end
-        if dy == ry then inner = 0 end
+        byte inner = 0
+        byte wn = 0
+        if dy < ry then
+            wn = l2_halfw(rx, ry, dy + 1)
+            inner = min(wn + 1, w)
+        end
         l2_span(x + inner, x + w, y + dy, c)
         l2_span(x - w, x - inner, y + dy, c)
         if dy ~= 0 then
             l2_span(x + inner, x + w, y - dy, c)
             l2_span(x - w, x - inner, y - dy, c)
         end
+        w = wn
     end
 end
 
@@ -250,13 +371,45 @@ function triangle(word x0, byte y0, word x1, byte y1, word x2, byte y2, byte c)
     line(x2, y2, x0, y0, c)
 end
 
--- a + (b - a) * t / n, rounded towards a
-function l2_lerp(sword a, sword b, sword t, sword n) -> sword
-    if n == 0 then return a end
-    sword d = b - a
-    sword m = sword(word(abs(d)) * word(t) / word(n))
-    if d < 0 then return a - m end
-    return a + m
+-- two triangle edges stepped row by row: x = a + (b - a) * t / n, rounded
+-- towards a, without a multiplication or division per row
+sword tr_a[2]
+sword tr_m[2]
+word tr_q[2]
+word tr_r[2]
+word tr_acc[2]
+word tr_n[2]
+bool tr_neg[2]
+
+function tr_edge(byte k, sword a, sword b, sword t, sword n)
+    tr_a[k] = a
+    tr_m[k] = 0
+    tr_q[k] = 0
+    tr_r[k] = 0
+    tr_acc[k] = 0
+    tr_n[k] = word(n)
+    tr_neg[k] = b < a
+    if n == 0 then return end
+    word d = word(abs(b - a))
+    tr_q[k] = d / word(n)
+    tr_r[k] = d % word(n)
+    long p = long(d) * long(t)
+    tr_m[k] = sword(p / long(n))
+    tr_acc[k] = word(p % long(n))
+end
+
+function tr_x(byte k) -> sword
+    if tr_neg[k] then return tr_a[k] - tr_m[k] end
+    return tr_a[k] + tr_m[k]
+end
+
+function tr_step(byte k)
+    tr_m[k] += sword(tr_q[k])
+    tr_acc[k] += tr_r[k]
+    if tr_acc[k] >= tr_n[k] and tr_n[k] ~= 0 then
+        tr_acc[k] -= tr_n[k]
+        tr_m[k] += 1
+    end
 end
 
 function fill_triangle(sword x0, sword y0, sword x1, sword y1, sword x2, sword y2, byte c)
@@ -276,16 +429,25 @@ function fill_triangle(sword x0, sword y0, sword x1, sword y1, sword x2, sword y
     end
     sword ya = max(y0, 0)
     sword yb = min(y2, sword(layer2_height()) - 1)
+    if ya > yb then return end
+    tr_edge(0, x0, x2, ya - y0, y2 - y0)
+    bool top_half = ya < y1
+    if top_half then
+        tr_edge(1, x0, x1, ya - y0, y1 - y0)
+    else
+        tr_edge(1, x1, x2, ya - y1, y2 - y1)
+    end
     sword y = ya
     while y <= yb do
-        sword xa = l2_lerp(x0, x2, y - y0, y2 - y0)
-        sword xb = 0
-        if y < y1 then
-            xb = l2_lerp(x0, x1, y - y0, y1 - y0)
-        else
-            xb = l2_lerp(x1, x2, y - y1, y2 - y1)
+        if top_half and y == y1 then
+            tr_edge(1, x1, x2, 0, y2 - y1)
+            top_half = false
         end
+        sword xa = tr_x(0)
+        sword xb = tr_x(1)
         if xa <= xb then l2_span(xa, xb, y, c) else l2_span(xb, xa, y, c) end
+        tr_step(0)
+        tr_step(1)
         y += 1
     end
 end
