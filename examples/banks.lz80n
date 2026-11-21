@@ -49,6 +49,10 @@ ink(BRIGHT_WHITE)
 at(0, 1)
 write("far arrays: 16K map in banks  O/P")
 layer2_visible(true)
+-- clear both buffers: draw() only covers rows 16..191, and the other
+-- buffer starts with whatever was in RAM
+layer2_clear(0)
+layer2_flip()
 layer2_clear(0)
 
 word left = 0

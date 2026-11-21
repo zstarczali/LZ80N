@@ -37,6 +37,15 @@ class Sprite
         self.update()
     end
 
+    -- do the 16 << scale squares of two visible sprites overlap? (from the
+    -- shadow fields; transparent pixels count, no screen-edge wrapping)
+    function overlaps(Sprite other) -> bool
+        if not self.visible or not other.visible then return false end
+        word a = word(16) << (self.scale & 3)
+        word b = word(16) << (other.scale & 3)
+        return self.x < other.x + b and other.x < self.x + a and self.y < other.y + b and other.y < self.y + a
+    end
+
     -- the five attribute registers, written from the fields through IX
     -- (field offsets: x 0, y 2, id 4, pattern 5, palette 6, visible 7,
     -- mirror_x 8, mirror_y 9, rotate 10, scale 11)
@@ -103,6 +112,12 @@ function sprites_visible(bool on, bool over_border)
     if on then r |= 1 end
     if over_border then r |= 2 end
     nextreg[0x15] = r
+end
+
+-- hardware collision flag (port $303B bit 0): two sprites' non-transparent
+-- pixels overlapped since the last call; reading the port clears it
+function sprite_collision() -> bool
+    return port[0x303B] & 1 ~= 0
 end
 "#;
 
@@ -309,11 +324,13 @@ function l2_halfw(byte rx, byte ry, byte dy) -> byte
     if ry == 0 then return rx end
     -- Pythagoras in the space of the larger radius, then scale down, so
     -- the integer square root's rounding is never magnified
+    -- (radius r + 1/2: (r + 1/2)^2 - dy^2 rounded is r*r + r - dy*dy, so
+    -- the top, bottom and sides are flat runs, not single-pixel spikes)
     if rx >= ry then
         word k = (word(dy) * rx + ry / 2) / ry
-        return sqrt(word(rx) * rx - k * k)
+        return sqrt(word(rx) * rx + rx - k * k)
     end
-    byte h = sqrt(word(ry) * ry - word(dy) * dy)
+    byte h = sqrt(word(ry) * ry + ry - word(dy) * dy)
     return byte((word(rx) * h + ry / 2) / ry)
 end
 
@@ -992,7 +1009,7 @@ pub fn uses_sprites(src: &str) -> bool {
 /// when a program starts to use a module. Names starting with `snd_` are
 /// reserved for the sound module's internals.
 pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
-    ("sprite", &["Sprite", "sprite", "sprites_visible"]),
+    ("sprite", &["Sprite", "sprite", "sprites_visible", "sprite_collision"]),
     (
         "Layer 2",
         &[
