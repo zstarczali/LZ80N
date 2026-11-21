@@ -15,8 +15,8 @@ layer2_visible(true)
 
 sword x = 10
 sword y = 20
-sword dx = 2
-sword dy = 1
+sword dx = 3
+sword dy = 2
 const MAX_X = 256 - image_width(badge)
 const MAX_Y = 192 - image_height(badge)
 
