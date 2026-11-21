@@ -15,7 +15,14 @@ alatt (ennek nagy része az SjASMPlus indítása).
   BENCH=../benchmarks/micro.lz80n cargo test --release bench -- --ignored --nocapture
   ```
 
-  Ezek ideális Z80N T-állapotok, várakozási ciklusok nélkül. A számok a frame
+  Ezek ideális Z80N T-állapotok, várakozási ciklusok nélkül.
+* **Profilozás:** egy egész program (példa vagy `.lz80n` fájl) képkockáinak
+  ideje függvényenként, a `vsync`-re várakozással együtt:
+
+  ```
+  PROFILE=shooter FRAMES=300 cargo test --release profile -- --ignored --nocapture
+  ```
+ A számok a frame
   megszakítást is tartalmazzák. **Egy képkocka 28 MHz-en kb. 560 000 T,
   3,5 MHz-en kb. 70 000 T.**
 * **Kódátnézés:** a generált assembly (`*.asm`), a `codegen.rs`, a
@@ -251,6 +258,45 @@ Ami kimaradt, és miért:
   belüli mezőelérés (~200), a `djnz`-s ciklus kb. 10 T-t nyerne, de a
   `break` miatt kockázatos. Akkor érdemes, ha egy valódi játék mérése ezt
   mutatja.
+
+## 7. Eredmények (2026-11-21): vonal és ellipszis
+
+**Profil (2026-11-21):** a `shooter` a képkocka 54%-ában a `vsync`-re vár,
+36%-a a `layer2_clear` (DMA), a játéklogika kb. 10%. Az `inherit` hasonló.
+A kódgenerálás maradék ötletei (C.6, C.9–C.11) ezért keveset hoznának; a
+rajzolórutinokban volt tartalék: a `shapes` idejének 30%-a a soronkénti
+`sqrt`, osztás és szorzás volt az ellipszisekben.
+
+* **Ellipszis:** a sorok félszélessége (`floor(sqrt(B² + B - k²))`, majd a
+  kisebb sugárra skálázva) lépésenként, összeadással számolódik: `k`, a gyök
+  és a hányados is csak egy irányba mozog. Pontosan ugyanazok az értékek
+  (teszt: 23 881 sor a régi képlettel összevetve). Az `ellipse` és a
+  `fill_ellipse` sorciklusa assemblyben; ha az alakzat a képen van, nincs
+  vágás (256-os módban a körvonal közvetlenül íródik, egyébként `rt_hline`).
+  `ry = 0`: egyetlen szakasz.
+* **Vonal:** 256-os módban, ha mindkét végpont a képen van, a ciklus
+  regiszterekben fut (a pixel címe közvetlenül lép, a hiba az
+  árnyékregiszterekben). A `2 err`-re vonatkozó feltételek konstansokkal
+  való összehasonlítások lesznek, ugyanazzal a döntéssel, mint a régi
+  ciklus (pixelpontos teszt). Az általános ciklus is gyorsabb (`e2`
+  regiszterben, foltozott x-lépés, a végpont vizsgálata a rajzolás előtt).
+
+| Eset | előtte | most | gyorsulás |
+|------|-------:|-----:|----------:|
+| `line` 10 × ~190 pixel (#11) | 1 373 744 | 372 184 | 3,69× |
+| `line` 1 / 2 / 8 pixel, ×200 | 152 903 / 290 103 / 1 041 641 | 133 303 / 256 903 / 440 672 | 1,15× / 1,13× / 2,36× |
+| `line` a képen kívül / 320-as mód | 684 612 / 2 264 990 | 632 662 / 2 086 420 | 1,08× / 1,09× |
+| `circle` r = 60 (#14) | 420 826 | 145 658 | 2,89× |
+| `fill_circle` r = 60 (#15) | 392 568 | 221 535 | 1,77× |
+| `circle` r = 0 / r = 1, ×200 | 528 472 / 2 268 379 | 244 503 / 900 272 | 2,16× / 2,52× |
+| `ellipse` 20 × 90, ×10 | 6 320 433 | 2 092 770 | 3,02× |
+| vágott kör / ellipszis | 1 030 111 / 634 413 | 614 592 / 439 943 | 1,68× / 1,44× |
+| 320-as kör r = 40 / 640-es kitöltés r = 50 | 3 116 209 / 4 505 376 | 1 654 921 / 3 084 309 | 1,88× / 1,46× |
+
+32 esetet mértünk (1 pixeles vonaltól a vágott körökig, mindhárom módban);
+egyik sem lassabb. A legkisebb nyereség a 2 pixeles, a kép szélén átlógó
+vonal (1,01–1,02×). A többi `micro.lz80n` mérés változatlan (±460 T: egy
+megszakítás a mérési ablak szélén).
 
 ## 5. Ami már jó
 
