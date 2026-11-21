@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0
+
+* Follows LZ80N 1.3.0 (sprite collision detection, faster lines and
+  ellipses).
+* `sprite_collision()` in completion, hover help and highlighting;
+  `overlaps(other)` in the hover help of `sprite[n]`.
+
 ## 1.2.1
 
 * Follows LZ80N 1.2.1 (program icon; no language changes).
