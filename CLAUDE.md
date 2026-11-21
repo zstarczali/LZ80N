@@ -4,7 +4,9 @@
 
 On every new version update all of these, in one go:
 
-1. `compiler/Cargo.toml` and `compiler/Cargo.lock` (`lz80nc --version`)
+1. `compiler/Cargo.toml` and `compiler/Cargo.lock` (`lz80nc --version`). The Windows `.exe`
+   version information (Properties -> Details) is built from `Cargo.toml` by `compiler/build.rs`;
+   only the copyright year (`year`) and `COMPANY` are written there by hand
 2. `CHANGELOG.md` — a new `## x.y.z — YYYY-MM-DD` section
 3. `README.md` — the version badge and the `Status:` line
 4. `docs/manual-en.md` and `docs/manual-hu.md` — the version line, plus the new features
