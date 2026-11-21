@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Tools**
+
+* `lz80nc.exe` carries its version information on Windows (Properties ->
+  Details): version, product, description, author, copyright and licence,
+  taken from `Cargo.toml`.
+
 ## 1.3.0 — 2026-11-21
 
 **Language**
