@@ -769,6 +769,50 @@ print(sprite[3].x, sprite[3].id)
     }
 }
 
+/// `overlaps` compares the sprites' squares; `sprite_collision` reads the
+/// pixel-exact hardware flag (pattern 0 has a transparent top-left pixel).
+#[test]
+fn sprite_collisions() {
+    let png = write_test_png("coll.png");
+    let src = format!(
+        r#"
+asset s = "{}"
+sprite_load(0, s)
+sprites_visible(true, false)
+sprite[0].position(100, 100)
+sprite[0].show(0)
+sprite[1].position(85, 85)
+sprite[1].show(0)
+-- only B's bottom-right pixel touches A's transparent corner
+print(sprite[0].overlaps(sprite[1]), sprite_collision())
+sprite[1].position(86, 85)
+print(sprite[0].overlaps(sprite[1]), sprite_collision())
+sprite[1].position(84, 100)
+print(sprite[1].overlaps(sprite[0]), sprite_collision())
+sprite[1].scale = 1
+sprite[1].update()
+print(sprite[1].overlaps(sprite[0]), sprite_collision())
+sprite[1].hide()
+print(sprite[0].overlaps(sprite[1]), sprite_collision())
+sprite[1].position(300, 200)
+sprite[1].show(0)
+sprite[2].position(300, 200)
+sprite[2].show(1)
+-- off the display: the squares overlap, the hardware clips them
+print(sprite[1].overlaps(sprite[2]), sprite_collision())
+sprites_visible(true, true)
+print(sprite_collision())
+"#,
+        png.display().to_string().replace(std::path::MAIN_SEPARATOR, "/")
+    );
+    if let Some(out) = run("r_sprite_coll", &src) {
+        assert_eq!(
+            out,
+            "true false\ntrue true\nfalse false\ntrue true\nfalse false\ntrue false\ntrue\n"
+        );
+    }
+}
+
 #[test]
 fn sprite_errors() {
     let png = write_test_png("err.png");

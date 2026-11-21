@@ -16,11 +16,13 @@ function ref_halfw(byte rx, byte ry, byte dy) -> byte
     if ry == 0 then return rx end
     -- Pythagoras in the space of the larger radius, then scale down, so
     -- the integer square root's rounding is never magnified
+    -- (radius r + 1/2: (r + 1/2)^2 - dy^2 rounded is r*r + r - dy*dy, so
+    -- the top, bottom and sides are flat runs, not single-pixel spikes)
     if rx >= ry then
         word k = (word(dy) * rx + ry / 2) / ry
-        return sqrt(word(rx) * rx - k * k)
+        return sqrt(word(rx) * rx + rx - k * k)
     end
-    byte h = sqrt(word(ry) * ry - word(dy) * dy)
+    byte h = sqrt(word(ry) * ry + ry - word(dy) * dy)
     return byte((word(rx) * h + ry / 2) / ry)
 end
 

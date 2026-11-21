@@ -155,7 +155,7 @@
         {
           "comment": "standard library (written in LZ80N, always reserved)",
           "name": "support.function.library.lz80n",
-          "match": "\\b(sprites_visible|layer2_visible|rgb|vline|line|rect|fill_rect|circle|fill_circle|ellipse|fill_ellipse|triangle|fill_triangle|palette|palette9|palette_select|rgb9|copper_begin|copper_wait|copper_move|copper_start|copper_stop|sound_reset|sound_mix|tone|noise|volume|sound_off|beep|play|play_loop|playing|sound_tick)\\b(?=\\s*\\()"
+          "match": "\\b(sprites_visible|sprite_collision|layer2_visible|rgb|vline|line|rect|fill_rect|circle|fill_circle|ellipse|fill_ellipse|triangle|fill_triangle|palette|palette9|palette_select|rgb9|copper_begin|copper_wait|copper_move|copper_start|copper_stop|sound_reset|sound_mix|tone|noise|volume|sound_off|beep|play|play_loop|playing|sound_tick)\\b(?=\\s*\\()"
         },
         { "name": "support.class.library.lz80n", "match": "\\bSprite\\b" }
       ]

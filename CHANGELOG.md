@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+**Language**
+
+* Sprite collision detection: `sprite[a].overlaps(sprite[b])` compares the
+  two sprites' squares, `sprite_collision()` reads the pixel-exact hardware
+  flag (port `$303B`). The built-in emulator models the flag.
+
+**Fixes**
+
+* Circles and ellipses (`circle`, `fill_circle`, `ellipse`, `fill_ellipse`)
+  no longer have single-pixel spikes at the top, bottom and sides: the
+  half widths use the radius r + 1/2.
+* Examples: `banks` and `samples` clear Layer 2 (garbage on real hardware),
+  the moon in `shapes` goes behind the planet, and the planet's ring is
+  drawn in one piece.
+
 ## 1.2.1 — 2026-11-20
 
 **Tools**

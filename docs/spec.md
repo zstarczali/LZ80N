@@ -337,7 +337,13 @@ sprite[1].update()                    -- ... then upload them
 `Sprite` fields: `x`, `y` (word, hardware coordinates — the 256×192 area
 starts at 32,32), `pattern`, `palette` (offset 0–15), `visible`, `mirror_x`,
 `mirror_y`, `rotate`, `scale` (0–3: ×1, ×2, ×4, ×8), `id` (read-only).
-Methods: `position(x, y)`, `show(pattern)`, `hide()`, `update()`.
+Methods: `position(x, y)`, `show(pattern)`, `hide()`, `update()`,
+`overlaps(other)` → bool (the 16 << scale squares of two visible sprites
+overlap, from the shadow fields, no wrapping).
+`sprite_collision()` → bool reads port `$303B` bit 0 (pixel-exact hardware
+flag, cleared by the read). The emulator computes it from the attributes
+at the time of the read, clipped to the display (or 320×256 over the
+border).
 Attributes go through NextReg `$34`–`$39` (5-byte form: X8 in attr 2,
 Y8 in attr 4).
 

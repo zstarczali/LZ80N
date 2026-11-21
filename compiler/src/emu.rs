@@ -499,6 +499,7 @@ impl Cpu {
             0xFFFD => self.ay[self.ay_chip][self.ay_reg],
             0x253B => self.nextreg[self.nr_sel as usize],
             p if p & 0xFF == 0x1F => self.kempston,
+            0x303B => self.sprite_status(),
             p if p & 1 == 0 => {
                 let mut v = 0x1F;
                 for row in 0..8 {
@@ -510,6 +511,61 @@ impl Cpu {
             }
             _ => 0xFF,
         }
+    }
+
+    /// Sprite status port ($303B read). Bit 0: two visible sprites have
+    /// overlapping non-transparent pixels inside the clip area (the display,
+    /// or the whole 320x256 screen when sprites are over the border). The
+    /// hardware sets the flag while drawing and clears it on read; here it
+    /// is computed from the current attributes at the time of the read.
+    fn sprite_status(&self) -> u8 {
+        if self.nextreg[0x15] & 1 == 0 {
+            return 0;
+        }
+        let (x0, y0, x1, y1) = if self.nextreg[0x15] & 2 != 0 { (0, 0, 320, 256) } else { (32, 32, 288, 224) };
+        let mut seen = vec![false; 320 * 256];
+        for a in &self.sprite_attr {
+            if a[3] & 0x80 == 0 {
+                continue;
+            }
+            let attr4 = if a[3] & 0x40 != 0 { a[4] } else { 0 };
+            let x = a[0] as usize | ((a[2] as usize & 1) << 8);
+            let y = a[1] as usize | ((attr4 as usize & 1) << 8);
+            let (xs, ys) = (1usize << ((attr4 >> 3) & 3), 1usize << ((attr4 >> 1) & 3));
+            let (mx, my, rot) = (a[2] & 8 != 0, a[2] & 4 != 0, a[2] & 2 != 0);
+            let pat = (a[3] & 63) as usize * 256;
+            for sy in 0..16 * ys {
+                let py = y + sy;
+                if py < y0 || py >= y1 {
+                    continue;
+                }
+                for sx in 0..16 * xs {
+                    let px = x + sx;
+                    if px < x0 || px >= x1 {
+                        continue;
+                    }
+                    let (mut u, mut v) = (sx / xs, sy / ys);
+                    if mx {
+                        u = 15 - u;
+                    }
+                    if my {
+                        v = 15 - v;
+                    }
+                    if rot {
+                        (u, v) = (v, 15 - u);
+                    }
+                    if self.patterns[pat + v * 16 + u] == 0xE3 {
+                        continue;
+                    }
+                    let cell = &mut seen[py * 320 + px];
+                    if *cell {
+                        return 1;
+                    }
+                    *cell = true;
+                }
+            }
+        }
+        0
     }
 
     /// Execute one instruction (or idle while halted), advance the raster

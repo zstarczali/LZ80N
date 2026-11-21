@@ -56,6 +56,7 @@ const FUNCTIONS = {
   // 16 sprites
   sprite_load: ['sprite_load(first, asset)', 'Upload the sprite patterns of a PNG asset, starting at pattern slot `first`.', 16],
   sprites_visible: ['sprites_visible(on, over_border)', 'Turn the sprite layer on/off, optionally over the border.', 16],
+  sprite_collision: ['sprite_collision() -> bool', 'Hardware collision flag: two sprites' non-transparent pixels overlapped since the last call (port `$303B`, cleared by the read).', 16],
   // 17 sound
   beep: ['beep(ch, note, frames)', 'Play a note for a number of frames, in the background.', 17],
   tone: ['tone(ch, period)', 'Square wave; frequency = 109375 / period Hz (period 1–4095).', 17],
@@ -115,7 +116,7 @@ const ARRAYS = {
   memory: ['memory[address]', 'Read or write a byte of memory.', 19],
   nextreg: ['nextreg[reg]', 'Read or write a Next register.', 19],
   port: ['port[port]', 'Read or write an I/O port.', 19],
-  sprite: ['sprite[n]', 'Hardware sprite 0–127 (`Sprite` object): `x y pattern mirror_x scale visible`, `position(x, y)`, `show(pattern)`, `hide()`, `update()`.', 16],
+  sprite: ['sprite[n]', 'Hardware sprite 0–127 (`Sprite` object): `x y pattern mirror_x scale visible`, `position(x, y)`, `show(pattern)`, `hide()`, `update()`, `overlaps(other)`.', 16],
 };
 
 const TYPES = {
