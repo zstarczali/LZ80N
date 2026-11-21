@@ -9,6 +9,11 @@
 --   T_INT, T_FIXED: 4 bytes (little endian; fixed = raw 16.16)
 --   T_ERROR (255): length (word) + the message; nothing follows it
 -- The last record is T_EOF.
+--
+-- When the file expand.on exists (the self-hosted compiler's pipeline),
+-- `include "file"` is expanded (each file once, the main file counts) and
+-- the `file_*` standard module (lib_file.lz80n) is lexed first when the
+-- main file mentions file_ or FILE_, as compiler/src/main.rs does.
 
 const T_IDENT = 0
 const T_INT = 1
@@ -19,6 +24,7 @@ const T_ASM_BODY = 5
 const T_AND = 6                 -- keywords: T_AND + index in `keywords`
 const T_END = 13
 const T_ASM = 24
+const T_INCLUDE = 30
 const T_PLUS = 31
 const T_MINUS = 32
 const T_STAR = 33
@@ -74,6 +80,7 @@ byte c1                         -- the one after it
 word lno = 1
 word cno = 1
 bool failed = false
+bool expand = false             -- expand includes and modules (expand.on)
 
 function next_in() -> byte
     word g = file_getc(inh)
@@ -335,6 +342,15 @@ function number(word l, word c)
     out_word(word(hi))
 end
 
+bool str_emit = true
+
+-- a string literal into text (no record)
+function string_lit_text()
+    str_emit = false
+    string_lit(lno, cno)
+    str_emit = true
+end
+
 function string_lit(word l, word c)
     bump()
     tlen = 0
@@ -345,8 +361,10 @@ function string_lit(word l, word c)
             return
         end
         if ch == '"' then
-            out_head(T_STR, l, c)
-            out_text()
+            if str_emit then
+                out_head(T_STR, l, c)
+                out_text()
+            end
             return
         end
         if ch == '\\' then
@@ -429,6 +447,10 @@ function token()
     word c = cno
     if is_alpha(c0) or c0 == '_' then
         byte kind = word_tok()
+        if kind == T_INCLUDE and expand then
+            include_file(l, c)
+            return
+        end
         out_head(kind, l, c)
         if kind == T_IDENT then out_text() end
         if kind == T_ASM then asm_body() end
@@ -546,32 +568,132 @@ function token()
     out_head(k, l, c)
 end
 
--- ---------------------------------------------------------------- main
+-- ---------------------------------------------------------------- files
 
-inh = file_open("in.lz80n", FILE_READ)
-if inh == FILE_ERROR then
-    print("cannot open in.lz80n, error", file_status)
-else
+word ntokens = 0
+string included[16]
+byte nincluded = 0
+
+-- lex one file (no T_EOF); false if it cannot be opened
+function lex_file(string name) -> bool
+    inh = file_open(name, FILE_READ)
+    if inh == FILE_ERROR then return false end
     size = file_size(inh)
     pos = 0
     c0 = 0
     c1 = 0
+    lno = 1
+    cno = 1
     if size > 0 then c0 = next_in() end
     if size > 1 then c1 = next_in() end
-    outh = file_open("tokens.bin", FILE_WRITE)
-    word count = 0
     while not failed do
         skip_ws_and_comments()
-        if failed then break end
-        if at_end() then
-            out_head(T_EOF, lno, cno)
-            break
-        end
+        if failed or at_end() then break end
         token()
-        count += 1
+        ntokens += 1
     end
-    flush()
-    file_close(outh)
     file_close(inh)
-    print(count, "tokens")
+    return true
 end
+
+-- `include "path"` (the keyword is read): lex that file here, once
+function include_file(word l, word c)
+    skip_ws_and_comments()
+    if c0 ~= '"' then
+        error(l, c, "expected a file name after `include`")
+        return
+    end
+    word sl = lno
+    word sc = cno
+    string_lit_text()
+    if failed then return end
+    string path = ""
+    word i = 0
+    while i < tlen and i < 64 do
+        path = path .. chr(text[i])
+        i += 1
+    end
+    byte k = 0
+    while k < nincluded do
+        if included[k] == path then return end
+        k += 1
+    end
+    if nincluded < 16 then
+        included[nincluded] = path
+        nincluded += 1
+    end
+    -- the state of this file, then the other file, then back
+    byte h = inh
+    long sz = size
+    long p = pos
+    byte a = c0
+    byte b = c1
+    word ln = lno
+    word cn = cno
+    if not lex_file(path) then
+        error(sl, sc, "cannot read the included file")
+        return
+    end
+    inh = h
+    size = sz
+    pos = p
+    c0 = a
+    c1 = b
+    lno = ln
+    cno = cn
+    file_seek(inh, pos + 2)
+end
+
+-- does the main file mention file_ or FILE_?
+function mentions_file_module() -> bool
+    byte h = file_open("in.lz80n", FILE_READ)
+    if h == FILE_ERROR then return false end
+    byte m = 0                  -- characters of the pattern matched
+    bool found = false
+    word g = file_getc(h)
+    while g ~= FILE_EOF and not found do
+        byte ch = byte(g)
+        if m == 0 then
+            if ch == 'f' or ch == 'F' then m = 1 end
+        elseif m < 4 then
+            byte lc = ch | 0x20
+            if (m == 1 and lc == 'i') or (m == 2 and lc == 'l') or (m == 3 and lc == 'e') then
+                m += 1
+            elseif ch == 'f' or ch == 'F' then
+                m = 1
+            else
+                m = 0
+            end
+        else
+            if ch == '_' then found = true end
+            m = 0
+            if ch == 'f' or ch == 'F' then m = 1 end
+        end
+        g = file_getc(h)
+    end
+    file_close(h)
+    return found
+end
+
+-- ---------------------------------------------------------------- main
+
+byte probe = file_open("expand.on", FILE_READ)
+if probe ~= FILE_ERROR then
+    expand = true
+    file_close(probe)
+end
+outh = file_open("tokens.bin", FILE_WRITE)
+if expand and mentions_file_module() then
+    if not lex_file("lib_file.lz80n") then error(1, 1, "cannot read lib_file.lz80n") end
+end
+included[0] = "in.lz80n"
+nincluded = 1
+if not failed then
+    if not lex_file("in.lz80n") then
+        print("cannot open in.lz80n, error", file_status)
+    end
+end
+if not failed then out_head(T_EOF, lno, cno) end
+flush()
+file_close(outh)
+print(ntokens, "tokens")

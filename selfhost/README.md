@@ -10,8 +10,8 @@ compiler stays the stage-0 compiler that builds it.
 | 3a. Lexer (`lexer.lz80n`) | done: same tokens as `compiler/src/lexer.rs` |
 | 3b. Parser (`parser.lz80n`) | done: same tree as `compiler/src/parser.rs` |
 | 4a. Assembler (`asm.lz80n`) | done: same NEX as `compiler/src/asm/` |
-| 4b. Code generation (`codegen.lz80n`) | first part: integer programs, functions, recursion |
-| 5. The compiler compiles itself | |
+| 4b. Code generation (`codegen.lz80n`) | the subset the compiler itself is written in |
+| 5. The compiler compiles itself | done: `selfhost_bootstrap` reaches a fixed point |
 
 ## lexer.lz80n
 
@@ -65,29 +65,55 @@ Two passes (layout, then output; more only if a value changes). Speed at
 
 `include`s `parser_core.lz80n` (the parser of `parser.lz80n` without its
 output), reads `tokens.bin` and writes `out.asm` for `asm.lz80n`. The runtime
-comes from SD card files: `rt_start.asm`, `rt_lib.asm`, `rt_font.asm` (the texts
-of `compiler/src/runtime.rs` and `font.rs`).
+comes from SD card files, the texts of `compiler/src/runtime.rs`, `font.rs`
+and `prelude.rs`: `rt_start.asm`, `rt_lib.asm`, `rt_long.asm`,
+`rt_banked.asm`, `rt_font.asm`, `lib_file.lz80n` (the tests make them).
 
 It does not copy `compiler/src/codegen.rs` instruction for instruction: it
 makes simpler code (no optimisation) with the same labels (`g_ p_ l_ f_ s_`),
 calling convention and runtime, so `asm` blocks and the standard modules work
-unchanged. The checks are behavioural:
+unchanged.
 
-* `selfhost_codegen_runs_like_rust`: nine programs, compiled both ways, must
-  print the same in the emulator;
+Supported: `bool byte sbyte word sword long string`, constants, globals,
+locals, parameters, one-dimensional arrays (initialiser lists, string
+arrays), `far` arrays, every integer operator with the width / signedness
+rules of the spec, `..` and string comparisons, casts, `if while for break
+return`, functions, recursion (a call that can come back to the caller saves
+the caller's frame `fr_NAME..fr_NAME_end` on the stack), `print write len asc
+chr str addr memory[] asm`, `include`, the `file_*` module, and code banking
+(functions move into 8K pages at $4000 when the resident area would
+overflow; sizes are estimated per emitted instruction).
+
+Not yet: `fixed`, `fixed16`, structs and classes, multi-dimensional arrays,
+assets, interrupts, functions returning strings, the other built-in
+functions and standard modules (Layer 2, sprites, sound ...), outlining of
+very large main programs, and diagnostics of type errors (programs are
+expected to be correct: check them with lz80nc first).
+
+## Tests
+
+* `selfhost_codegen_runs_like_rust`, `selfhost_codegen_strings_long_far_files`:
+  programs compiled both ways must print the same in the emulator (includes,
+  files on the virtual SD card and a banked program among them);
 * `SELFHOST=1 cargo test --release`: every `expect(...)` program of the test
-  suite is also compiled by the self-hosted compiler when it supports it, and
-  must print the same (now 17 of 62; the rest use what is not there yet).
+  suite is also compiled by the self-hosted compiler when it supports it
+  (20 of 62 now);
+* `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
+  self-hosted compiler compiles the lexer, the parser and the assembler; they
+  give byte-identical results to their lz80nc-compiled versions;
+* `selfhost_bootstrap`: the code generator compiled by lz80nc (stage 1)
+  compiles its own source into stage 2; stage 2 makes the same assembly as
+  stage 1 for test programs, and for its own source (stage 3 = stage 2).
 
-Supported: `bool byte sbyte word sword`, constants, globals, locals,
-parameters, one-dimensional arrays (with initialiser lists), every integer
-operator with the width / signedness rules of the spec, casts, `if`,
-`while`, `for` (steps, no overflow), `break`, `return`, functions, recursion
-(a call that can come back to the caller saves the caller's frame
-`fr_NAME..fr_NAME_end` on the stack), `print`, `write`, `memory[]`, `asm`.
+## The bootstrap in numbers (emulated, 28 MHz)
 
-Not yet: strings variables and `..`, `fixed`, `long`, `fixed16`, structs and
-classes, multi-dimensional and `far` arrays, assets, interrupts, the built-in
-functions beyond print/write/casts and the standard modules (Layer 2,
-sprites, sound ...), and diagnostics of type errors (programs are expected
-to be correct: check them with lz80nc first).
+Compiling `codegen.lz80n` (with `parser_core.lz80n` and the file module,
+about 4600 lines): lexer 11 s, code generator 138 s, giving 39033 lines of
+assembly; assembling that with `asm.lz80n` takes about 3 more minutes. The
+compiled code generator is a 115K NEX (9 code pages). It uses 8K pages up to
+191, so it needs a 2 MB Next: the token and tree arrays are the bulk and can
+shrink later (positions only for errors, tokens freed after parsing).
+
+The four stages are separate NEX programs that hand over files on the SD card
+(`in.lz80n` -> `tokens.bin` -> `out.asm` -> `.nex`); on the Next a NextBASIC
+program can run them one after the other.

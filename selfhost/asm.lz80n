@@ -1604,7 +1604,14 @@ function encode(byte id)
         else
             bad()
         end
-    elseif id >= M_RLC and id <= M_SRL then
+    else
+        encode2(id)
+    end
+end
+
+-- the rest of encode: rotates, bits, jumps, calls, returns, I/O
+function encode2(byte id)
+    if id >= M_RLC and id <= M_SRL then
         -- rlc rrc rl rr sla sra sll sli srl
         byte base = (id - M_RLC) << 3
         if id == M_SRL then base = 0x38 end

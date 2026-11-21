@@ -151,15 +151,21 @@ string un_names[] = {"neg", "not", "bitnot"}
 
 -- ---------------------------------------------------------------- tokens
 
-const MAX_TOKENS = 16000
-far byte tk[16000]          -- kind
-far word tl[16000]          -- line
-far word tc[16000]          -- column
-far word tvl[16000]         -- value, low word
-far word tvh[16000]         -- value, high word
-far word toff[16000]        -- text: offset in tpool
-far word tlen[16000]        -- text: length
+const MAX_TOKENS = 30000
+far byte tk[30000]          -- kind
+far word tl[30000]          -- line
+far word tc[30000]          -- column
+far word tvl[30000]         -- value, low word
+far word tvh[30000]         -- value, high word
+far word toff[30000]        -- text: offset in tpool
+far word tlen[30000]        -- text: length
 far byte tpool[60000]
+-- identifiers are interned: equal names share their text (and offset)
+far word ihead[4096]
+far word ioff[8000]
+far word ilen[8000]
+far word inext[8000]
+word nint = 0
 word ntok = 1                -- token 0 is unused: 0 means "none"
 word pool_len = 0
 
@@ -297,16 +303,16 @@ end
 
 -- ---------------------------------------------------------------- nodes
 
-const MAX_NODES = 12000
-far byte nk[12000]
-far byte nf[12000]
-far word nl[12000]
-far word nc[12000]
-far word n1[12000]
-far word n2[12000]
-far word n3[12000]
-far word n4[12000]
-far word nx[12000]
+const MAX_NODES = 30000
+far byte nk[30000]
+far byte nf[30000]
+far word nl[30000]
+far word nc[30000]
+far word n1[30000]
+far word n2[30000]
+far word n3[30000]
+far word n4[30000]
+far word nx[30000]
 word nnodes = 0
 
 function node(byte kind, word t) -> word
@@ -1006,6 +1012,32 @@ end
 
 -- ---------------------------------------------------------------- loading
 
+-- an identifier just read at the end of the pool: point it at an equal
+-- one read before, or remember it
+function intern(word t, word h)
+    word n = tlen[t]
+    word e = ihead[h]
+    while e ~= 0 do
+        if ilen[e] == n then
+            word o = ioff[e]
+            word i = 0
+            while i < n and tpool[o + i] == tpool[pool_len + i] do i += 1 end
+            if i == n then
+                toff[t] = o
+                return
+            end
+        end
+        e = inext[e]
+    end
+    if nint < 7999 then
+        nint += 1
+        ioff[nint] = pool_len
+        ilen[nint] = n
+        inext[nint] = ihead[h]
+        ihead[h] = nint
+    end
+end
+
 function load_tokens() -> bool
     inh = file_open("tokens.bin", FILE_READ)
     if inh == FILE_ERROR then
@@ -1017,7 +1049,7 @@ function load_tokens() -> bool
         if eof_in then break end
         if ntok >= MAX_TOKENS then
             fail_at(0, 0)
-            msg("not supported by the self-hosted compiler yet: programs of more than 16000 tokens")
+            msg("not supported by the self-hosted compiler yet: programs of more than 30000 tokens")
             break
         end
         word t = ntok
@@ -1033,14 +1065,19 @@ function load_tokens() -> bool
             toff[t] = pool_len
             tlen[t] = n
             word i = 0
+            word h = 0
             while i < n do
                 byte c = in_byte()
-                if pool_len < 60000 then
-                    tpool[pool_len] = c
-                    pool_len += 1
-                end
+                h = (h << 5) - h + c
+                if pool_len + i < 60000 then tpool[pool_len + i] = c end
                 i += 1
             end
+            if pool_len + n > 60000 then
+                if fail_at(tl[t], tc[t]) then msg("program too large: more than 60000 bytes of names and texts") end
+                break
+            end
+            if k == T_IDENT then intern(t, h & 4095) end
+            if toff[t] == pool_len then pool_len += n end
         end
         if k == T_ERROR then
             -- the lexer stopped: its error is the result
