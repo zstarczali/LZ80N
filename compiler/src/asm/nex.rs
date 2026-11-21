@@ -52,7 +52,8 @@ impl Nex {
         h[135..138].copy_from_slice(&self.core);
         h[139] = self.entry_bank;
         h[140..142].copy_from_slice(&self.file_handle.to_le_bytes());
-        h[144..148].copy_from_slice(&512u32.to_le_bytes()); // offset of the first bank
+        // 142..: V1.3 fields (bank offset, checksum ...) stay 0 in a V1.2
+        // header, as SjASMPlus writes it
         let mut out = h;
         for (_, data) in banks {
             out.extend_from_slice(&data);

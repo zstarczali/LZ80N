@@ -1863,7 +1863,7 @@ function nex_write()
     hdr[139] = nex_entry
     hdr[140] = byte(nex_fh)
     hdr[141] = byte(nex_fh >> 8)
-    hdr[145] = 2                -- banks offset 512
+    -- 142..: the V1.3 fields stay 0 in a V1.2 header (as SjASMPlus)
     for k = 0, 511 do out_byte(hdr[k]) end
     -- banks in NEX order
     for k = 0, 111 do
