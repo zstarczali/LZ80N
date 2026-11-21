@@ -667,6 +667,7 @@ far byte img2[57344]
 far byte img3[57344]
 far byte img4[57344]
 byte pdir[224]              -- 8K page -> image slot (1..35), 0 = not written
+byte pkeep[224]             -- pages written by INCBIN
 byte nslots = 0
 byte slots[8] = {14, 15, 10, 11, 4, 5, 0, 1}
 byte guard[8]               -- MMU option per slot: 'e', 'n', 'w' or 0
@@ -1782,6 +1783,7 @@ end
 function page_used(byte p) -> bool
     byte s = pdir[p]
     if s == 0 then return false end
+    if pkeep[p] ~= 0 then return true end
     word i = 0
     while i < 8192 do
         if img_get(s, i) ~= 0 then return true end
@@ -2032,6 +2034,68 @@ function db_string(word a, word b) -> bool
     return true
 end
 
+-- INCBIN "file"[, offset[, length]]
+byte ibuf[256]
+function incbin(word s, word e)
+    split_ops(s, e)
+    trim(ors[0], ore[0])
+    if te - ts < 2 or lbuf[ts] ~= '"' or lbuf[te - 1] ~= '"' or te - ts > 66 then
+        if fail() then msg("INCBIN needs a quoted file name") end
+        return
+    end
+    string name = ""
+    word i = ts + 1
+    while i < te - 1 do
+        name = name .. chr(lbuf[i])
+        i += 1
+    end
+    long off = 0
+    long n = -1
+    if nops > 1 then off = ev(ors[1], ore[1]) end
+    if nops > 2 then n = ev(ors[2], ore[2]) end
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then
+        if fail() then
+            msg("cannot read ")
+            msg(name)
+        end
+        return
+    end
+    long size = file_size(h)
+    if off < 0 then off = 0 end
+    if n < 0 then n = size - off end
+    if n < 0 or off + n > size then
+        file_close(h)
+        if fail() then msg("INCBIN offset/length outside the file") end
+        return
+    end
+    -- (read in blocks: file_getc is busy with the source)
+    if strict then file_seek(h, off) end
+    word got = 0
+    word bp = 0
+    while n > 0 and not failed do
+        if strict then
+            if bp >= got then
+                got = file_read(h, addr(ibuf), 256)
+                bp = 0
+                if got == 0 then
+                    if fail() then msg("INCBIN: the file ends early") end
+                    break
+                end
+            end
+            -- a page with included data is kept even if it is all zeros
+            byte page = slots[byte(pc >> 13)]
+            if page < 224 then pkeep[page] = 1 end
+            emit(ibuf[bp])
+            bp += 1
+        else
+            emit(0)
+        end
+        n -= 1
+    end
+    file_close(h)
+end
+
 function pseudo_or_insn(byte id, word as_, word ae)
     if id == M_OPT or id == M_OPT + 1 or id == M_OPT + 2 or id == M_OPT + 3 then
         return                  -- opt output display end
@@ -2131,7 +2195,7 @@ function pseudo_or_insn(byte id, word as_, word ae)
         return
     end
     if id == M_INCBIN then
-        if fail() then msg("INCBIN is not supported by the self-hosted assembler") end
+        incbin(as_, ae)
         return
     end
     if id == M_SAVENEX then

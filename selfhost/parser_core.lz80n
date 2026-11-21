@@ -81,16 +81,48 @@ const T_EOF = 66
 const T_ERROR = 255
 
 -- debug names of the token kinds (as Rust's `{:?}`, lower case)
-string tok_names[] = {
-    "ident", "int", "dotdot", "fixed", "str", "asmbody",
-    "and", "or", "not", "if", "then", "elseif", "else", "end", "while", "do",
-    "for", "function", "return", "break", "const", "var", "true", "false",
-    "asm", "struct", "class", "asset", "interrupt", "far", "include",
-    "plus", "minus", "star", "slash", "percent", "amp", "pipe", "tilde", "shl", "shr",
-    "eqeq", "noteq", "lt", "le", "gt", "ge", "assign",
-    "pluseq", "minuseq", "stareq", "ampeq", "pipeeq", "slasheq", "percenteq", "shleq", "shreq",
-    "lparen", "rparen", "lbracket", "rbracket", "lbrace", "rbrace", "comma", "dot", "arrow", "eof"
+-- the names of the token kinds (for messages), separated by spaces
+const NTOKW = 7
+string tok_words[] = {
+    "ident int dotdot fixed str asmbody and or not if then elseif",
+    "else end while do for function return break const var true false",
+    "asm struct class asset interrupt far include plus minus star",
+    "slash percent amp pipe tilde shl shr eqeq noteq lt le gt ge",
+    "assign pluseq minuseq stareq ampeq pipeeq slasheq percenteq",
+    "shleq shreq lparen rparen lbracket rbracket lbrace rbrace comma",
+    "dot arrow eof"
 }
+
+-- the name of token kind k into the message
+function msg_tokname(byte k)
+    byte n = 0
+    byte w = 0
+    while w < NTOKW do
+        string c = tok_words[w]
+        string t = ""
+        byte i = 0
+        while i < len(c) do
+            byte ch = asc(c, i)
+            if ch == ' ' then
+                if n == k then
+                    msg(t)
+                    return
+                end
+                n += 1
+                t = ""
+            else
+                t = t .. chr(ch)
+            end
+            i += 1
+        end
+        if n == k then
+            msg(t)
+            return
+        end
+        n += 1
+        w += 1
+    end
+end
 
 -- node kinds
 const E_INT = 1         -- n1 = token, nf = negated
@@ -124,10 +156,6 @@ const I_STRUCT = 43     -- n1 = name token, n2 = parent token, n3 = fields, n4 =
 const I_FIELD = 44      -- n1 = name token, n2 = type token, n3 = size, n4 = init
 
 -- operators (Rust BinOp / UnOp order)
-string bin_names[] = {
-    "add", "sub", "mul", "div", "mod", "concat", "and", "or", "xor", "shl", "shr",
-    "eq", "ne", "lt", "le", "gt", "ge", "land", "lor"
-}
 const B_ADD = 0
 const B_SUB = 1
 const B_MUL = 2
@@ -147,18 +175,17 @@ const B_GT = 15
 const B_GE = 16
 const B_LAND = 17
 const B_LOR = 18
-string un_names[] = {"neg", "not", "bitnot"}
 
 -- ---------------------------------------------------------------- tokens
 
-const MAX_TOKENS = 30000
-far byte tk[30000]          -- kind
-far word tl[30000]          -- line
-far word tc[30000]          -- column
-far word tvl[30000]         -- value, low word
-far word tvh[30000]         -- value, high word
-far word toff[30000]        -- text: offset in tpool
-far word tlen[30000]        -- text: length
+const MAX_TOKENS = 32000
+far byte tk[32000]          -- kind
+far word tl[32000]          -- line
+far word tc[32000]          -- column
+far word tvl[32000]         -- value, low word
+far word tvh[32000]         -- value, high word
+far word toff[32000]        -- text: offset in tpool
+far word tlen[32000]        -- text: length
 far byte tpool[60000]
 -- identifiers are interned: equal names share their text (and offset)
 far word ihead[4096]
@@ -296,23 +323,23 @@ function msg_tok(word t)
         msg(")`")
     else
         msg("`")
-        msg(tok_names[k])
+        msg_tokname(k)
         msg("`")
     end
 end
 
 -- ---------------------------------------------------------------- nodes
 
-const MAX_NODES = 30000
-far byte nk[30000]
-far byte nf[30000]
-far word nl[30000]
-far word nc[30000]
-far word n1[30000]
-far word n2[30000]
-far word n3[30000]
-far word n4[30000]
-far word nx[30000]
+const MAX_NODES = 32000
+far byte nk[32000]
+far byte nf[32000]
+far word nl[32000]
+far word nc[32000]
+far word n1[32000]
+far word n2[32000]
+far word n3[32000]
+far word n4[32000]
+far word nx[32000]
 word nnodes = 0
 
 function node(byte kind, word t) -> word
@@ -1049,7 +1076,7 @@ function load_tokens() -> bool
         if eof_in then break end
         if ntok >= MAX_TOKENS then
             fail_at(0, 0)
-            msg("not supported by the self-hosted compiler yet: programs of more than 30000 tokens")
+            msg("not supported by the self-hosted compiler yet: programs of more than 32000 tokens")
             break
         end
         word t = ntok

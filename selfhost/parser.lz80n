@@ -8,6 +8,13 @@
 
 include "parser_core.lz80n"
 
+-- operator names (Rust BinOp / UnOp order)
+string bin_names[] = {
+    "add", "sub", "mul", "div", "mod", "concat", "and", "or", "xor", "shl", "shr",
+    "eq", "ne", "lt", "le", "gt", "ge", "land", "lor"
+}
+string un_names[] = {"neg", "not", "bitnot"}
+
 -- ---------------------------------------------------------------- output
 
 byte outh

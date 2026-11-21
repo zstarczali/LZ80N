@@ -1,0 +1,728 @@
+-- selfhost/assets.lz80n - the asset stage of the self-hosted compiler
+--
+-- codegen.lz80n lists the assets that need converting in assets.lst, one
+-- per line: `KIND NAME PATH` (KIND: p = a PNG of 16x16 hardware pattern
+-- cells, i = a PNG picture for Layer 2, w = a WAV sound). This stage writes
+-- a_NAME.bin for each (and a_NAME.msk, one byte: has the picture
+-- transparent pixels?), which out.asm takes with INCBIN. The conversions
+-- are those of compiler/src/assets.rs: PNG pixels to RRRGGGBB (alpha < 128:
+-- the transparent index $E3, an opaque $E3 becomes $E2), WAV to unsigned
+-- 8-bit mono (resampled to 15.6 kHz outside 4..31.25 kHz).
+-- On an error assets.err holds `error PATH: message`.
+
+include "asset_info.lz80n"
+
+const CLEAR_IX = 0xE3       -- the transparent colour index
+
+bool failed = false
+string err_path = ""
+string err_text = ""
+
+function fail_m(string m)
+    if not failed then
+        failed = true
+        err_text = m
+    end
+end
+
+-- ---------------------------------------------------------------- output
+
+byte outh = 255
+byte obuf[256]
+word olen = 0
+
+function oflush()
+    if olen > 0 then
+        file_write(outh, addr(obuf), olen)
+        olen = 0
+    end
+end
+
+function ob(byte b)
+    obuf[olen] = b
+    olen += 1
+    if olen == 256 then oflush() end
+end
+
+function out_open(string name) -> bool
+    outh = file_open(name, FILE_WRITE)
+    if outh == FILE_ERROR then
+        fail_m("cannot write " .. name)
+        return false
+    end
+    olen = 0
+    return true
+end
+
+function out_close()
+    oflush()
+    file_close(outh)
+end
+
+-- ---------------------------------------------------------------- PNG
+
+byte chans = 1
+byte bpp = 1                -- bytes per complete pixel (at least 1)
+word stride = 0             -- bytes of a row (without the filter byte)
+far byte pal_r[256]
+far byte pal_g[256]
+far byte pal_b[256]
+far byte pal_a[256]
+bool has_trns = false
+word trns_r = 0             -- grey: trns_r
+word trns_g = 0
+word trns_b = 0
+byte mode = 0               -- 'p' patterns, 'i' picture
+bool masked = false
+far byte pix[16384]         -- patterns: the whole sheet
+
+-- the IDAT data as one stream
+long idat_left = 0
+function zin() -> byte
+    while idat_left == 0 and not failed and not ai_bad do
+        ai_rd32be()                         -- CRC of the previous chunk
+        long ln = ai_rd32be()
+        byte t0 = ai_rd()
+        byte t1 = ai_rd()
+        byte t2 = ai_rd()
+        byte t3 = ai_rd()
+        if t0 ~= 'I' or t1 ~= 'D' or t2 ~= 'A' or t3 ~= 'T' then
+            fail_m("the image data ends early")
+            return 0
+        end
+        idat_left = ln
+    end
+    if failed or ai_bad then return 0 end
+    idat_left -= 1
+    return ai_rd()
+end
+
+-- ---- rows: unfiltered, then converted to pixels
+
+far byte rows[16384]        -- two rows: the current one, the previous one
+word cb = 0                 -- the current row in rows[]
+word pb = 8192              -- the previous one
+word rpos = 0               -- 0: the filter byte comes next
+byte filt = 0
+word ry = 0                 -- rows done
+
+function paeth(byte a, byte b, byte c) -> byte
+    sword p = sword(a) + sword(b) - sword(c)
+    sword pa = abs(p - sword(a))
+    sword pb_ = abs(p - sword(b))
+    sword pc = abs(p - sword(c))
+    if pa <= pb_ and pa <= pc then return a end
+    if pb_ <= pc then return b end
+    return c
+end
+
+-- channel ch of pixel x of the current row, at the file's bit depth
+function samp(word x, byte ch) -> word
+    if ai_depth == 8 then return rows[cb + x * chans + ch] end
+    if ai_depth == 16 then
+        word o = cb + (x * chans + ch) * 2
+        return word(rows[o]) << 8 | rows[o + 1]
+    end
+    word bit = x * ai_depth
+    byte v = rows[cb + bit / 8]
+    byte sh = byte(8 - ai_depth - bit % 8)
+    return (v >> sh) & ((1 << ai_depth) - 1)
+end
+
+-- a channel value to 8 bits
+function to8(word v) -> byte
+    if ai_depth == 16 then return byte(v >> 8) end
+    if ai_depth == 8 then return byte(v) end
+    if ai_depth == 4 then return byte(v * 17) end
+    if ai_depth == 2 then return byte(v * 85) end
+    return byte(v * 255)
+end
+
+function px332(byte r, byte g, byte b, byte a) -> byte
+    if a < 128 then return CLEAR_IX end
+    byte v = (r & 0xE0) | ((g >> 3) & 0x1C) | (b >> 6)
+    if v == CLEAR_IX then return 0xE2 end
+    return v
+end
+
+-- the finished row ry: its pixels out
+function row_done()
+    word x = 0
+    while x < ai_wid do
+        byte r = 0
+        byte g = 0
+        byte b = 0
+        byte a = 255
+        if ai_ctype == 3 then
+            word i = samp(x, 0)
+            r = pal_r[i]
+            g = pal_g[i]
+            b = pal_b[i]
+            a = pal_a[i]
+        elseif ai_ctype == 0 then
+            word v = samp(x, 0)
+            if has_trns and v == trns_r then a = 0 end
+            r = to8(v)
+            g = r
+            b = r
+        elseif ai_ctype == 2 then
+            word vr = samp(x, 0)
+            word vg = samp(x, 1)
+            word vb = samp(x, 2)
+            if has_trns and vr == trns_r and vg == trns_g and vb == trns_b then a = 0 end
+            r = to8(vr)
+            g = to8(vg)
+            b = to8(vb)
+        elseif ai_ctype == 4 then
+            r = to8(samp(x, 0))
+            g = r
+            b = r
+            a = to8(samp(x, 1))
+        else
+            r = to8(samp(x, 0))
+            g = to8(samp(x, 1))
+            b = to8(samp(x, 2))
+            a = to8(samp(x, 3))
+        end
+        byte p = px332(r, g, b, a)
+        if p == CLEAR_IX then masked = true end
+        if mode == 'p' then
+            pix[ry * ai_wid + x] = p
+        else
+            ob(p)
+        end
+        x += 1
+    end
+end
+
+-- one byte of the inflated stream
+function png_byte(byte b)
+    if ry >= ai_hgt then return end
+    if rpos == 0 then
+        filt = b
+        rpos = 1
+        return
+    end
+    word i = rpos - 1
+    byte a = 0
+    byte c = 0
+    byte up = rows[pb + i]
+    if i >= bpp then
+        a = rows[cb + i - bpp]
+        c = rows[pb + i - bpp]
+    end
+    byte v = b
+    if filt == 1 then
+        v = byte(word(b) + a)
+    elseif filt == 2 then
+        v = byte(word(b) + up)
+    elseif filt == 3 then
+        v = byte(word(b) + (word(a) + up) / 2)
+    elseif filt == 4 then
+        v = byte(word(b) + paeth(a, up, c))
+    elseif filt ~= 0 then
+        fail_m("bad PNG row filter")
+        return
+    end
+    rows[cb + i] = v
+    rpos += 1
+    if rpos > stride then
+        row_done()
+        word t = cb
+        cb = pb
+        pb = t
+        rpos = 0
+        ry += 1
+    end
+end
+
+-- ---- inflate (RFC 1951)
+
+far byte win[32768]
+word wpos = 0
+
+function put(byte b)
+    win[wpos] = b
+    wpos = (wpos + 1) & 32767
+    png_byte(b)
+end
+
+byte bitbuf = 0
+byte bitcnt = 0
+
+function bit1() -> word
+    if bitcnt == 0 then
+        bitbuf = zin()
+        bitcnt = 8
+    end
+    word b = bitbuf & 1
+    bitbuf = bitbuf >> 1
+    bitcnt -= 1
+    return b
+end
+
+function bits(byte n) -> word
+    word v = 0
+    byte i = 0
+    while i < n do
+        v = v | bit1() << i
+        i += 1
+    end
+    return v
+end
+
+-- Huffman tables: 0 literals/lengths, 1 distances, 2 code lengths
+word hc[48]                 -- codes per length: hc[t * 16 + ln]
+far word hs[960]            -- symbols by code: hs[t * 320 + i]
+far byte lens[320]
+word offs[17]
+
+function construct(byte t, word off, word n)
+    word base = word(t) * 16
+    for ln = 0, 15 do hc[base + ln] = 0 end
+    word s = 0
+    while s < n do
+        hc[base + lens[off + s]] += 1
+        s += 1
+    end
+    offs[1] = 0
+    for ln = 1, 14 do offs[ln + 1] = offs[ln] + hc[base + ln] end
+    s = 0
+    while s < n do
+        byte l = lens[off + s]
+        if l ~= 0 then
+            hs[word(t) * 320 + offs[l]] = s
+            offs[l] += 1
+        end
+        s += 1
+    end
+end
+
+function decode(byte t) -> word
+    word base = word(t) * 16
+    word code = 0
+    word first = 0
+    word index = 0
+    byte ln = 1
+    while ln <= 15 do
+        code = code | bit1()
+        word count = hc[base + ln]
+        if code < first + count then return hs[word(t) * 320 + index + code - first] end
+        index += count
+        first = (first + count) << 1
+        code = code << 1
+        ln += 1
+    end
+    fail_m("bad compressed data")
+    return 0
+end
+
+word lbase[29] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258}
+byte lext[29] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0}
+word dbase[30] = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577}
+byte dext[30] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13}
+byte clorder[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
+
+-- the codes of one block, up to its end code
+function codes()
+    while not failed and not ai_bad do
+        word sym = decode(0)
+        if sym < 256 then
+            put(byte(sym))
+        elseif sym == 256 then
+            return
+        else
+            sym -= 257
+            if sym >= 29 then
+                fail_m("bad compressed data (length)")
+                return
+            end
+            word ln = lbase[sym] + bits(lext[sym])
+            word ds = decode(1)
+            if ds >= 30 then
+                fail_m("bad compressed data (distance)")
+                return
+            end
+            word dist = dbase[ds] + bits(dext[ds])
+            while ln > 0 do
+                put(win[(wpos - dist) & 32767])
+                ln -= 1
+            end
+        end
+    end
+end
+
+function fixed_tables()
+    word s = 0
+    while s < 288 do
+        if s < 144 then
+            lens[s] = 8
+        elseif s < 256 then
+            lens[s] = 9
+        elseif s < 280 then
+            lens[s] = 7
+        else
+            lens[s] = 8
+        end
+        s += 1
+    end
+    construct(0, 0, 288)
+    for i = 0, 29 do lens[i] = 5 end
+    construct(1, 0, 30)
+end
+
+function dynamic_tables()
+    word nlen = bits(5) + 257
+    word ndist = bits(5) + 1
+    word ncode = bits(4) + 4
+    for i = 0, 18 do lens[i] = 0 end
+    word i = 0
+    while i < ncode do
+        lens[clorder[i]] = byte(bits(3))
+        i += 1
+    end
+    construct(2, 0, 19)
+    word total = nlen + ndist
+    i = 0
+    while i < total and not failed do
+        word sym = decode(2)
+        if sym < 16 then
+            lens[i] = byte(sym)
+            i += 1
+        else
+            byte l = 0
+            word rep = 0
+            if sym == 16 then
+                if i == 0 then
+                    fail_m("bad compressed data (repeat)")
+                    return
+                end
+                l = lens[i - 1]
+                rep = 3 + bits(2)
+            elseif sym == 17 then
+                rep = 3 + bits(3)
+            else
+                rep = 11 + bits(7)
+            end
+            if i + rep > total then
+                fail_m("bad compressed data (too many lengths)")
+                return
+            end
+            while rep > 0 do
+                lens[i] = l
+                i += 1
+                rep -= 1
+            end
+        end
+    end
+    if failed then return end
+    if lens[256] == 0 then
+        fail_m("bad compressed data (no end code)")
+        return
+    end
+    construct(0, 0, nlen)
+    -- the distance lengths follow the literal ones
+    i = 0
+    while i < ndist do
+        lens[i] = lens[nlen + i]
+        i += 1
+    end
+    construct(1, 0, ndist)
+end
+
+function inflate()
+    byte cmf = zin()
+    zin()
+    if cmf & 15 ~= 8 then
+        fail_m("bad compressed data (not deflate)")
+        return
+    end
+    bool last = false
+    while not last and not failed and not ai_bad do
+        last = bits(1) == 1
+        word typ = bits(2)
+        if typ == 0 then
+            bitcnt = 0
+            word n = zin()
+            n = n | word(zin()) << 8
+            zin()
+            zin()
+            while n > 0 and not failed do
+                put(zin())
+                n -= 1
+            end
+        elseif typ == 1 then
+            fixed_tables()
+            codes()
+        elseif typ == 2 then
+            dynamic_tables()
+            codes()
+        else
+            fail_m("bad compressed data (block type)")
+        end
+    end
+end
+
+-- a PNG: patterns (16x16 cells, left to right, top to bottom) or a picture
+function do_png(byte m)
+    mode = m
+    masked = false
+    if not png_header() then return end
+    if ai_lace ~= 0 then
+        fail_m("interlaced PNG files are not supported")
+        return
+    end
+    chans = 0
+    if ai_ctype == 0 or ai_ctype == 3 then chans = 1 end
+    if ai_ctype == 2 then chans = 3 end
+    if ai_ctype == 4 then chans = 2 end
+    if ai_ctype == 6 then chans = 4 end
+    if chans == 0 then
+        fail_m("unknown PNG colour type")
+        return
+    end
+    word bitspp = word(chans) * ai_depth
+    bpp = byte((bitspp + 7) / 8)
+    long st = (long(ai_wid) * bitspp + 7) / 8
+    if st > 8192 then
+        fail_m("the image is too wide")
+        return
+    end
+    stride = word(st)
+    if mode == 'p' then
+        if ai_wid == 0 or ai_hgt == 0 or ai_wid % 16 ~= 0 or ai_hgt % 16 ~= 0 then
+            fail_m("pattern sheets must be multiples of 16x16 pixels")
+            return
+        end
+        if long(ai_wid) * ai_hgt > 16384 then
+            fail_m("more than 64 patterns")
+            return
+        end
+    elseif ai_wid == 0 or ai_hgt == 0 or ai_wid > 256 or ai_hgt > 255 then
+        fail_m("images can be at most 256x255 pixels")
+        return
+    end
+    word i = 0
+    while i < 256 do
+        pal_r[i] = 0
+        pal_g[i] = 0
+        pal_b[i] = 0
+        pal_a[i] = 255
+        i += 1
+    end
+    i = 0
+    while i < 16384 do
+        rows[i] = 0
+        i += 1
+    end
+    cb = 0
+    pb = 8192
+    rpos = 0
+    ry = 0
+    has_trns = false
+    bitcnt = 0
+    wpos = 0
+    -- the chunks up to the image data
+    while not failed and not ai_bad do
+        long ln = ai_rd32be()
+        byte t0 = ai_rd()
+        byte t1 = ai_rd()
+        byte t2 = ai_rd()
+        byte t3 = ai_rd()
+        if t0 == 'I' and t1 == 'D' and t2 == 'A' and t3 == 'T' then
+            idat_left = ln
+            inflate()
+            break
+        end
+        if t0 == 'I' and t1 == 'E' and t2 == 'N' and t3 == 'D' then
+            fail_m("no image data")
+            return
+        end
+        long k = 0
+        if t0 == 'P' and t1 == 'L' and t2 == 'T' and t3 == 'E' then
+            word n = 0
+            while k + 3 <= ln and n < 256 do
+                pal_r[n] = ai_rd()
+                pal_g[n] = ai_rd()
+                pal_b[n] = ai_rd()
+                k += 3
+                n += 1
+            end
+        elseif t0 == 't' and t1 == 'R' and t2 == 'N' and t3 == 'S' then
+            has_trns = true
+            if ai_ctype == 3 then
+                while k < ln and k < 256 do
+                    pal_a[word(k)] = ai_rd()
+                    k += 1
+                end
+            elseif ai_ctype == 0 and ln >= 2 then
+                trns_r = ai_rd16be()
+                k = 2
+            elseif ai_ctype == 2 and ln >= 6 then
+                trns_r = ai_rd16be()
+                trns_g = ai_rd16be()
+                trns_b = ai_rd16be()
+                k = 6
+            end
+        end
+        while k < ln and not ai_bad do
+            ai_rd()
+            k += 1
+        end
+        ai_rd32be()                         -- CRC
+    end
+    if ai_bad then fail_m(ai_err) end
+    if failed then return end
+    if ry < ai_hgt then
+        fail_m("the image data ends early")
+        return
+    end
+    if mode == 'p' then
+        -- the cells
+        word cy = 0
+        while cy < ai_hgt do
+            word cx = 0
+            while cx < ai_wid do
+                for y = 0, 15 do
+                    for x = 0, 15 do ob(pix[(cy + y) * ai_wid + cx + x]) end
+                end
+                cx += 16
+            end
+            cy += 16
+        end
+    end
+end
+
+-- ---------------------------------------------------------------- WAV
+
+-- the next frame as unsigned 8-bit mono
+function next_mono() -> byte
+    sword sum = 0
+    word c = 0
+    while c < ai_chans do
+        if ai_bits == 8 then
+            sum += sword(ai_rd()) - 128
+        else
+            ai_rd()
+            sum += sword(sbyte(ai_rd()))
+        end
+        c += 1
+    end
+    sword v = sum / sword(ai_chans) + 128
+    if v < 0 then v = 0 end
+    if v > 255 then v = 255 end
+    return byte(v)
+end
+
+function do_wav()
+    if not wav_header() then return end
+    file_seek(ai_fh, ai_doff)
+    if not ai_resample then
+        long n = 0
+        while n < ai_mono and not ai_bad do
+            ob(next_mono())
+            n += 1
+        end
+        return
+    end
+    -- linear interpolation: output i is at input i * rate / 15625
+    long kk = 0
+    long k = 0
+    long rem = 0
+    byte m0 = next_mono()
+    byte m1 = m0
+    if ai_mono > 1 then m1 = next_mono() end
+    long i = 0
+    while i < ai_len and not ai_bad do
+        while kk < k and kk + 1 < ai_mono do
+            kk += 1
+            m0 = m1
+            if kk + 1 < ai_mono then m1 = next_mono() end
+        end
+        long t = long(m0) * 15625 + (long(m1) - long(m0)) * rem
+        ob(byte((2 * t + 15625) / 31250))
+        rem += ai_rate
+        while rem >= 15625 do
+            rem -= 15625
+            k += 1
+        end
+        i += 1
+    end
+end
+
+-- ---------------------------------------------------------------- main
+
+byte lst[4096]
+word lst_len = 0
+string a_name = ""
+string a_path = ""
+byte a_kind = 0
+
+-- read one `KIND NAME PATH` line from lst[] at p: the next position
+function list_entry(word p) -> word
+    a_kind = lst[p]
+    p += 2
+    a_name = ""
+    while p < lst_len and lst[p] ~= ' ' do
+        a_name = a_name .. chr(lst[p])
+        p += 1
+    end
+    p += 1
+    a_path = ""
+    while p < lst_len and lst[p] ~= 10 do
+        a_path = a_path .. chr(lst[p])
+        p += 1
+    end
+    return p + 1
+end
+
+function convert()
+    err_path = a_path
+    if not ai_open(a_path) then
+        fail_m(ai_err)
+        return
+    end
+    if not out_open("a_" .. a_name .. ".bin") then
+        ai_close()
+        return
+    end
+    if a_kind == 'w' then do_wav() else do_png(a_kind) end
+    if ai_bad then fail_m(ai_err) end
+    out_close()
+    ai_close()
+    if failed then return end
+    if a_kind == 'i' then
+        if not out_open("a_" .. a_name .. ".msk") then return end
+        if masked then ob(1) else ob(0) end
+        out_close()
+    end
+end
+
+byte lh = file_open("assets.lst", FILE_READ)
+if lh == FILE_ERROR then
+    fail_m("cannot read assets.lst")
+else
+    lst_len = file_read(lh, addr(lst), 4096)
+    file_close(lh)
+end
+word lp = 0
+word count = 0
+while lp < lst_len and not failed do
+    lp = list_entry(lp)
+    convert()
+    count += 1
+end
+if failed then
+    byte eh = file_open("assets.err", FILE_WRITE)
+    string m = "error " .. err_path .. ": " .. err_text
+    print(m)
+    if eh ~= FILE_ERROR then
+        file_write(eh, addr(m) + 1, len(m))
+        file_close(eh)
+    end
+else
+    print("assets:", count, "converted")
+    if file_exists("chain.on") then
+        if not file_exec("nexload asm.nex") then print("cannot start asm.nex, error", file_status) end
+    end
+end
