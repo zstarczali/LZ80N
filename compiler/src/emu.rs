@@ -104,6 +104,38 @@ pub struct Cpu {
     pub ix: u16,
     pub iy: u16,
     mem_override: Option<u16>,
+    /// esxDOS file system for `RST $08` calls (None: no SD card)
+    pub esx: Option<EsxFs>,
+}
+
+/// A virtual SD card for the esxDOS API (`RST $08` + function byte).
+/// Implements F_OPEN, F_CLOSE, F_READ, F_WRITE, F_SEEK, F_FGETPOS,
+/// F_FSTAT and F_UNLINK on in-memory files.
+#[derive(Debug, Default, Clone)]
+pub struct EsxFs {
+    pub files: std::collections::HashMap<String, Vec<u8>>,
+    /// open files: handle - 1 -> (name, position, writable)
+    handles: Vec<Option<(String, usize, bool)>>,
+    /// number of esxDOS calls made
+    pub calls: u32,
+    /// MMU slots 0 / 1 were not ROM ($FF) during a call
+    pub mmu_not_rom: bool,
+    /// a call was made with interrupts enabled
+    pub with_interrupts: bool,
+}
+
+/// esxDOS error codes used by the virtual SD card
+pub const ESX_ENOENT: u8 = 5;
+pub const ESX_EBADF: u8 = 11;
+pub const ESX_EEXIST: u8 = 18;
+
+impl EsxFs {
+    pub fn with_files(files: &[(&str, &[u8])]) -> Self {
+        EsxFs { files: files.iter().map(|(n, d)| (n.to_string(), d.to_vec())).collect(), ..Default::default() }
+    }
+    pub fn open_handles(&self) -> usize {
+        self.handles.iter().filter(|h| h.is_some()).count()
+    }
 }
 
 /// Instructions per raster line (~1792 T-states at 28 MHz).
@@ -141,7 +173,7 @@ impl Cpu {
             t_states: 0, marks: Vec::new(), dma_bytes: 0, line_t: 0,
             line: 0, frame_count: 0,
             copper: vec![0; 2048], copper_idx: 0, copper_pc: 0, line_state: Vec::new(),
-            ix: 0, iy: 0, mem_override: None,
+            ix: 0, iy: 0, mem_override: None, esx: None,
         }
     }
 
@@ -582,7 +614,9 @@ impl Cpu {
         }
         self.ei_delay = false;
         self.int_fresh = false;
-        if !self.halted {
+        if !self.halted && self.pc == 0x0008 && self.esx.is_some() {
+            self.esx_call();
+        } else if !self.halted {
             self.step()?;
         } else {
             self.t_states += 4;
@@ -596,6 +630,154 @@ impl Cpu {
             self.end_line();
         }
         Ok(())
+    }
+
+    /// `RST $08`: the function byte follows the RST; carry + A = error.
+    fn esx_call(&mut self) {
+        let ret = self.pop();
+        let func = self.rd(ret);
+        self.pc = ret.wrapping_add(1);
+        let mut fs = self.esx.take().unwrap();
+        fs.calls += 1;
+        fs.mmu_not_rom |= self.slot0 != 0xFF || self.slot1 != 0xFF;
+        fs.with_interrupts |= self.iff;
+        let name_at = |cpu: &Cpu, mut a: u16| {
+            let mut s = String::new();
+            loop {
+                let c = cpu.rd(a);
+                if c == 0 || s.len() > 255 {
+                    return s;
+                }
+                s.push(c as char);
+                a = a.wrapping_add(1);
+            }
+        };
+        let handle = |fs: &EsxFs, a: u8| -> Result<usize, u8> {
+            let i = (a as usize).wrapping_sub(1);
+            match fs.handles.get(i) {
+                Some(Some(_)) => Ok(i),
+                _ => Err(ESX_EBADF),
+            }
+        };
+        let res: Result<(), u8> = (|| {
+            match func {
+                0x9A => {
+                    // F_OPEN: IX = name, B = mode; A = handle
+                    let name = name_at(self, self.ix);
+                    let mode = self.b;
+                    let exists = fs.files.contains_key(&name);
+                    match mode & 0x0C {
+                        0x0C => {
+                            fs.files.insert(name.clone(), vec![]);
+                        }
+                        0x08 => {
+                            fs.files.entry(name.clone()).or_default();
+                        }
+                        0x04 => {
+                            if exists {
+                                return Err(ESX_EEXIST);
+                            }
+                            fs.files.insert(name.clone(), vec![]);
+                        }
+                        _ => {
+                            if !exists {
+                                return Err(ESX_ENOENT);
+                            }
+                        }
+                    }
+                    let slot = (name, 0, mode & 0x02 != 0);
+                    let i = match fs.handles.iter().position(|h| h.is_none()) {
+                        Some(i) => {
+                            fs.handles[i] = Some(slot);
+                            i
+                        }
+                        None => {
+                            fs.handles.push(Some(slot));
+                            fs.handles.len() - 1
+                        }
+                    };
+                    self.a = i as u8 + 1;
+                }
+                0x9B => {
+                    let i = handle(&fs, self.a)?;
+                    fs.handles[i] = None;
+                }
+                0x9D | 0x9E => {
+                    // F_READ / F_WRITE: A = handle, IX = buffer, BC = count; BC = done
+                    let i = handle(&fs, self.a)?;
+                    let (name, pos, writable) = fs.handles[i].clone().unwrap();
+                    let count = self.bc() as usize;
+                    let data = fs.files.get_mut(&name).ok_or(ESX_ENOENT)?;
+                    let done = if func == 0x9D {
+                        let n = count.min(data.len().saturating_sub(pos));
+                        for k in 0..n {
+                            self.wr(self.ix.wrapping_add(k as u16), data[pos + k]);
+                        }
+                        n
+                    } else {
+                        if !writable {
+                            return Err(ESX_EBADF);
+                        }
+                        if data.len() < pos + count {
+                            data.resize(pos + count, 0);
+                        }
+                        for k in 0..count {
+                            data[pos + k] = self.rd(self.ix.wrapping_add(k as u16));
+                        }
+                        count
+                    };
+                    fs.handles[i].as_mut().unwrap().1 = pos + done;
+                    self.set_bc(done as u16);
+                }
+                0x9F | 0xA0 => {
+                    // F_SEEK: A = handle, BCDE = offset, L = 0 set / 1 forward / 2 back
+                    // F_FGETPOS: BCDE = position
+                    let i = handle(&fs, self.a)?;
+                    let pos = fs.handles[i].as_ref().unwrap().1 as i64;
+                    let off = ((self.bc() as i64) << 16) | self.de() as i64;
+                    let new = if func == 0xA0 {
+                        pos
+                    } else {
+                        match self.l {
+                            0 => off,
+                            1 => pos + off,
+                            _ => (pos - off).max(0),
+                        }
+                    };
+                    fs.handles[i].as_mut().unwrap().1 = new as usize;
+                    self.set_bc((new >> 16) as u16);
+                    self.set_de(new as u16);
+                }
+                0xA1 => {
+                    // F_FSTAT: IX = 11 bytes: drive, device, attributes, date+time, size
+                    let i = handle(&fs, self.a)?;
+                    let name = fs.handles[i].as_ref().unwrap().0.clone();
+                    let size = fs.files.get(&name).map_or(0, |d| d.len()) as u32;
+                    let mut st = [b'*', 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0];
+                    st[7..11].copy_from_slice(&size.to_le_bytes());
+                    for (k, b) in st.iter().enumerate() {
+                        self.wr(self.ix.wrapping_add(k as u16), *b);
+                    }
+                }
+                0xAD => {
+                    let name = name_at(self, self.ix);
+                    if fs.files.remove(&name).is_none() {
+                        return Err(ESX_ENOENT);
+                    }
+                }
+                _ => return Err(1),
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => self.f &= !1,
+            Err(code) => {
+                self.f |= 1;
+                self.a = code;
+            }
+        }
+        self.esx = Some(fs);
+        self.t_states += 2000;
     }
 
     fn end_line(&mut self) {

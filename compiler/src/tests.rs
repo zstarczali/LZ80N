@@ -3432,3 +3432,106 @@ fn builtin_assembler_matches_sjasmplus() {
     assert!(checked > 10);
 }
 
+
+fn run_sd(name: &str, src: &str, files: &[(&str, &[u8])]) -> (String, crate::emu::EsxFs) {
+    let fs = crate::emu::EsxFs::with_files(files);
+    let (out, cpu) = run_with(name, src, move |cpu| cpu.esx = Some(fs)).unwrap();
+    (out, cpu.esx.unwrap())
+}
+
+#[test]
+fn file_write_read_seek_size() {
+    let (out, fs) = run_sd(
+        "file_rw",
+        r#"
+byte buf[16]
+byte h = file_open("out.txt", FILE_WRITE)
+print(h ~= FILE_ERROR, file_status)
+for i = 0, 9 do buf[i] = '0' + i end
+print(file_write(h, addr(buf), 10))
+file_close(h)
+
+h = file_open("out.txt", FILE_READ)
+print(file_size(h))
+file_seek(h, 4)
+print(file_read(h, addr(buf), 16), buf[0] - '0', file_pos(h))
+print(file_read(h, addr(buf), 16))
+file_close(h)
+
+h = file_open("out.txt", FILE_APPEND)
+buf[0] = 'X'
+file_write(h, addr(buf), 1)
+file_close(h)
+
+h = file_open("missing.txt", FILE_READ)
+print(h == FILE_ERROR, file_status)
+print(file_delete("out.txt"), file_delete("out.txt"))
+"#,
+        &[],
+    );
+    assert_eq!(out, "true 0\n10\n10\n6 4 10\n0\ntrue 5\ntrue false\n");
+    assert!(fs.files.is_empty());
+    assert_eq!(fs.open_handles(), 0);
+    assert!(!fs.mmu_not_rom, "esxDOS called with RAM in MMU slot 0/1");
+    assert!(!fs.with_interrupts, "esxDOS called with interrupts enabled");
+}
+
+#[test]
+fn file_append_keeps_contents() {
+    let (_, fs) = run_sd(
+        "file_app",
+        r#"
+byte b[1]
+b[0] = '!'
+byte h = file_open("log.txt", FILE_APPEND)
+file_write(h, addr(b), 1)
+file_close(h)
+"#,
+        &[("log.txt", b"abc")],
+    );
+    assert_eq!(fs.files["log.txt"], b"abc!");
+}
+
+/// Byte-by-byte reading through the buffer, across 256-byte refills, and a
+/// whole file loaded into a far (banked) array in chunks.
+#[test]
+fn file_getc_and_load_into_far_array() {
+    let data: Vec<u8> = (0..3000u32).map(|i| (i * 7 + i / 256) as u8).collect();
+    let sum: u32 = data.iter().map(|&b| b as u32).sum();
+    let (out, _) = run_sd(
+        "file_getc",
+        r#"
+far byte big[20000]
+byte chunk[256]
+
+-- 1: byte by byte
+byte h = file_open("data.bin", FILE_READ)
+word n = 0
+word sum = 0
+word c = file_getc(h)
+while c ~= FILE_EOF do
+    sum += c
+    n += 1
+    c = file_getc(h)
+end
+file_close(h)
+print(n, sum)
+
+-- 2: into banked memory
+h = file_open("data.bin", FILE_READ)
+word total = 0
+word got = file_read(h, addr(chunk), 256)
+while got > 0 do
+    for i = 0, got - 1 do big[total + i] = chunk[i] end
+    total += got
+    got = file_read(h, addr(chunk), 256)
+end
+file_close(h)
+word s2 = 0
+for i = 0, total - 1 do s2 += big[i] end
+print(total, s2, big[2999])
+"#,
+        &[("data.bin", &data)],
+    );
+    assert_eq!(out, format!("3000 {}\n3000 {} {}\n", sum as u16, sum as u16, data[2999]));
+}
