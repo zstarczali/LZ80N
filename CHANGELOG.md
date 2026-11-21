@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.0 — 2026-11-21
+
+**Language**
+
+* Sprite collision detection: `sprite[a].overlaps(sprite[b])` compares the
+  two sprites' squares, `sprite_collision()` reads the pixel-exact hardware
+  flag (port `$303B`). The built-in emulator models the flag.
+
+**Speed**
+
+* `line` 3.7x for lines on the 256x192 screen (a register loop that steps
+  the pixel address directly); lines that cross the edge or are drawn in
+  320x256 / 640x256 are about 8% faster.
+* `circle` / `ellipse` 2.3-3x, `fill_circle` / `fill_ellipse` 1.4-2.1x: the
+  half width of each row is stepped with additions (no square root,
+  multiplication or division per row), and shapes on the screen skip the
+  clipping. Same pixels as before.
+* No measured case is slower (32 cases from 1-pixel lines to clipped
+  circles in all three modes).
+
+**Tools**
+
+* `PROFILE=shooter cargo test --release profile -- --ignored --nocapture`
+  shows where a program spends its time, per function.
+
+**Fixes**
+
+* Circles and ellipses (`circle`, `fill_circle`, `ellipse`, `fill_ellipse`)
+  no longer have single-pixel spikes at the top, bottom and sides: the
+  half widths use the radius r + 1/2.
+* Examples: `banks` and `samples` clear Layer 2 (garbage on real hardware),
+  the moon in `shapes` goes behind the planet, and the planet's ring is
+  drawn in one piece.
+
 ## 1.2.1 — 2026-11-20
 
 **Tools**
