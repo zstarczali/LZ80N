@@ -85,7 +85,12 @@ point hline layer2_clear layer2_flip layer2_mode layer2_width
 layer2_height`), `abs min max` (folded when constant), `vsync pause cls at
 ink border key kempston any_key wait_key frames random seed`, the built-in
 constants (`KEY_* JOY_* BLACK.. MHZ_* NOT_FOUND`, from `lib_consts.lz80n`),
-`include`, the standard modules `file`, `Layer 2`, `palette` and `copper`
+structs and classes (fields with defaults, array and struct fields, `{...}`
+values, constructors `Type(...)` with or without `init`, methods and `self`,
+`extends`, `super.m()`, `Type.m(obj)`, struct arrays, struct and string
+parameters by reference, functions and methods returning structs or strings
+through `r_NAME` buffers), `include`, the standard modules `sprites` (the
+`Sprite` class and `sprite[]`), `file`, `Layer 2`, `palette` and `copper`
 (pulled in by the same words as in `compiler/src/prelude.rs`), and code
 banking (functions move into 8K pages at $4000 when the resident area would
 overflow; code sizes are estimated per emitted instruction, the data of
@@ -96,8 +101,8 @@ The self-hosted sources must not contain the words that pull in a module
 compiled into them; where they need such a word they write it with a `|`
 (`"p|lot"`) and drop the bar at run time.
 
-Not yet: `fixed`, `fixed16`, structs and classes (so the sprite module),
-multi-dimensional arrays, assets, interrupts, functions returning strings,
+Not yet: `fixed`, `fixed16`, multi-dimensional arrays, assets (so
+`sprite_load` and the examples that load images or music), interrupts,
 string constants, the other built-in functions (`dma_*`, `sin`, `upper` ...)
 and the sound module, outlining of very large main programs, and diagnostics of type errors (programs are
 expected to be correct: check them with lz80nc first).
@@ -110,9 +115,14 @@ expected to be correct: check them with lz80nc first).
 * `selfhost_codegen_layer2`: drawings (all the shapes of the Layer 2 module,
   the 320x256 mode), palettes, NextRegs, ports, the copper and the border must
   be the same as with lz80nc, page by page;
+* `selfhost_codegen_structs`: structs, classes, inheritance and the sprite
+  module: the same output and sprite attributes as with lz80nc;
 * `SELFHOST=1 cargo test --release`: every `expect(...)` program of the test
   suite is also compiled by the self-hosted compiler when it supports it
-  (29 of 62 now); of the examples, hello, hires, move, tables and text;
+  (40 of 62 now);
+* `selfhost_codegen_examples` (ignored, a report): which examples the
+  self-hosted compiler compiles: now classes, hello, hires, inherit, move,
+  tables and text;
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
   self-hosted compiler compiles the lexer, the parser and the assembler; they
   give byte-identical results to their lz80nc-compiled versions;
