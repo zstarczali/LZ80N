@@ -1577,6 +1577,7 @@ byte file_st[11]            -- F_FSTAT result
 byte file_rbuf[256]         -- file_getc buffer
 word file_rpos
 word file_rlen
+byte file_rh = 255          -- the file the buffer belongs to
 
 function file_sys()
     asm
@@ -1664,8 +1665,6 @@ function file_open(string name, byte mode) -> byte
     file_sys()
     if file_failed() then return FILE_ERROR end
     byte h = file_a
-    file_rpos = 0
-    file_rlen = 0
     if mode == FILE_APPEND then
         file_seek(h, file_size(h))
     end
@@ -1673,6 +1672,7 @@ function file_open(string name, byte mode) -> byte
 end
 
 function file_close(byte h)
+    if h == file_rh then file_rh = 255 end
     file_fn = 0x9B
     file_a = h
     file_sys()
@@ -1713,8 +1713,7 @@ function file_seek(byte h, long pos)
     file_ix = 0
     file_sys()
     file_failed()
-    file_rpos = 0
-    file_rlen = 0
+    if h == file_rh then file_rh = 255 end
 end
 
 -- current position
@@ -1744,9 +1743,15 @@ function file_delete(string name) -> bool
     return not file_failed()
 end
 
--- next byte of a file read byte by byte (one such file at a time:
--- file_open and file_seek reset the buffer); FILE_EOF at the end
+-- next byte of a file read byte by byte; FILE_EOF at the end. The buffer
+-- serves one file: reading another one with file_getc starts it again
+-- (mixing file_getc and file_read on the same file skips bytes).
 function file_getc(byte h) -> word
+    if h ~= file_rh then
+        file_rh = h
+        file_rpos = 0
+        file_rlen = 0
+    end
     if file_rpos >= file_rlen then
         file_rlen = file_read(h, addr(file_rbuf), 256)
         file_rpos = 0
