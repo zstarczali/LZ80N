@@ -69,6 +69,7 @@ pub fn compile_main(
     for (used, lib_src) in [
         (prelude::uses_sound(src), prelude::SOUND),
         (prelude::uses_copper(src), prelude::COPPER),
+        (prelude::uses_file(src), prelude::FILE),
         (prelude::uses_palette(src), prelude::PALETTE),
         (prelude::uses_layer2(src), prelude::LAYER2),
         (prelude::uses_sprites(src), prelude::SPRITES),
