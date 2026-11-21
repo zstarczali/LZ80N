@@ -37,6 +37,15 @@ class Sprite
         self.update()
     end
 
+    -- do the 16 << scale squares of two visible sprites overlap? (from the
+    -- shadow fields; transparent pixels count, no screen-edge wrapping)
+    function overlaps(Sprite other) -> bool
+        if not self.visible or not other.visible then return false end
+        word a = word(16) << (self.scale & 3)
+        word b = word(16) << (other.scale & 3)
+        return self.x < other.x + b and other.x < self.x + a and self.y < other.y + b and other.y < self.y + a
+    end
+
     -- the five attribute registers, written from the fields through IX
     -- (field offsets: x 0, y 2, id 4, pattern 5, palette 6, visible 7,
     -- mirror_x 8, mirror_y 9, rotate 10, scale 11)
@@ -104,6 +113,12 @@ function sprites_visible(bool on, bool over_border)
     if over_border then r |= 2 end
     nextreg[0x15] = r
 end
+
+-- hardware collision flag (port $303B bit 0): two sprites' non-transparent
+-- pixels overlapped since the last call; reading the port clears it
+function sprite_collision() -> bool
+    return port[0x303B] & 1 ~= 0
+end
 "#;
 
 /// Layer 2 drawing (256x192, 320x256 or 640x256; colours are RRRGGGBB,
@@ -155,23 +170,29 @@ end
 -- Bresenham line, in assembly (plots through the current mode's rt_plot)
 word l2_ln_dx
 sword l2_ln_err
-sword l2_ln_e2
 byte l2_ln_dy
-byte l2_ln_sx
 byte l2_ln_sy
 
 function line(word x0, byte y0, word x1, byte y1, byte c)
     asm
-            ld hl,(p_line_x1)       ; dx = |x1 - x0|, sx = direction
+            ld hl,(p_line_x1)       ; dx = |x1 - x0|, x direction
             ld de,(p_line_x0)
+            ld a,h
+            or d
+            ld c,a                  ; C = 0: both ends at x < 256
             or a
             sbc hl,de
-            ld a,1
+            ld a,$23                ; x step: inc hl
             jr nc,.sx
-            call rt_neghl
-            ld a,255
+            xor a                   ; dx = -dx
+            sub l
+            ld l,a
+            sbc a,a
+            sub h
+            ld h,a
+            ld a,$2B                ; x step: dec hl
 .sx:
-            ld (g_l2_ln_sx),a
+            ld (.xstep),a
             ld (g_l2_ln_dx),hl
             ld a,(p_line_y0)        ; dy = |y1 - y0|, sy = direction
             ld b,a
@@ -181,35 +202,72 @@ function line(word x0, byte y0, word x1, byte y1, byte c)
             jr nc,.sy
             neg
             ld b,255
+            or a                    ; (clear the carry of neg)
 .sy:
             ld (g_l2_ln_dy),a
             ld e,a
             ld d,0
             ld a,b
             ld (g_l2_ln_sy),a
-            or a
-            sbc hl,de               ; err = dx - dy
+            sbc hl,de               ; err = dx - dy (carry clear)
             ld (g_l2_ln_err),hl
-.loop:
+            ld a,(rt_l2mode)        ; 256x192 with both ends on the screen:
+            or c                    ; the fast loop (no clipping needed)
+            jr nz,.slow
+            ld a,e                  ; a single pixel? (E = dy; HL = dx - dy
+            or l                    ; is zero with dy = 0 when dx = 0)
+            or h
+            jr z,.dot
+            ld a,(p_line_y0)
+            cp 192
+            jr nc,.loop
+            ld a,(p_line_y1)
+            cp 192
+            jp c,.fast
+            jr .loop
+.slow:
+            ld a,e                  ; a single pixel: plot it
+            or l
+            or h
+            jr nz,.loop
             ld hl,(p_line_x0)
             ld a,(p_line_y0)
             ld d,a
-            ld a,(p_line_c)
-            call rt_plot
-            ld hl,(p_line_x0)       ; at the end point?
-            ld de,(p_line_x1)
+            jr .last
+.loop:
+            ld de,(p_line_x0)       ; at the end point?
+            ld hl,(p_line_x1)
             or a
             sbc hl,de
-            jr nz,.go
-            ld a,(p_line_y1)
-            ld b,a
+            ex de,hl                ; HL = x
             ld a,(p_line_y0)
-            cp b
-            jr z,.out
-.go:
+            ld d,a                  ; D = y
+            jr nz,.plot
+            ld a,(p_line_y1)
+            cp d
+            jr nz,.plot
+.last:
+            ld a,(p_line_c)         ; the end point: plot it and stop
+            call rt_plot
+            jp .out
+.dot:
+            ld a,(p_line_y0)        ; one pixel, 256x192, x < 256
+            cp 192
+            jp nc,.out
+            ld d,a
+            ld a,(p_line_x0)
+            ld e,a
+            call rt_l2_map
+            ld a,(p_line_c)
+            ld (hl),a
+            jp .out
+.plot:
+            ld a,(p_line_c)
+            call rt_plot
             ld hl,(g_l2_ln_err)
             add hl,hl
-            ld (g_l2_ln_e2),hl
+            ld b,h
+            ld c,l                  ; BC = e2
             ld a,(g_l2_ln_dy)       ; e2 > -dy: e2 + dy > 0
             ld e,a
             ld d,0
@@ -224,16 +282,11 @@ function line(word x0, byte y0, word x1, byte y1, byte c)
             sbc hl,de
             ld (g_l2_ln_err),hl
             ld hl,(p_line_x0)
-            ld a,(g_l2_ln_sx)
-            dec a
-            jr z,.xinc
-            dec hl
-            dec hl
-.xinc:
-            inc hl
+.xstep:     inc hl                  ; patched: inc hl / dec hl
             ld (p_line_x0),hl
 .noX:
-            ld hl,(g_l2_ln_e2)      ; e2 < dx
+            ld h,b                  ; e2 < dx
+            ld l,c
             ld de,(g_l2_ln_dx)
             or a
             sbc hl,de
@@ -246,6 +299,130 @@ function line(word x0, byte y0, word x1, byte y1, byte c)
             add a,(hl)
             ld (hl),a
             jp .loop
+
+; The same steps with everything in registers. dx <= 255, dy <= 191, so
+; the tests on e2 = 2 err become comparisons of err with constants:
+;   e2 > -dy  <=>  err >= 1 - (dy + 1) / 2                 (T1)
+;   e2 < dx   <=>  err < (dx + 1) / 2                      (T2)
+;   after err -= dy (x stepped), the second test on the old err is
+;   err < T2 - dy                                         (T3)
+; The constants and the step directions are patched into the loop.
+; Main set: HL = pixel address (H = y & 31, L = x), B = y, C = colour,
+; D = x1, E = y1. Shadow set: HL = err, DE = dy, BC = dx.
+.fast:
+            ld a,(g_l2_ln_dy)       ; T1 = 1 - (dy + 1) / 2: -95..1
+            ld b,a                  ; B = dy
+            inc a
+            srl a
+            neg
+            inc a
+            ld (.t1l+1),a
+            add a,a
+            sbc a,a
+            ld (.t1h+1),a
+            ld a,(g_l2_ln_dx)       ; T2 = (dx + 1) / 2: 0..128 (high byte 0)
+            add a,1
+            rra
+            ld (.t2l+1),a
+            sub b                   ; T3 = T2 - dy: -191..128
+            ld (.t3l+1),a
+            sbc a,a
+            ld (.t3h+1),a
+            ld a,(.xstep)
+            cp $23                  ; inc hl: x grows
+            ld a,$2C                ; inc l
+            jr z,.fsx
+            inc a                   ; dec l
+.fsx:
+            ld (.xs),a
+            ld a,(g_l2_ln_sy)
+            dec a
+            ld bc,$2404             ; inc h, inc b
+            jr z,.fsy
+            inc b
+            inc c                   ; dec h, dec b
+.fsy:
+            ld a,c
+            ld (.ys1),a
+            ld a,b
+            ld (.ys2),a
+            ld a,(p_line_y0)
+            ld d,a
+            ld b,a                  ; B = y
+            ld a,(p_line_x0)
+            ld e,a
+            call rt_l2_map          ; HL = address of (x0, y0)
+            ld a,(p_line_c)
+            ld c,a
+            ld a,(p_line_x1)
+            ld d,a
+            ld a,(p_line_y1)
+            ld e,a
+            exx
+            ld hl,(g_l2_ln_err)
+            ld a,(g_l2_ln_dy)
+            ld e,a
+            ld d,0
+            ld bc,(g_l2_ln_dx)
+            exx
+.floop:
+            ld (hl),c
+            ld a,l                  ; at the end point?
+            cp d
+            jr nz,.fgo
+            ld a,b
+            cp e
+            jp z,.out
+.fgo:
+            exx
+            ld a,l                  ; err >= T1: step x
+.t1l:       sub 0
+            ld a,h
+.t1h:       sbc a,0
+            jp m,.fnox
+            or a
+            sbc hl,de               ; err -= dy
+            exx
+.xs:        inc l
+            exx
+            ld a,l                  ; old err < T2: err < T3
+.t3l:       sub 0
+            ld a,h
+.t3h:       sbc a,0
+            jp p,.fnoy
+            jr .fy
+.fnox:
+            ld a,l                  ; err < T2: step y
+.t2l:       sub 0
+            ld a,h
+.t2h:       sbc a,0                 ; (T2 >= 0: high byte 0, not patched)
+            jp p,.fnoy
+.fy:
+            add hl,bc               ; err += dx
+            exx
+.ys1:       inc b
+.ys2:       inc h
+            bit 5,h                 ; left the 32 rows of this 8K page?
+            jp z,.floop
+            ld a,h
+            and 31
+            ld h,a
+            push hl
+            ld a,b                  ; map the page of row B (as rt_l2_map)
+            rlca
+            rlca
+            rlca
+            and 7
+            ld hl,rt_l2base
+            add a,(hl)
+            inc hl
+            ld (hl),a
+            nextreg $50,a
+            pop hl
+            jp .floop
+.fnoy:
+            exx
+            jp .floop
 .out:
     end
 end
@@ -303,45 +480,457 @@ function l2_span(sword x0, sword x1, sword y, byte c)
     end
 end
 
--- half width of an ellipse dy rows from its centre
-function l2_halfw(byte rx, byte ry, byte dy) -> byte
-    if dy > ry then return 0 end
-    if ry == 0 then return rx end
-    -- Pythagoras in the space of the larger radius, then scale down, so
-    -- the integer square root's rounding is never magnified
-    if rx >= ry then
-        word k = (word(dy) * rx + ry / 2) / ry
-        return sqrt(word(rx) * rx - k * k)
+-- Half widths of an ellipse, row by row (dy = 0, 1, ... ry). The value is
+-- Pythagoras in the space of the larger radius B, then scaled down, so the
+-- integer square root's rounding is never magnified:
+--   rx >= ry: k = (dy * rx + ry / 2) / ry,  w = isqrt(B*B + B - k*k)
+--   rx <  ry: h = isqrt(B*B + B - dy*dy),   w = (rx * h + ry / 2) / ry
+-- (radius r + 1/2: (r + 1/2)^2 - dy^2 rounded is r*r + r - dy*dy, so the
+-- top, bottom and sides are flat runs, not single-pixel spikes).
+-- k, the root and the quotient only ever move one way as dy grows, so each
+-- is stepped with additions: no square root, multiplication or division
+-- per row. l2_ell_start sets up row 0; each l2_ell_next returns the half
+-- width of the next row (the first call: row 0).
+byte l2_e_big
+byte l2_e_small
+bool l2_e_wide
+bool l2_e_first
+byte l2_e_k
+byte l2_e_root
+word l2_e_v                 -- B*B + B - k*k
+word l2_e_sq                -- root * root
+byte l2_e_q                 -- rx < ry: the scaled width
+sword l2_e_rem              -- remainder of the stepped division
+
+byte l2_e_fast
+
+-- l2_e_fast = 1 if the ellipse lies on the screen (x - rx >= 0,
+-- x + rx < width, y - ry >= 0, y + ry < height), else 0; then
+--   wide = rx >= ry; big, small = the larger and the smaller radius
+--   sq = big * big, v = sq + big, root = big, k = 0, q = rx, rem = ry / 2
+function l2_ell_start(sword x, sword y, byte rx, byte ry)
+    asm
+            ld a,(p_l2_ell_start_rx)
+            ld e,a
+            ld d,0
+            ld hl,(p_l2_ell_start_x)
+            or a
+            sbc hl,de
+            jp m,.off               ; x - rx < 0
+            add hl,de
+            add hl,de
+            ex de,hl                ; DE = x + rx
+            ld hl,(rt_l2wid)
+            dec hl
+            or a
+            sbc hl,de
+            jp m,.off               ; x + rx > width - 1
+            ld a,(p_l2_ell_start_ry)
+            ld e,a
+            ld d,0
+            ld hl,(p_l2_ell_start_y)
+            or a
+            sbc hl,de
+            jp m,.off               ; y - ry < 0
+            add hl,de
+            add hl,de
+            ex de,hl                ; DE = y + ry
+            ld a,(rt_l2hmax)
+            ld l,a
+            ld h,0
+            or a
+            sbc hl,de
+            jp m,.off               ; y + ry > height - 1
+            ld a,1
+            jr .fit
+.off:
+            xor a
+.fit:
+            ld (g_l2_e_fast),a
+            ld a,(p_l2_ell_start_rx)
+            ld b,a
+            ld (g_l2_e_q),a
+            ld a,(p_l2_ell_start_ry)
+            ld c,a
+            srl a
+            ld l,a
+            ld h,0
+            ld (g_l2_e_rem),hl
+            ld a,b
+            cp c
+            ld a,1
+            jr nc,.wide
+            ld a,b                  ; rx < ry
+            ld b,c
+            ld c,a
+            xor a
+.wide:
+            ld (g_l2_e_wide),a
+            ld a,b
+            ld (g_l2_e_big),a
+            ld (g_l2_e_root),a
+            ld a,c
+            ld (g_l2_e_small),a
+            ld d,b
+            ld e,b
+            mul d,e
+            ld (g_l2_e_sq),de
+            ex de,hl
+            ld a,b
+            add hl,a
+            ld (g_l2_e_v),hl
+            xor a
+            ld (g_l2_e_k),a
+            inc a
+            ld (g_l2_e_first),a
     end
-    byte h = sqrt(word(ry) * ry - word(dy) * dy)
-    return byte((word(rx) * h + ry / 2) / ry)
 end
 
+byte l2_e_out
+
+-- the steps, as in this LZ80N outline:
+--   rx >= ry: rem += B; while rem >= S: rem -= S, v -= 2k + 1, k += 1
+--   rx <  ry: v -= 2k + 1, k += 1
+--   while sq > v: sq -= 2 root - 1, root -= 1
+--   rx <  ry: per root step: rem -= S; while rem < 0: rem += B, q -= 1
+-- (rx >= ry: dy * rx + ry / 2 = k * ry + rem, 0 <= rem < ry;
+--  rx <  ry: rx * root + ry / 2 = q * ry + rem, 0 <= rem < ry)
+function l2_ell_next() -> byte
+    asm
+            ld a,(g_l2_e_first)
+            or a
+            jr z,.step
+            xor a
+            ld (g_l2_e_first),a
+            jp .result
+.step:
+            ld hl,(g_l2_e_v)        ; HL = v
+            ld a,(g_l2_e_k)
+            ld c,a                  ; C = k
+            ld a,(g_l2_e_wide)
+            or a
+            jr z,.tall
+            ld de,(g_l2_e_rem)      ; DE = rem (0..509)
+            ld a,(g_l2_e_big)
+            add de,a
+            ld a,(g_l2_e_small)
+            ld b,a                  ; B = S
+.kloop:
+            ld a,d                  ; rem >= S?
+            or a
+            jr nz,.kstep
+            ld a,e
+            cp b
+            jr c,.kdone
+.kstep:
+            ld a,e                  ; rem -= S
+            sub b
+            ld e,a
+            jr nc,.knb
+            dec d
+.knb:
+            ld a,l                  ; v -= 2k + 1
+            sub c
+            ld l,a
+            jr nc,.kv1
+            dec h
+.kv1:
+            ld a,l
+            sub c
+            ld l,a
+            jr nc,.kv2
+            dec h
+.kv2:
+            dec hl
+            inc c                   ; k += 1
+            jr .kloop
+.kdone:
+            ld (g_l2_e_rem),de
+            jr .root
+.tall:
+            ld e,c                  ; v -= 2k + 1, k += 1
+            ld d,0
+            or a
+            sbc hl,de
+            sbc hl,de
+            dec hl
+            inc c
+.root:
+            ld a,c
+            ld (g_l2_e_k),a
+            ld (g_l2_e_v),hl
+            ex de,hl                ; DE = v
+            ld hl,(g_l2_e_sq)       ; HL = sq
+            ld a,(g_l2_e_root)
+            ld c,a                  ; C = root
+            ld b,0                  ; B = root steps
+.rloop:
+            or a                    ; sq > v?
+            sbc hl,de
+            jr c,.rdone
+            jr z,.rdone
+            add hl,de
+            ld a,l                  ; sq -= 2 root - 1
+            sub c
+            ld l,a
+            jr nc,.r1
+            dec h
+.r1:
+            ld a,l
+            sub c
+            ld l,a
+            jr nc,.r2
+            dec h
+.r2:
+            inc hl
+            dec c                   ; root -= 1
+            inc b
+            jr .rloop
+.rdone:
+            add hl,de
+            ld (g_l2_e_sq),hl
+            ld a,c
+            ld (g_l2_e_root),a
+            ld a,(g_l2_e_wide)
+            or a
+            jr nz,.result
+            ld a,b
+            or a
+            jr z,.result
+            ld hl,(g_l2_e_rem)      ; HL = rem (-255..255)
+            ld a,(g_l2_e_small)
+            ld e,a
+            ld d,0                  ; DE = S
+            ld a,(g_l2_e_big)
+            ld c,a                  ; C = B
+            ld a,(g_l2_e_q)
+.qloop:
+            or a                    ; rem -= S (keeps A = q: or a clears carry)
+            sbc hl,de
+.qfix:
+            bit 7,h                 ; rem < 0: rem += B, q -= 1
+            jr z,.qok
+            push af
+            ld a,c
+            add hl,a
+            pop af
+            dec a
+            jr .qfix
+.qok:
+            djnz .qloop
+            ld (g_l2_e_q),a
+            ld (g_l2_e_rem),hl
+.result:
+            ld a,(g_l2_e_wide)
+            or a
+            ld a,(g_l2_e_root)
+            jr nz,.out
+            ld a,(g_l2_e_q)
+.out:
+            ld (g_l2_e_out),a
+    end
+    return l2_e_out
+end
+
+-- row state of fill_ellipse / ellipse; l2_e_fast: 0 = the ellipse
+-- crosses the screen edge (every span through l2_span, which clips),
+-- 1 = on the screen (rt_hline), 2 = on the 256x192 screen (direct writes)
+byte l2_e_dy
+byte l2_e_w
+byte l2_e_wn
+byte l2_e_inner
+
+-- for dy = 0, ry: w = l2_ell_next(); span x - w .. x + w on rows y + dy
+-- and y - dy
 function fill_ellipse(sword x, sword y, byte rx, byte ry, byte c)
-    for dy = 0, ry do
-        byte w = l2_halfw(rx, ry, dy)
-        l2_span(x - w, x + w, y + dy, c)
-        if dy ~= 0 then l2_span(x - w, x + w, y - dy, c) end
+    if ry == 0 then                 -- one row: no set-up needed
+        l2_span(x - sword(rx), x + sword(rx), y, c)
+        return
+    end
+    l2_ell_start(x, y, rx, ry)
+    asm
+            xor a
+            ld (g_l2_e_dy),a
+.row:
+            call f_l2_ell_next
+            ld a,(g_l2_e_out)
+            ld (g_l2_e_w),a
+            ld bc,(p_fill_ellipse_y)
+            ld a,(g_l2_e_dy)
+            add bc,a
+            call .span              ; row y + dy
+            ld a,(g_l2_e_dy)
+            or a
+            jr z,.next
+            ld e,a
+            ld d,0
+            ld hl,(p_fill_ellipse_y)
+            or a
+            sbc hl,de
+            ld b,h
+            ld c,l
+            call .span              ; row y - dy
+.next:
+            ld hl,g_l2_e_dy
+            ld a,(p_fill_ellipse_ry)
+            cp (hl)
+            jp z,.done
+            inc (hl)
+            jp .row
+.span:                              ; BC = row: x - w .. x + w
+            ld a,(g_l2_e_w)
+            ld e,a
+            ld d,0
+            ld hl,(p_fill_ellipse_x)
+            or a
+            sbc hl,de               ; HL = x - w
+            ld a,(g_l2_e_fast)
+            or a
+            jr z,.clip
+            ld d,c                  ; D = y
+            ld c,e
+            ld b,0
+            sla c
+            rl b
+            inc bc                  ; BC = 2 w + 1
+            ld a,(p_fill_ellipse_c)
+            jp rt_hline
+.clip:
+            ld (p_l2_span_x0),hl
+            add hl,de
+            add hl,de
+            ld (p_l2_span_x1),hl    ; x + w
+            ld (p_l2_span_y),bc
+            ld a,(p_fill_ellipse_c)
+            ld (p_l2_span_c),a
+            jp f_l2_span
+.done:
     end
 end
 
+-- w = l2_ell_next()
+-- for dy = 0, ry:
+--     wn = 0, inner = 0; if dy < ry: wn = l2_ell_next(), inner = min(wn + 1, w)
+--     (connect to the next row: from just outside its half width to ours)
+--     spans x + inner .. x + w and x - w .. x - inner on rows y + dy, y - dy
+--     w = wn
 function ellipse(sword x, sword y, byte rx, byte ry, byte c)
-    byte w = l2_halfw(rx, ry, 0)
-    for dy = 0, ry do
-        -- connect to the next row: from just outside its half width to ours
-        byte inner = 0
-        byte wn = 0
-        if dy < ry then
-            wn = l2_halfw(rx, ry, dy + 1)
-            inner = min(wn + 1, w)
-        end
-        l2_span(x + inner, x + w, y + dy, c)
-        l2_span(x - w, x - inner, y + dy, c)
-        if dy ~= 0 then
-            l2_span(x + inner, x + w, y - dy, c)
-            l2_span(x - w, x - inner, y - dy, c)
-        end
-        w = wn
+    if ry == 0 then                 -- one row: the spans x .. x + rx and
+        l2_span(x - sword(rx), x + sword(rx), y, c)    -- x - rx .. x meet
+        return
+    end
+    l2_ell_start(x, y, rx, ry)
+    l2_e_w = l2_ell_next()
+    asm
+            ld a,(g_l2_e_fast)
+            or a
+            jr z,.start
+            ld a,(rt_l2mode)
+            or a
+            jr nz,.start
+            ld a,2                  ; on the 256x192 screen: direct writes
+            ld (g_l2_e_fast),a
+.start:
+            xor a
+            ld (g_l2_e_dy),a
+.row:
+            ld a,(g_l2_e_dy)
+            ld hl,p_ellipse_ry
+            cp (hl)
+            jr nc,.last
+            call f_l2_ell_next
+            ld a,(g_l2_e_out)
+            ld (g_l2_e_wn),a
+            ld b,a
+            ld a,(g_l2_e_w)
+            cp b                    ; wn <= w; inner = min(wn + 1, w)
+            jr z,.inner
+            ld a,b
+            inc a
+.inner:
+            ld (g_l2_e_inner),a
+            jr .spans
+.last:
+            xor a
+            ld (g_l2_e_wn),a
+            ld (g_l2_e_inner),a
+.spans:
+            ld bc,(p_ellipse_y)
+            ld a,(g_l2_e_dy)
+            add bc,a
+            call .pair              ; row y + dy
+            ld a,(g_l2_e_dy)
+            or a
+            jr z,.next
+            ld e,a
+            ld d,0
+            ld hl,(p_ellipse_y)
+            or a
+            sbc hl,de
+            ld b,h
+            ld c,l
+            call .pair              ; row y - dy
+.next:
+            ld a,(g_l2_e_wn)
+            ld (g_l2_e_w),a
+            ld hl,g_l2_e_dy
+            ld a,(p_ellipse_ry)
+            cp (hl)
+            jp z,.done
+            inc (hl)
+            jp .row
+.pair:                              ; BC = row
+            push bc
+            ld hl,(p_ellipse_x)
+            ld a,(g_l2_e_inner)
+            add hl,a
+            call .span              ; x + inner .. x + w
+            pop bc
+            ld hl,(p_ellipse_x)
+            ld a,(g_l2_e_w)
+            ld e,a
+            ld d,0
+            or a
+            sbc hl,de               ; x - w .. x - inner
+.span:                              ; HL = x0, BC = row, length w - inner + 1
+            ld a,(g_l2_e_inner)
+            ld e,a
+            ld a,(g_l2_e_w)
+            sub e
+            ld e,a                  ; E = length - 1
+            ld a,(g_l2_e_fast)
+            or a
+            jr z,.clip
+            dec a
+            jr z,.hline
+            ld b,e
+            inc b                   ; B = length (0 = 256)
+            ld e,l
+            ld d,c
+            call rt_l2_map          ; HL = address of (E, D)
+            ld a,(p_ellipse_c)
+.plot:
+            ld (hl),a
+            inc l
+            djnz .plot
+            ret
+.hline:
+            ld d,c                  ; D = y
+            ld c,e
+            ld b,0
+            inc bc                  ; BC = length
+            ld a,(p_ellipse_c)
+            jp rt_hline
+.clip:
+            ld (p_l2_span_x0),hl
+            ld d,0
+            add hl,de
+            ld (p_l2_span_x1),hl
+            ld (p_l2_span_y),bc
+            ld a,(p_ellipse_c)
+            ld (p_l2_span_c),a
+            jp f_l2_span
+.done:
     end
 end
 
@@ -992,7 +1581,7 @@ pub fn uses_sprites(src: &str) -> bool {
 /// when a program starts to use a module. Names starting with `snd_` are
 /// reserved for the sound module's internals.
 pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
-    ("sprite", &["Sprite", "sprite", "sprites_visible"]),
+    ("sprite", &["Sprite", "sprite", "sprites_visible", "sprite_collision"]),
     (
         "Layer 2",
         &[

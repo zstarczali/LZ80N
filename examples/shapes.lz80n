@@ -1,12 +1,28 @@
 -- shapes.lz80n -- circles and ellipses on Layer 2
 --
---  * a planet (fill_circle) with a ring (ellipse) and a moon on an orbit
+--  * a planet (fill_circle) with a ring (line, along cos/sin) and a moon
+--    that goes behind the planet on the far half of its orbit
 --  * a bouncing ball whose shadow is a flattened fill_ellipse
 --  * shapes may hang off the screen: they are clipped
 --  * double buffering (layer2_flip) keeps the animation flicker free
 
 byte stars_x[] = {12, 40, 77, 101, 140, 166, 199, 230, 250, 20, 60, 120, 180, 215, 245, 90}
 byte stars_y[] = {10, 30, 6, 44, 18, 52, 12, 36, 70, 80, 120, 140, 100, 130, 160, 170}
+
+-- half of the planet's ring, from angle `start` (0 = the front half,
+-- 128 = the back half), as 32 short lines along the ellipse
+function ring_half(byte start, byte c)
+    word x = word(110 + sword(cos(start) * 70))
+    byte y = byte(90 + sword(sin(start) * 16))
+    for i = 1, 32 do
+        byte a = start + byte(i * 4)
+        word nx = word(110 + sword(cos(a) * 70))
+        byte ny = byte(90 + sword(sin(a) * 16))
+        line(x, y, nx, ny, c)
+        x = nx
+        y = ny
+    end
+end
 
 ink(BRIGHT_WHITE)
 at(1, 4)
@@ -30,16 +46,20 @@ while true do
     fill_circle(250, -10, 40, rgb(7, 5, 0))
     circle(250, -10, 46, rgb(7, 3, 0))
 
-    -- the planet: the back of the ring, the planet, the front of the ring
-    ellipse(110, 90, 70, 16, rgb(4, 3, 1))
-    fill_circle(110, 90, 36, rgb(1, 3, 3))
-    fill_circle(100, 80, 12, rgb(2, 5, 3))
-    fill_ellipse(110, 106, 52, 4, rgb(5, 4, 2))
-
-    -- the moon on a tilted orbit
+    -- the moon on a tilted orbit: on the upper half it is behind the
+    -- planet (drawn first), on the lower half in front of it (drawn last)
     sword mx = 110 + sword(cos(angle) * 90)
     sword my = 90 + sword(sin(angle) * 30)
-    fill_circle(mx, my, 7, rgb(6, 6, 2))
+    bool behind = my < 90
+    if behind then fill_circle(mx, my, 7, rgb(6, 6, 2)) end
+
+    -- the planet: the back half of the ring, the planet, the front half
+    ring_half(128, rgb(5, 4, 1))
+    fill_circle(110, 90, 36, rgb(1, 3, 3))
+    fill_circle(100, 80, 12, rgb(2, 5, 3))
+    ring_half(0, rgb(5, 4, 1))
+
+    if not behind then fill_circle(mx, my, 7, rgb(6, 6, 2)) end
     angle += 2
 
     -- bouncing ball with a shadow that shrinks as the ball rises

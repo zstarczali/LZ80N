@@ -8,7 +8,7 @@ fordítja, és `.nex` fájlba csomagolja, amely közvetlenül fut a Nexten vagy
 emulátorban. Nincs interpreter, nincs virtuális gép és nincs szemétgyűjtő: amit
 leírsz, az Z80N utasításokká válik.
 
-Ez a kézikönyv a nyelvet és a könyvtárait az 1.2.1-es verzió állapota szerint
+Ez a kézikönyv a nyelvet és a könyvtárait az 1.3.0-s verzió állapota szerint
 írja le (lásd [`CHANGELOG.md`](../CHANGELOG.md)). Az angol változat: [`manual-en.md`](manual-en.md). A tömör műszaki
 specifikáció: [`spec.md`](spec.md).
 
@@ -188,7 +188,7 @@ hogy a program elkezdi használni a modult:
 
 | Modul | Nevek |
 |-------|-------|
-| sprite | `Sprite` `sprite` `sprites_visible` |
+| sprite | `Sprite` `sprite` `sprites_visible` `sprite_collision` |
 | Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` `L2_256` `L2_320` `L2_640` |
 | paletta | `palette` `palette9` `palette_select` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` `PAL_ULA_2` `PAL_LAYER2_2` `PAL_SPRITES_2` `PAL_TEXT_2` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
@@ -1158,6 +1158,36 @@ sprite[1].update()                 -- a módosított mezők elküldése a hardve
 | `show(pattern)` | minta beállítása és megjelenítés |
 | `hide()` | elrejtés |
 | `update()` | az összes mező elküldése a hardvernek |
+| `overlaps(other)` → bool | a két sprite négyzete átfedi-e egymást |
+
+### 16.3 Ütközésvizsgálat
+
+Két módszer van, és jól kiegészítik egymást:
+
+```lua
+if sprite_collision() then            -- pixelpontos hardveres jelzés
+    for e = 1, 8 do
+        if sprite[0].overlaps(sprite[e]) then
+            -- a 0. sprite az e. sprite-tal ütközött
+        end
+    end
+end
+```
+
+* `sprite[a].overlaps(sprite[b])` → bool: a két sprite négyzete
+  (16 << `scale` pixel oldalú) átfedi-e egymást. Az árnyékmezőkből
+  (`x`, `y`, `scale`, `visible`) számol, így `update()` nélkül is a
+  beállított értékeket látja. Rejtett sprite-nál `false`. Az átlátszó
+  pixeleket is beleszámolja, és a képernyő szélén nem fordul át.
+  Pontosabb téglalapot (hitboxot) saját kóddal érdemes vizsgálni, mint az
+  `examples/shooter.lz80n`-ben.
+* `sprite_collision()` → bool: a hardver ütközésjelzője (`$303B` port,
+  0. bit). Akkor igaz, ha a legutóbbi hívás óta két látható sprite nem
+  átlátszó pixelei fedték egymást a megjelenített területen. Az olvasás
+  törli a jelzést. A hardver nem mondja meg, melyik két sprite ütközött:
+  ezt az `overlaps`-szel lehet kideríteni. A jelzést a hardver rajzolás
+  közben állítja be, ezért a mozgatás után legkorábban a következő
+  képkockában (`vsync()` után) jelez.
 
 Lásd: `examples/sprites.lz80n`, ahol egy osztály vezérli a sprite-okat.
 
@@ -1580,7 +1610,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `layer2_visible`, `layer2_clear`, `layer2_flip`, `plot`, `point`, `hline`, `vline`, `line`, `rect`, `fill_rect`, `circle`, `fill_circle`, `ellipse`, `fill_ellipse`, `triangle`, `fill_triangle`, `rgb` | 14 |
 | `draw_image`, `image_width`, `image_height` | 14, 16 |
 | `palette`, `palette9`, `rgb9` | 15 |
-| `sprite_load`, `sprites_visible`, `sprite[n]` | 16 |
+| `sprite_load`, `sprites_visible`, `sprite[n]`, `sprite_collision` | 16 |
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
 | `copper_begin`, `copper_wait`, `copper_move`, `copper_start`, `copper_stop` | 18 |
 | `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill`, `far` tömbök | 19 |

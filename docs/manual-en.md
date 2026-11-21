@@ -9,7 +9,7 @@ on the Next or in an emulator. There is no interpreter, no virtual machine and
 no garbage collector: what you write becomes Z80N instructions.
 
 This manual describes the language and its libraries as implemented in
-version 1.2.1 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
+version 1.3.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
 The compact technical specification is [`spec.md`](spec.md).
 
 ---
@@ -187,7 +187,7 @@ module, so a name never changes meaning when a program starts to use it:
 
 | Module | Names |
 |--------|-------|
-| sprite | `Sprite` `sprite` `sprites_visible` |
+| sprite | `Sprite` `sprite` `sprites_visible` `sprite_collision` |
 | Layer 2 | `layer2_visible` `rgb` `vline` `line` `rect` `fill_rect` `circle` `fill_circle` `ellipse` `fill_ellipse` `triangle` `fill_triangle` `TRANSPARENT` `L2_256` `L2_320` `L2_640` |
 | palette | `palette` `palette9` `palette_select` `rgb9` `PAL_ULA` `PAL_LAYER2` `PAL_SPRITES` `PAL_TEXT` `PAL_ULA_2` `PAL_LAYER2_2` `PAL_SPRITES_2` `PAL_TEXT_2` |
 | copper | `copper_begin` `copper_wait` `copper_move` `copper_start` `copper_stop` |
@@ -1146,6 +1146,35 @@ sprite[1].update()                 -- send the changed fields to the hardware
 | `show(pattern)` | set the pattern and show it |
 | `hide()` | hide it |
 | `update()` | send all fields to the hardware |
+| `overlaps(other)` → bool | do the two sprites' squares overlap? |
+
+### 16.3 Collision detection
+
+There are two ways, and they work well together:
+
+```lua
+if sprite_collision() then            -- pixel-exact hardware flag
+    for e = 1, 8 do
+        if sprite[0].overlaps(sprite[e]) then
+            -- sprite 0 hit sprite e
+        end
+    end
+end
+```
+
+* `sprite[a].overlaps(sprite[b])` → bool: do the two sprites' squares
+  (16 << `scale` pixels wide) overlap? It works from the shadow fields
+  (`x`, `y`, `scale`, `visible`), so it sees values set without
+  `update()`. `false` when either sprite is hidden. Transparent pixels
+  count, and there is no wrapping at the screen edges. For a tighter
+  hitbox, compare rectangles in your own code, as `examples/shooter.lz80n`
+  does.
+* `sprite_collision()` → bool: the hardware collision flag (port `$303B`,
+  bit 0). True when the non-transparent pixels of two visible sprites
+  overlapped on the displayed area since the last call. Reading clears the
+  flag. The hardware does not say which two sprites collided: find them
+  with `overlaps`. The hardware sets the flag while drawing, so after a
+  move it reports at the earliest in the next frame (after `vsync()`).
 
 See `examples/sprites.lz80n`: a class that controls sprites.
 
@@ -1562,7 +1591,7 @@ register allocation.
 | `layer2_visible`, `layer2_clear`, `layer2_flip`, `plot`, `point`, `hline`, `vline`, `line`, `rect`, `fill_rect`, `circle`, `fill_circle`, `ellipse`, `fill_ellipse`, `triangle`, `fill_triangle`, `rgb` | 14 |
 | `draw_image`, `image_width`, `image_height` | 14, 16 |
 | `palette`, `palette9`, `rgb9` | 15 |
-| `sprite_load`, `sprites_visible`, `sprite[n]` | 16 |
+| `sprite_load`, `sprites_visible`, `sprite[n]`, `sprite_collision` | 16 |
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
 | `copper_begin`, `copper_wait`, `copper_move`, `copper_start`, `copper_stop` | 18 |
 | `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill`, `far` arrays | 19 |

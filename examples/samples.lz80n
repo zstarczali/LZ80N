@@ -28,6 +28,7 @@ at(7, 2)
 write("0  stop")
 
 layer2_visible(true)
+layer2_clear(0)         -- Layer 2 RAM is not cleared at power-on
 byte bar = 0
 word played = 0
 while true do

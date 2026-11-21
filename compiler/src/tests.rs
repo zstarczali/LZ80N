@@ -769,6 +769,50 @@ print(sprite[3].x, sprite[3].id)
     }
 }
 
+/// `overlaps` compares the sprites' squares; `sprite_collision` reads the
+/// pixel-exact hardware flag (pattern 0 has a transparent top-left pixel).
+#[test]
+fn sprite_collisions() {
+    let png = write_test_png("coll.png");
+    let src = format!(
+        r#"
+asset s = "{}"
+sprite_load(0, s)
+sprites_visible(true, false)
+sprite[0].position(100, 100)
+sprite[0].show(0)
+sprite[1].position(85, 85)
+sprite[1].show(0)
+-- only B's bottom-right pixel touches A's transparent corner
+print(sprite[0].overlaps(sprite[1]), sprite_collision())
+sprite[1].position(86, 85)
+print(sprite[0].overlaps(sprite[1]), sprite_collision())
+sprite[1].position(84, 100)
+print(sprite[1].overlaps(sprite[0]), sprite_collision())
+sprite[1].scale = 1
+sprite[1].update()
+print(sprite[1].overlaps(sprite[0]), sprite_collision())
+sprite[1].hide()
+print(sprite[0].overlaps(sprite[1]), sprite_collision())
+sprite[1].position(300, 200)
+sprite[1].show(0)
+sprite[2].position(300, 200)
+sprite[2].show(1)
+-- off the display: the squares overlap, the hardware clips them
+print(sprite[1].overlaps(sprite[2]), sprite_collision())
+sprites_visible(true, true)
+print(sprite_collision())
+"#,
+        png.display().to_string().replace(std::path::MAIN_SEPARATOR, "/")
+    );
+    if let Some(out) = run("r_sprite_coll", &src) {
+        assert_eq!(
+            out,
+            "true false\ntrue true\nfalse false\ntrue true\nfalse false\ntrue false\ntrue\n"
+        );
+    }
+}
+
 #[test]
 fn sprite_errors() {
     let png = write_test_png("err.png");
@@ -2731,6 +2775,59 @@ print(frames() - t)
     assert!(err("asset x = \"ships.png\"\nmusic_play(x)").contains("not music"));
 }
 
+/// Where does a program spend its time? Runs PROFILE (an example name or a
+/// .lz80n path) in the emulator for FRAMES frames (default 300, after 20
+/// frames of start-up) and prints the T-states per routine: the routine is
+/// the nearest function (`f_`), runtime routine (`rt_`), outlined
+/// main-program chunk (`mp_`), the main program (`__start`) or the frame
+/// interrupt (`__isr`) at or below the PC. `(vsync)` is time spent halted,
+/// waiting for the next frame.
+///
+/// `PROFILE=shooter cargo test --release profile -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn profile() {
+    let name = std::env::var("PROFILE").expect("PROFILE=example or file.lz80n");
+    let frames: u32 = std::env::var("FRAMES").ok().and_then(|f| f.parse().ok()).unwrap_or(300);
+    let path = if name.ends_with(".lz80n") {
+        PathBuf::from(&name)
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../examples/{name}.lz80n"))
+    };
+    let src = std::fs::read_to_string(&path).unwrap();
+    let (nex, syms) = build("profile", &src).unwrap();
+    let mut labels: Vec<(u16, &str)> = syms
+        .iter()
+        .filter(|(k, _)| {
+            !k.contains('.')
+                && (["f_", "rt_", "mp_"].iter().any(|p| k.starts_with(p))
+                    || ["__start", "__isr", "__main_end"].contains(&k.as_str()))
+        })
+        .map(|(k, v)| (*v, k.as_str()))
+        .collect();
+    labels.sort();
+    let mut cpu = load_nex(&nex).unwrap();
+    while cpu.frame_count < 20 {
+        cpu.tick().unwrap();
+    }
+    let mut time: HashMap<&str, u64> = HashMap::new();
+    let t0 = cpu.t_states;
+    while cpu.frame_count < 20 + frames {
+        let (pc, t, halted) = (cpu.pc, cpu.t_states, cpu.halted);
+        cpu.tick().unwrap();
+        let i = labels.partition_point(|&(a, _)| a <= pc);
+        let routine = if halted { "(vsync)" } else if i == 0 { "(?)" } else { labels[i - 1].1 };
+        *time.entry(routine).or_default() += cpu.t_states - t;
+    }
+    let total = cpu.t_states - t0;
+    let mut rows: Vec<_> = time.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    println!("{name}: {frames} frames, {} T per frame", total / frames as u64);
+    for (routine, t) in rows.iter().take(25) {
+        println!("{:>6.2}% {:>9} T/frame  {routine}", *t as f64 * 100.0 / total as f64, t / frames as u64);
+    }
+}
+
 /// T-states between calls of `bench_start()` and `bench_stop(n)` in the
 /// program named by BENCH (run with --ignored --nocapture).
 #[test]
@@ -3035,6 +3132,8 @@ check(250, 5, 290, 150, 256, 191)
 check(0, 0, 255, 191, 256, 191)
 check(100, 100, 100, 100, 256, 191)
 check(120, 50, 20, 51, 256, 191)
+check(255, 191, 0, 0, 256, 191)
+check(5, 190, 40, 2, 256, 191)
 layer2_mode(L2_320)
 check(5, 250, 319, 3, 320, 255)
 check(300, 10, 20, 200, 320, 255)
@@ -3042,6 +3141,36 @@ print(bad)
 "
     );
     expect("r_line_ref", &src, "0\n");
+}
+
+/// The stepped half widths (`l2_ell_next`) equal the square-root formula
+/// (`ref_halfw`) on every row, for small radii exhaustively and for a
+/// spread of radii up to 255.
+#[test]
+fn run_ellipse_rows_match_reference() {
+    let reference = include_str!("../tests/fixtures/shapes_ref.lz80n");
+    let src = format!(
+        "{reference}
+word bad = 0
+word rows = 0
+function check(byte rx, byte ry)
+    l2_ell_start(0, 0, rx, ry)
+    for dy = 0, ry do
+        if l2_ell_next() ~= ref_halfw(rx, ry, dy) then bad += 1 end
+        rows += 1
+    end
+end
+for rx = 0, 24 do
+    for ry = 0, 24 do check(rx, ry) end
+end
+byte big[] = {{1, 2, 3, 7, 31, 32, 60, 99, 127, 128, 200, 254, 255}}
+for i = 0, 12 do
+    for j = 0, 12 do check(big[i], big[j]) end
+end
+print(bad, rows)
+"
+    );
+    expect("r_ellipse_rows", &src, "0 23881\n");
 }
 
 #[test]
@@ -3093,6 +3222,51 @@ print(bad)
 "
     );
     expect("r_shapes_ref", &src, "0\n");
+}
+
+/// Ellipses that lie on the screen take the unclipped paths (direct writes
+/// in 256x192, rt_hline in 320x256); they must match the reference too.
+#[test]
+fn run_ellipses_on_screen_match_reference() {
+    let reference = include_str!("../tests/fixtures/shapes_ref.lz80n");
+    let src = format!(
+        "{reference}
+word bad = 0
+-- compare inside the bounding box (one pixel around it)
+function ell(sword x, sword y, byte rx, byte ry)
+    for pass = 0, 1 do
+        if pass == 0 then
+            ellipse(x, y, rx, ry, 2)
+            ellipse_ref(x, y, rx, ry, 1)
+            ellipse(x, y, rx, ry, 3)
+        else
+            fill_ellipse(x, y, rx, ry, 2)
+            fill_ellipse_ref(x, y, rx, ry, 1)
+            fill_ellipse(x, y, rx, ry, 3)
+        end
+        for py = max(y - sword(ry) - 1, 0), min(y + sword(ry) + 1, sword(layer2_height()) - 1) do
+            for px = max(x - sword(rx) - 1, 0), min(x + sword(rx) + 1, sword(layer2_width()) - 1) do
+                byte p = point(word(px), byte(py))
+                if p == 1 or p == 2 then bad += 1 end
+            end
+        end
+        layer2_clear(0)
+    end
+end
+layer2_visible(true)
+ell(128, 96, 60, 30)
+ell(40, 150, 9, 33)
+ell(128, 96, 0, 50)
+ell(128, 96, 127, 0)
+ell(0, 191, 0, 0)
+ell(127, 95, 127, 95)        -- touches all four edges
+layer2_mode(L2_320)
+ell(160, 128, 150, 100)
+ell(159, 127, 159, 127)
+print(bad)
+"
+    );
+    expect("r_ellipses_on_screen", &src, "0\n");
 }
 
 #[test]
