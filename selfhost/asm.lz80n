@@ -3,7 +3,7 @@
 -- Assembles in.asm (or out.asm from codegen.lz80n; Z80N, the sjasmplus
 -- subset lz80nc generates) into the
 -- NEX file named by its `SAVENEX OPEN`. It follows compiler/src/asm/
--- (expressions, encoder, directives, NEX writer); the test
+-- (expressions, encoder, pseudo-ops, NEX writer); the test
 -- `selfhost_asm_matches_rust` compares the NEX byte for byte with the one
 -- the Rust assembler makes. On an error asm.err holds `LINE: message`.
 --
@@ -20,7 +20,7 @@ byte inh
 bool in_eof = false
 
 -- read the next line into lbuf (without the newline); false at the end
-function read_line() -> bool
+function read_text_ln() -> bool
     llen = 0
     if in_eof then return false end
     bool any = false
@@ -1364,7 +1364,7 @@ function ld()
     bad()
 end
 
--- mnemonics and directives: M_* = index + 1 in `mnems`
+-- mnemonics and pseudo-ops: M_* = index + 1 in `mnems`
 const NMNEM = 118
 string mnems[] = {
     "nop", "rlca", "rrca", "rla", "rra", "daa", "cpl", "scf", "ccf", "halt",
@@ -1951,7 +1951,7 @@ function savenex(word s, word e)
     end
 end
 
--- ---------------------------------------------------------------- directives
+-- ---------------------------------------------------------------- pseudo-ops
 
 -- MMU <slot>[ <slot2>] [e|n|w], <page>[, <address>]
 function mmu(word s, word e)
@@ -2032,7 +2032,7 @@ function db_string(word a, word b) -> bool
     return true
 end
 
-function directive_or_insn(byte id, word as_, word ae)
+function pseudo_or_insn(byte id, word as_, word ae)
     if id == M_OPT or id == M_OPT + 1 or id == M_OPT + 2 or id == M_OPT + 3 then
         return                  -- opt output display end
     end
@@ -2181,7 +2181,7 @@ function strip_comment()
     end
 end
 
-function do_line()
+function do_source_ln()
     strip_comment()
     here = pc
     word p = 0
@@ -2203,7 +2203,7 @@ function do_line()
             end
         end
     end
-    -- the mnemonic / directive
+    -- the mnemonic / pseudo-op
     while p < llen and is_blank(lbuf[p]) do p += 1 end
     oplen = 0
     while p < llen and not is_blank(lbuf[p]) do
@@ -2232,7 +2232,7 @@ function do_line()
         end
         return
     end
-    directive_or_insn(id, p, llen)
+    pseudo_or_insn(id, p, llen)
 end
 
 function run_pass()
@@ -2265,9 +2265,9 @@ function run_pass()
         msg("cannot open the input (in.asm or out.asm)")
         return
     end
-    while not failed and read_line() do
+    while not failed and read_text_ln() do
         lno += 1
-        do_line()
+        do_source_ln()
     end
     file_close(inh)
 end

@@ -12,8 +12,8 @@
 --
 -- When the file expand.on exists (the self-hosted compiler's pipeline),
 -- `include "file"` is expanded (each file once, the main file counts) and
--- the `file_*` standard module (lib_file.lz80n) is lexed first when the
--- main file mentions file_ or FILE_, as compiler/src/main.rs does.
+-- the standard modules (lib_*.lz80n) the main file mentions are lexed
+-- first, as compiler/src/main.rs does.
 
 const T_IDENT = 0
 const T_INT = 1
@@ -644,35 +644,85 @@ function include_file(word l, word c)
     file_seek(inh, pos + 2)
 end
 
--- does the main file mention file_ or FILE_?
-function mentions_file_module() -> bool
+-- the standard modules, in the order compiler/src/main.rs puts them in
+-- front of the program, and the words that pull each one in
+const NMODULES = 6
+-- (a `|` keeps the words out of this source, which would otherwise pull the
+-- modules into itself; drop_bars removes it)
+string module_files[] = {
+    "lib_s|prites.lz80n", "lib_l|ayer2.lz80n", "lib_p|alette.lz80n",
+    "lib_file.lz80n", "lib_c|opper.lz80n", "lib_sound.lz80n"
+}
+const NPATTERNS = 28
+string patterns[] = {
+    "s|prite", "S|prite",
+    "l|ayer2", "p|lot", "p|oint", "h|line", "v|line", "l|ine(", "r|ect", "r|gb(", "T|RANSPARENT", "c|ircle", "e|llipse", "t|riangle",
+    "p|alette", "P|AL_", "r|gb9",
+    "f|ile_", "F|ILE_",
+    "c|opper",
+    "p|lay(", "b|eep(", "t|one(", "n|oise(", "v|olume(", "s|ound_", "p|laying(", "p|lay_loop("
+}
+byte pattern_module[] = {
+    0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2,
+    3, 3,
+    4,
+    5, 5, 5, 5, 5, 5, 5, 5
+}
+bool module_used[6]
+
+-- w without its `|` -> unbarred
+string unbarred
+function drop_bars(string w)
+    unbarred = ""
+    byte n = len(w)
+    byte i = 0
+    while i < n do
+        if asc(w, i) ~= '|' then unbarred = unbarred .. chr(asc(w, i)) end
+        i += 1
+    end
+end
+
+function drop_all_bars()
+    for k = 0, NPATTERNS - 1 do
+        drop_bars(patterns[k])
+        patterns[k] = unbarred
+    end
+    for k = 0, NMODULES - 1 do
+        drop_bars(module_files[k])
+        module_files[k] = unbarred
+    end
+end
+
+-- which modules does the main file mention? (a plain text search, as
+-- compiler/src/prelude.rs does: comments and strings count too)
+function find_modules()
     byte h = file_open("in.lz80n", FILE_READ)
-    if h == FILE_ERROR then return false end
-    byte m = 0                  -- characters of the pattern matched
-    bool found = false
+    if h == FILE_ERROR then return end
+    byte prog[28]               -- characters of each pattern matched so far
+    for k = 0, NPATTERNS - 1 do prog[k] = 0 end
     word g = file_getc(h)
-    while g ~= FILE_EOF and not found do
+    while g ~= FILE_EOF do
         byte ch = byte(g)
-        if m == 0 then
-            if ch == 'f' or ch == 'F' then m = 1 end
-        elseif m < 4 then
-            byte lc = ch | 0x20
-            if (m == 1 and lc == 'i') or (m == 2 and lc == 'l') or (m == 3 and lc == 'e') then
+        for k = 0, NPATTERNS - 1 do
+            byte m = prog[k]
+            if asc(patterns[k], m) == ch then
                 m += 1
-            elseif ch == 'f' or ch == 'F' then
+                if m == len(patterns[k]) then
+                    module_used[pattern_module[k]] = true
+                    m = 0
+                end
+            elseif asc(patterns[k], 0) == ch then
                 m = 1
             else
                 m = 0
             end
-        else
-            if ch == '_' then found = true end
-            m = 0
-            if ch == 'f' or ch == 'F' then m = 1 end
+            prog[k] = m
         end
         g = file_getc(h)
     end
     file_close(h)
-    return found
 end
 
 -- ---------------------------------------------------------------- main
@@ -683,8 +733,16 @@ if probe ~= FILE_ERROR then
     file_close(probe)
 end
 outh = file_open("tokens.bin", FILE_WRITE)
-if expand and mentions_file_module() then
-    if not lex_file("lib_file.lz80n") then error(1, 1, "cannot read lib_file.lz80n") end
+if expand then
+    -- the built-in constants (KEY_A, BLACK, ...) come first
+    if not lex_file("lib_consts.lz80n") then error(1, 1, "cannot read lib_consts.lz80n") end
+    drop_all_bars()
+    find_modules()
+    for k = 0, NMODULES - 1 do
+        if module_used[k] and not failed then
+            if not lex_file(module_files[k]) then error(1, 1, "cannot read " .. module_files[k]) end
+        end
+    end
 end
 included[0] = "in.lz80n"
 nincluded = 1
