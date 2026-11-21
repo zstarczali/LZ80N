@@ -126,13 +126,20 @@ compiled into them; where they need such a word they write it with a `|`
 (`"p|lot"`) and drop the bar at run time.
 
 Also: arrays of up to 4 dimensions (`m[y][x]`, nested or flat initializer
-lists, `far` and struct fields too), string constants, `sub find val upper
-lower clamp sqrt` (integer).
+lists, `far` and struct fields too; `far` arrays with initializers are
+stored in their pages), string constants, `sub find val upper lower clamp
+sqrt`, `fixed` (8.8) and `fixed16` (16.16) with the rules of the spec
+(integer constants adapt, `fixed * integer` is 16-bit arithmetic, casts
+floor, `round`), `sin cos atan2` (`rt_trig.asm`), `interrupt frame` and
+`interrupt raster(n)` (the same ISR as lz80nc: the line interrupt chained
+through the handler lines and line 192), and main programs too large for
+the resident area (their statements move into code pages, in chunks
+called in order; a single statement must fit one page).
 
-Not yet: `fixed`, `fixed16` (and so `sin cos atan2 round`), music assets
-(`.pt3`) and `music_*`, interrupts, outlining of very large main programs,
-and diagnostics of type errors (programs are expected to be correct: check
-them with lz80nc first).
+Not yet: music assets (`.pt3`) and `music_*`, the check that no function
+is shared by the main program and an interrupt handler, and diagnostics of
+type errors (programs are expected to be correct: check them with lz80nc
+first).
 
 ## Tests
 
@@ -153,12 +160,14 @@ them with lz80nc first).
   patterns, sprites and Layer 2 pages as with lz80nc;
 * `SELFHOST=1 cargo test --release`: every `expect(...)` program of the test
   suite is also compiled by the self-hosted compiler when it supports it
-  (50 of 62 now);
+  (61 of 62 now: not the stress test of one 8K+ statement);
 * `selfhost_codegen_examples` (ignored, a report): which examples the
-  self-hosted compiler compiles: now 17 of the 24 (all but bignum, math,
-  music, raster, recursion, shapes and shooter);
+  self-hosted compiler compiles: now 23 of the 24 (all but music);
 * `selfhost_codegen_arrays_strings`: arrays of more dimensions, string
   constants and the string / number built-ins;
+* `selfhost_codegen_fixed`, `selfhost_codegen_interrupts`,
+  `selfhost_codegen_large_main`: fixed point and trigonometry, interrupt
+  handlers (the raster state too), a main program in code pages;
 * `selfhost_export_and_chain`: the exported SD card, every stage started by
   the one before, with and without assets (lexer, codegen, assets, asm).
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the

@@ -234,6 +234,28 @@ const INTRINSICS: &[&str] = &[
     "music_play", "music_once", "music_stop", "music_playing",
 ];
 
+/// The trigonometry routines and their tables (sine, arctangent).
+pub(crate) fn trig_asm() -> String {
+    let mut out = String::from(runtime::TRIG);
+    out.push_str("rt_sin_tab:\n");
+    for chunk in (0..256).collect::<Vec<_>>().chunks(8) {
+        let row: Vec<String> = chunk
+            .iter()
+            .map(|&i| {
+                let v = ((i as f64) * std::f64::consts::PI * 2.0 / 256.0).sin() * 256.0;
+                format!("{}", (v.round() as i64) & 0xFFFF)
+            })
+            .collect();
+        out.push_str(&format!("    dw {}\n", row.join(",")));
+    }
+    out.push_str("rt_atan_tab:\n");
+    let row: Vec<String> = (0..=64)
+        .map(|i| format!("{}", ((i as f64 / 64.0).atan() * 128.0 / std::f64::consts::PI).round() as i64))
+        .collect();
+    out.push_str(&format!("    db {}\n", row.join(",")));
+    out
+}
+
 /// The note routine and its table of AY tone periods.
 pub(crate) fn notes_asm() -> String {
     let mut out = String::from(runtime::NOTES);
@@ -5605,23 +5627,7 @@ impl Gen {
             }
         }
         if self.uses_trig {
-            out.push_str(runtime::TRIG);
-            out.push_str("rt_sin_tab:\n");
-            for chunk in (0..256).collect::<Vec<_>>().chunks(8) {
-                let row: Vec<String> = chunk
-                    .iter()
-                    .map(|&i| {
-                        let v = ((i as f64) * std::f64::consts::PI * 2.0 / 256.0).sin() * 256.0;
-                        format!("{}", (v.round() as i64) & 0xFFFF)
-                    })
-                    .collect();
-                let _ = writeln!(out, "    dw {}", row.join(","));
-            }
-            out.push_str("rt_atan_tab:\n");
-            let row: Vec<String> = (0..=64)
-                .map(|i| format!("{}", ((i as f64 / 64.0).atan() * 128.0 / std::f64::consts::PI).round() as i64))
-                .collect();
-            let _ = writeln!(out, "    db {}", row.join(","));
+            out.push_str(&trig_asm());
         }
         out.push_str(&self.data);
         let _ = write!(
