@@ -9,7 +9,8 @@ compiler stays the stage-0 compiler that builds it.
 | 2. Files on the SD card (`file_*` module, esxDOS API) | done |
 | 3a. Lexer (`lexer.lz80n`) | done: same tokens as `compiler/src/lexer.rs` |
 | 3b. Parser (`parser.lz80n`) | done: same tree as `compiler/src/parser.rs` |
-| 4. Code generation | next |
+| 4a. Assembler (`asm.lz80n`) | done: same NEX as `compiler/src/asm/` |
+| 4b. Code generation | next |
 | 5. The compiler compiles itself | |
 
 ## lexer.lz80n
@@ -38,3 +39,24 @@ Limits: 16000 tokens, 12000 tree nodes, 60000 bytes of names/strings/asm.
 Speed (28 MHz): about 90 lines per second; `shooter.lz80n` (471 lines) takes
 5.3 s. Most of the time goes into `far` array accesses (each one maps a page)
 and the token file round trip; to be tuned once code generation exists.
+
+## asm.lz80n
+
+Assembles `in.asm` into the NEX named by its `SAVENEX OPEN` (errors:
+`asm.err`, `LINE: message`). The same subset as the built-in Rust assembler:
+all Z80 and Z80N instructions, labels and `.local` labels, `equ`, `ORG`,
+`MMU` (with `e` / `n`), `DB DW DD DS ALIGN ASSERT`, `SAVENEX OPEN CORE CFG
+AUTO CLOSE` (no `INCBIN`, no `SAVENEX BANK`). Symbols live in a hash table in
+`far` arrays, the output image in up to 35 8K pages.
+
+Tests:
+* `selfhost_asm_matches_rust`: two examples, NEX byte for byte;
+* `selfhost_asm_all_instruction_forms`: every instruction of the encoder's
+  test table and the data directives / expression operators;
+* `selfhost_asm_errors`: the error messages;
+* `selfhost_asm_all_examples` (ignored, ~80 s): all 24 examples, NEX byte
+  for byte: `cargo test --release selfhost_asm_all -- --ignored`.
+
+Two passes (layout, then output; more only if a value changes). Speed at
+28 MHz: about 220 lines per second, e.g. 9.5 s for `hello` (2132 lines),
+54 s for `shooter` (9134 lines); `images` takes 99 s (large data, many pages).

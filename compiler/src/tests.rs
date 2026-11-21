@@ -4063,3 +4063,159 @@ fn selfhost_parser_matches_rust() {
     }
 }
 
+
+/// Assemble `asm` with selfhost/asm.lz80n in the emulator: (NEX or the
+/// asm.err text, T-states).
+fn selfhost_assemble(nex: &[u8], syms: &HashMap<String, u16>, asm: &str) -> (Result<Vec<u8>, String>, u64) {
+    let mut cpu = load_nex(nex).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::with_files(&[("in.asm", asm.as_bytes())]));
+    let end = syms["__main_end"];
+    let mut n = 0u64;
+    while cpu.pc != end {
+        if let Err(e) = cpu.tick() {
+            panic!("self-hosted assembler crashed: {e}");
+        }
+        n += 1;
+        assert!(n < 20_000_000_000, "self-hosted assembler did not finish");
+    }
+    let t = cpu.t_states;
+    let mut files = cpu.esx.unwrap().files;
+    if let Some(e) = files.remove("asm.err") {
+        return (Err(String::from_utf8_lossy(&e).to_string()), t);
+    }
+    (files.remove("t.nex").ok_or_else(|| "no t.nex written".to_string()), t)
+}
+
+fn selfhost_asm_check(names: &[&str]) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let asm_src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_asm", &asm_src).unwrap();
+    let dir = root.join("examples");
+    for name in names {
+        let path = dir.join(format!("{name}.lz80n"));
+        let src = std::fs::read_to_string(&path).unwrap();
+        let asm = crate::compile_main(&src, Some(&path), "t.nex", true, &dir, false).unwrap();
+        let want = crate::asm::assemble(&asm, &dir).unwrap().nex.unwrap().1;
+        let (got, t) = selfhost_assemble(&nex, &syms, &asm);
+        let got = got.unwrap_or_else(|e| panic!("{name}: self-hosted assembler: {e}"));
+        eprintln!("{name}: {} lines, {:.1} s at 28 MHz", asm.lines().count(), t as f64 / 28e6);
+        assert_eq!(got.len(), want.len(), "{name}: NEX size differs");
+        if let Some(i) = (0..want.len()).find(|&i| got[i] != want[i]) {
+            let a = i.saturating_sub(6);
+            let r = crate::asm::assemble(&asm, &dir).unwrap();
+            let mut near: Vec<(&String, &i64)> = r.symbols.iter().filter(|(_, v)| **v >= 0x8000 && **v <= 0x8000 + (i as i64 - 512)).collect();
+            near.sort_by_key(|x| *x.1);
+            panic!(
+                "{name}: NEX differs at offset {i} (${i:X}): self-hosted {:02X}, Rust {:02X}\n self {:02X?}\n rust {:02X?}\n after {:?}",
+                got[i], want[i], &got[a..i + 10], &want[a..i + 10], near.last()
+            );
+        }
+    }
+}
+
+/// selfhost/asm.lz80n makes the same NEX as the Rust assembler.
+#[test]
+fn selfhost_asm_matches_rust() {
+    selfhost_asm_check(&["hello", "strings"]);
+}
+
+/// Every example (slow: `cargo test --release selfhost_asm_all -- --ignored`).
+#[test]
+#[ignore]
+fn selfhost_asm_all_examples() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.unwrap().path();
+            (p.extension()? == "lz80n").then(|| p.file_stem().unwrap().to_string_lossy().to_string())
+        })
+        .collect();
+    names.sort();
+    selfhost_asm_check(&names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+}
+
+/// Every instruction form of the Rust encoder's test table, plus data
+/// directives and expressions, through both assemblers.
+#[test]
+fn selfhost_asm_all_instruction_forms() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let enc = std::fs::read_to_string(root.join("compiler/src/asm/encode.rs")).unwrap();
+    let mut body = String::from("    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nlab equ $8010\nlen equ 7\nstart:\n");
+    for line in enc.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("(\"") {
+            if let Some((insn, _)) = rest.split_once("\", &[") {
+                // jr/djnz targets are relative: tested below with a near label
+                if insn.starts_with("jr") || insn.starts_with("djnz") {
+                    continue;
+                }
+                body.push_str(&format!("    {}\n", insn.replace("\\\"", "\"")));
+            }
+        }
+    }
+    body.push_str(
+        r#"    db "text",0,'a','bc',"q\"\n"
+    db -1, 255, %1010, 0b11, 0x1F, 1Fh, 101b, 99d, 'A'+1, high $1234, low($1234), (lab >> 8) & $FF
+    dw lab, -2, $FFFF, lab - start, 2 * 3 + 4, 17 / 5, 17 % 5, 1 << 4 | 1, ~0 & $FF, !0, 3 > 2, 2 <= 1
+    dd 70000, -1
+    ds 5
+    ds 3, $AA
+    align 16
+.local: dw .local, start.local
+    ex (sp),iy
+    in f,(c)
+    bsra de,b
+    bsrf de,b
+    brlc de,b
+    mirror
+    mul
+    sll b
+    sli c
+    ld iyh,5
+    ld (ix-128),b
+    out (c),b
+    jr .local
+    jr nc,.local
+    djnz .local
+    jr $
+    MMU 1 n, 40
+    ORG $3FFE
+    db 1,2,3,4
+    SAVENEX OPEN "t.nex", start, $FDFD, 2
+    SAVENEX CORE 3,1,10
+    SAVENEX CFG 5, $1234, 1
+    SAVENEX AUTO
+    SAVENEX CLOSE
+"#,
+    );
+    let want = crate::asm::assemble(&body, &root).unwrap_or_else(|e| panic!("rust: {}\n{body}", e[0])).nex.unwrap().1;
+    let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_asm_forms", &src).unwrap();
+    let got = selfhost_assemble(&nex, &syms, &body).0.unwrap_or_else(|e| panic!("self-hosted: {e}"));
+    assert_eq!(got.len(), want.len());
+    if let Some(i) = (0..want.len()).find(|&i| got[i] != want[i]) {
+        panic!("differs at offset {i}: self {:02X?} rust {:02X?}", &got[i.saturating_sub(4)..i + 8], &want[i.saturating_sub(4)..i + 8]);
+    }
+}
+
+#[test]
+fn selfhost_asm_errors() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_asm_err", &src).unwrap();
+    for (asm, want) in [
+        ("    ORG $8000\n    ld a,nosuch\n", "2: undefined symbol `nosuch`"),
+        ("    ORG $8000\n    jr far\n    ds 200\nfar: nop\n", "2: jr/djnz target out of range"),
+        ("    ORG $8000\n    frobnicate a\n", "2: unknown instruction `frobnicate`"),
+        ("    ORG $8000\n    ld (hl),(hl)\n", "2: invalid instruction `(hl),(hl)`"),
+        ("x: nop\nx: nop\n", "2: label `x` defined twice"),
+        ("    ORG $8000\n    ld a,300\n", "2: value does not fit in a byte: `300`"),
+        ("    MMU 1 e, 28\n    ORG $3FFF\n    db 1,2\n", "3: data does not fit in an MMU slot"),
+        ("    ASSERT 1 > 2, \"too big\"\n", "1: too big"),
+    ] {
+        let (r, _) = selfhost_assemble(&nex, &syms, asm);
+        assert_eq!(r.err().as_deref().map(str::trim_end), Some(want), "{asm}");
+        assert!(crate::asm::assemble(asm, &root).is_err(), "the Rust assembler accepts {asm}");
+    }
+}
