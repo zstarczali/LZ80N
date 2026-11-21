@@ -175,6 +175,18 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
         ("rt_long.asm".into(), runtime::long().into_bytes()),
         ("rt_banked.asm".into(), runtime::BANKED.as_bytes().to_vec()),
         ("lib_file.lz80n".into(), prelude::FILE.as_bytes().to_vec()),
+        ("lib_layer2.lz80n".into(), prelude::LAYER2.as_bytes().to_vec()),
+        ("lib_palette.lz80n".into(), prelude::PALETTE.as_bytes().to_vec()),
+        ("lib_copper.lz80n".into(), prelude::COPPER.as_bytes().to_vec()),
+        ("lib_sprites.lz80n".into(), prelude::SPRITES.as_bytes().to_vec()),
+        ("lib_sound.lz80n".into(), prelude::SOUND.as_bytes().to_vec()),
+        ("lib_consts.lz80n".into(), {
+            let mut c = String::from("-- the built-in constants (compiler/src/codegen.rs)\n");
+            for (n, v) in codegen::builtin_consts() {
+                c.push_str(&format!("const {n} = {v}\n"));
+            }
+            c.into_bytes()
+        }),
         ("expand.on".into(), b"1".to_vec()),
     ]
 }

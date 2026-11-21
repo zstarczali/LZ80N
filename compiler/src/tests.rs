@@ -4289,6 +4289,11 @@ impl SelfHost {
 
 /// Run an assembled program in the emulator: what it prints.
 fn run_asm(asm: &str) -> String {
+    run_asm_cpu(asm).0
+}
+
+/// Run an assembled program in the emulator: what it prints, and the machine.
+fn run_asm_cpu(asm: &str) -> (String, Cpu) {
     let out = crate::asm::assemble(asm, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
     let syms = out.symbols16();
     let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
@@ -4296,9 +4301,9 @@ fn run_asm(asm: &str) -> String {
     let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
     let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
     let mut s = String::new();
-    for _ in 0..100_000_000u64 {
+    for _ in 0..200_000_000u64 {
         if cpu.pc == end {
-            return s;
+            return (s, cpu);
         }
         if (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
             s.push(cpu.a as char);
@@ -4715,3 +4720,75 @@ fn selfhost_export_and_chain() {
     let want = run("sh_chain", prog).unwrap();
     assert_eq!(run_asm(&asm), want);
 }
+
+/// Layer 2 graphics, palettes and hardware registers through the
+/// self-hosted compiler: the same pictures as with lz80nc.
+#[test]
+fn selfhost_codegen_layer2() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+layer2_visible(true)
+layer2_clear(rgb(0, 0, 1))
+for i = 0, 255 do plot(i, i % 192, byte(i)) end
+hline(10, 100, 200, rgb(7, 7, 0))
+vline(5, 0, 192, 0x1C)
+line(0, 0, 255, 191, 0xE0)
+line(255, 0, 0, 191, 0x03)
+rect(20, 20, 60, 40, 0xFF)
+fill_rect(100, 120, 50, 30, 0x92)
+circle(128, 96, 50, 0x1F)
+fill_circle(60, 150, 20, 0xE3)
+ellipse(180, 60, 40, 20, 0x6D)
+fill_ellipse(200, 150, 30, 15, 0x49)
+triangle(10, 180, 60, 130, 110, 185, 0xFC)
+fill_triangle(150, 10, 240, 40, 170, 90, 0x1C)
+print(point(10, 100), point(0, 0), point(128, 46), rgb(7, 7, 3), TRANSPARENT)
+print(layer2_width(), layer2_height())
+"#,
+        r#"
+layer2_mode(L2_320)
+layer2_clear(0)
+for y = 0, 255, 17 do hline(0, byte(y), 320, byte(y)) end
+for x = 0, 319, 13 do plot(x, 128, 0xFF) end
+circle(160, 128, 100, 0xE0)
+print(layer2_width(), layer2_height(), point(300, 128))
+"#,
+        r#"
+palette(PAL_LAYER2, 5, rgb(1, 2, 3))
+palette9(PAL_TEXT, 3, rgb9(7, 0, 7))
+nextreg[0x4A] = 0x1C
+byte r = 0x4A
+print(nextreg[r], nextreg[0x4A] + 1)
+border(3)
+copper_begin()
+copper_wait(96)
+copper_move(0x4A, 0xE0)
+copper_start()
+port[0x123B] = 2
+print(abs(-5), abs(7), min(3, 9), max(3, 9), min(-2, 5), max(word(70000 - 4465), 7))
+print(frames() < 1000, kempston() & 0, key(KEY_A), random(1))
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_l2_{i}"), src, |_| {}).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let (got, scpu) = run_asm_cpu(&asm);
+        assert_eq!(got, want, "program {i}: output\n{src}");
+        // the Layer 2 buffers (banks 8..17: pages 16..35)
+        for page in 16u8..36 {
+            let a = rcpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            let b = scpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            if let Some(k) = (0..8192).find(|&k| a[k] != b[k]) {
+                panic!("program {i}: Layer 2 page {page} differs at {k}: lz80nc {:02X}, self-hosted {:02X}", a[k], b[k]);
+            }
+        }
+        assert_eq!(rcpu.palettes, scpu.palettes, "program {i}: palettes");
+        assert_eq!(rcpu.nextreg[0x4A], scpu.nextreg[0x4A], "program {i}: NextReg $4A");
+        assert_eq!(rcpu.copper, scpu.copper, "program {i}: copper list");
+        assert_eq!(rcpu.border, scpu.border, "program {i}: border");
+    }
+}
+
+
+

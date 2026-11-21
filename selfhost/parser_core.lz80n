@@ -1012,7 +1012,7 @@ end
 
 -- ---------------------------------------------------------------- loading
 
--- an identifier just read at the end of the pool: point it at an equal
+-- an identifier just read at the end of the pool: refer it to an equal
 -- one read before, or remember it
 function intern(word t, word h)
     word n = tlen[t]

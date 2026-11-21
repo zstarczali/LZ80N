@@ -236,7 +236,7 @@ const INTRINSICS: &[&str] = &[
 
 /// Built-in constants. Keys are encoded as `row * 8 + bit` of the
 /// Spectrum keyboard matrix (row = address line A8..A15 of port $xxFE).
-fn builtin_consts() -> Vec<(String, i64)> {
+pub(crate) fn builtin_consts() -> Vec<(String, i64)> {
     let rows = [
         ["CAPS", "Z", "X", "C", "V"],
         ["A", "S", "D", "F", "G"],

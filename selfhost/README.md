@@ -80,14 +80,26 @@ arrays), `far` arrays, every integer operator with the width / signedness
 rules of the spec, `..` and string comparisons, casts, `if while for break
 return`, functions, recursion (a call that can come back to the caller saves
 the caller's frame `fr_NAME..fr_NAME_end` on the stack), `print write len asc
-chr str addr memory[] asm`, `include`, the `file_*` module, and code banking
-(functions move into 8K pages at $4000 when the resident area would
-overflow; sizes are estimated per emitted instruction).
+chr str addr memory[] port[] nextreg[] asm`, the Layer 2 built-ins (`plot
+point hline layer2_clear layer2_flip layer2_mode layer2_width
+layer2_height`), `abs min max` (folded when constant), `vsync pause cls at
+ink border key kempston any_key wait_key frames random seed`, the built-in
+constants (`KEY_* JOY_* BLACK.. MHZ_* NOT_FOUND`, from `lib_consts.lz80n`),
+`include`, the standard modules `file`, `Layer 2`, `palette` and `copper`
+(pulled in by the same words as in `compiler/src/prelude.rs`), and code
+banking (functions move into 8K pages at $4000 when the resident area would
+overflow; code sizes are estimated per emitted instruction, the data of
+locals, temporaries and literals is reserved from the whole tree first).
 
-Not yet: `fixed`, `fixed16`, structs and classes, multi-dimensional arrays,
-assets, interrupts, functions returning strings, the other built-in
-functions and standard modules (Layer 2, sprites, sound ...), outlining of
-very large main programs, and diagnostics of type errors (programs are
+The self-hosted sources must not contain the words that pull in a module
+(`plot`, `rect`, `sprite` ...), not even in comments, or the module is
+compiled into them; where they need such a word they write it with a `|`
+(`"p|lot"`) and drop the bar at run time.
+
+Not yet: `fixed`, `fixed16`, structs and classes (so the sprite module),
+multi-dimensional arrays, assets, interrupts, functions returning strings,
+string constants, the other built-in functions (`dma_*`, `sin`, `upper` ...)
+and the sound module, outlining of very large main programs, and diagnostics of type errors (programs are
 expected to be correct: check them with lz80nc first).
 
 ## Tests
@@ -95,9 +107,12 @@ expected to be correct: check them with lz80nc first).
 * `selfhost_codegen_runs_like_rust`, `selfhost_codegen_strings_long_far_files`:
   programs compiled both ways must print the same in the emulator (includes,
   files on the virtual SD card and a banked program among them);
+* `selfhost_codegen_layer2`: drawings (all the shapes of the Layer 2 module,
+  the 320x256 mode), palettes, NextRegs, ports, the copper and the border must
+  be the same as with lz80nc, page by page;
 * `SELFHOST=1 cargo test --release`: every `expect(...)` program of the test
   suite is also compiled by the self-hosted compiler when it supports it
-  (20 of 62 now);
+  (29 of 62 now); of the examples, hello, hires, move, tables and text;
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
   self-hosted compiler compiles the lexer, the parser and the assembler; they
   give byte-identical results to their lz80nc-compiled versions;
