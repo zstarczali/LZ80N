@@ -82,16 +82,20 @@ fn run_opts(name: &str, src: &str, bank_all: bool, setup: impl FnOnce(&mut Cpu))
     let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
     let newline = syms["rt_newline"];
     let end = syms["__main_end"];
+    // an interrupt returning to rt_putc / rt_newline is not a new call
+    let (isr, mut prev) = (syms.get("__isr").copied().unwrap_or(0xFFFF), 0u16);
     let mut out = String::new();
     for _ in 0..50_000_000u64 {
         if cpu.pc == end {
             return Some((out, cpu));
         }
-        if (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+        let from_isr = prev >= isr && prev < isr.saturating_add(512);
+        if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
             out.push(cpu.a as char);
-        } else if cpu.pc == newline {
+        } else if !from_isr && cpu.pc == newline {
             out.push('\n');
         }
+        prev = cpu.pc;
         if let Err(e) = cpu.tick() {
             panic!("emulator: {e}\noutput so far:\n{out}");
         }
@@ -4254,6 +4258,7 @@ fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
 struct SelfHost {
     lex: (Vec<u8>, HashMap<String, u16>),
     cg: (Vec<u8>, HashMap<String, u16>),
+    assets: (Vec<u8>, HashMap<String, u16>),
 }
 
 impl SelfHost {
@@ -4261,7 +4266,37 @@ impl SelfHost {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
         let cg_src = std::fs::read_to_string(root.join("selfhost/codegen.lz80n")).unwrap();
-        SelfHost { lex: build("sh_lex", &lexer_src).unwrap(), cg: build_in(&root.join("selfhost"), &cg_src) }
+        let as_src = std::fs::read_to_string(root.join("selfhost/assets.lz80n")).unwrap();
+        SelfHost {
+            lex: build("sh_lex", &lexer_src).unwrap(),
+            cg: build_in(&root.join("selfhost"), &cg_src),
+            assets: build_in(&root.join("selfhost"), &as_src),
+        }
+    }
+
+    /// Lexer, code generator and (if it lists assets) the asset stage on
+    /// an SD card with these files: the assembly and the SD card after them.
+    fn compile_sd(&self, sources: &[(&str, &[u8])]) -> Result<(String, std::collections::HashMap<String, Vec<u8>>), String> {
+        let mut files = std::collections::HashMap::new();
+        for (n, d) in sources {
+            files.insert(n.to_string(), d.to_vec());
+        }
+        for (n, d) in selfhost_runtime_files() {
+            files.insert(n, d);
+        }
+        let files = run_stage(&self.lex.0, &self.lex.1, files);
+        let mut files = run_stage(&self.cg.0, &self.cg.1, files);
+        if let Some(e) = files.get("codegen.err") {
+            return Err(String::from_utf8_lossy(e).trim_end().to_string());
+        }
+        if files.contains_key("assets.lst") {
+            files = run_stage(&self.assets.0, &self.assets.1, files);
+            if let Some(e) = files.get("assets.err") {
+                return Err(String::from_utf8_lossy(e).trim_end().to_string());
+            }
+        }
+        let asm = String::from_utf8_lossy(files.get("out.asm").expect("no out.asm")).to_string();
+        Ok((asm, files))
     }
 
     /// The assembly the self-hosted compiler makes for `src`, or its error.
@@ -4300,16 +4335,19 @@ fn run_asm_cpu(asm: &str) -> (String, Cpu) {
     cpu.esx = Some(crate::emu::EsxFs::default());
     let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
     let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+    let (isr, mut prev) = (syms.get("__isr").copied().unwrap_or(0xFFFF), 0u16);
     let mut s = String::new();
     for _ in 0..200_000_000u64 {
         if cpu.pc == end {
             return (s, cpu);
         }
-        if (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+        let from_isr = prev >= isr && prev < isr.saturating_add(512);
+        if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
             s.push(cpu.a as char);
-        } else if cpu.pc == newline {
+        } else if !from_isr && cpu.pc == newline {
             s.push('\n');
         }
+        prev = cpu.pc;
         cpu.tick().unwrap_or_else(|e| panic!("emulator: {e}\noutput so far:\n{s}"));
     }
     panic!("program did not terminate; output so far:\n{s}");
@@ -4645,7 +4683,7 @@ fn selfhost_bootstrap() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let rd = |p: &str| std::fs::read(root.join(p)).unwrap();
     let mut sh = SelfHost::new();
-    let sources: Vec<(&str, Vec<u8>)> = vec![("in.lz80n", rd("selfhost/codegen.lz80n")), ("parser_core.lz80n", rd("selfhost/parser_core.lz80n"))];
+    let sources: Vec<(&str, Vec<u8>)> = vec![("in.lz80n", rd("selfhost/codegen.lz80n")), ("parser_core.lz80n", rd("selfhost/parser_core.lz80n")), ("asset_info.lz80n", rd("selfhost/asset_info.lz80n"))];
     let as_refs = |v: &Vec<(&'static str, Vec<u8>)>| v.iter().map(|(n, d)| (*n, d.clone())).collect::<Vec<_>>();
     let srcs = as_refs(&sources);
     let refs: Vec<(&str, &[u8])> = srcs.iter().map(|(n, d)| (*n, d.as_slice())).collect();
@@ -4661,7 +4699,7 @@ fn selfhost_bootstrap() {
     ];
     for p in progs {
         let a2 = sh.compile(p).unwrap();
-        let sh1 = SelfHost { lex: sh.lex.clone(), cg: stage1.clone() };
+        let sh1 = SelfHost { lex: sh.lex.clone(), cg: stage1.clone(), assets: sh.assets.clone() };
         let a1 = sh1.compile(p).unwrap();
         assert!(a1 == a2, "stage 1 and stage 2 differ for:\n{p}");
     }
@@ -4681,44 +4719,96 @@ fn selfhost_export_and_chain() {
     let dir = std::env::temp_dir().join("lz80n_export_test");
     let _ = std::fs::remove_dir_all(&dir);
     let built = crate::export_selfhost(&dir).unwrap();
-    let mut fs = crate::emu::EsxFs::default();
+    let mut base = crate::emu::EsxFs::default();
     for e in std::fs::read_dir(&dir).unwrap() {
         let p = e.unwrap().path();
-        fs.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
+        base.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
     }
-    let prog = "function sq(word x) -> word\n    return x * x\nend\nstring s = \"sq\" .. sq(12)\nprint(s, 1000000 / 3)\n";
-    fs.files.insert("in.lz80n".into(), prog.as_bytes().to_vec());
-    let mut next = "lexer.nex".to_string();
-    let mut stages = vec![];
-    loop {
-        let (_, nex, syms) = built.iter().find(|b| b.0 == next).unwrap_or_else(|| panic!("no {next}"));
-        stages.push(next.clone());
-        let mut cpu = load_nex(nex).unwrap();
-        fs.exec.clear();
-        cpu.esx = Some(fs);
-        let end = syms["__main_end"] as u16;
-        let mut n = 0u64;
-        while cpu.pc != end {
-            cpu.tick().unwrap();
-            n += 1;
-            assert!(n < 4_000_000_000, "{next} did not finish");
-            if !cpu.esx.as_ref().unwrap().exec.is_empty() {
-                break;
+    // each stage starts the next one (M_EXECCMD "nexload ...")
+    let chain = |mut fs: crate::emu::EsxFs| {
+        let mut next = "lexer.nex".to_string();
+        let mut stages = vec![];
+        loop {
+            let (_, nex, syms) = built.iter().find(|b| b.0 == next).unwrap_or_else(|| panic!("no {next}"));
+            stages.push(next.clone());
+            let mut cpu = load_nex(nex).unwrap();
+            fs.exec.clear();
+            cpu.esx = Some(fs);
+            let end = syms["__main_end"] as u16;
+            let mut n = 0u64;
+            while cpu.pc != end {
+                cpu.tick().unwrap();
+                n += 1;
+                assert!(n < 4_000_000_000, "{next} did not finish");
+                if !cpu.esx.as_ref().unwrap().exec.is_empty() {
+                    break;
+                }
+            }
+            fs = cpu.esx.unwrap();
+            match fs.exec.first().and_then(|c| c.strip_prefix("nexload ")) {
+                Some(n) => next = n.to_string(),
+                None => break,
             }
         }
-        fs = cpu.esx.unwrap();
-        match fs.exec.first().and_then(|c| c.strip_prefix("nexload ")) {
-            Some(n) => next = n.to_string(),
-            None => break,
+        for err in ["codegen.err", "assets.err", "asm.err"] {
+            assert!(fs.files.get(err).is_none(), "{}", String::from_utf8_lossy(&fs.files[err]));
         }
-    }
+        (stages, fs)
+    };
+    let prog = "function sq(word x) -> word\n    return x * x\nend\nstring s = \"sq\" .. sq(12)\nprint(s, 1000000 / 3)\n";
+    let mut fs = base.clone();
+    fs.files.insert("in.lz80n".into(), prog.as_bytes().to_vec());
+    let (stages, fs) = chain(fs);
     assert_eq!(stages, ["lexer.nex", "codegen.nex", "asm.nex"]);
-    assert!(fs.files.get("asm.err").is_none(), "{}", String::from_utf8_lossy(&fs.files["asm.err"]));
     let asm = String::from_utf8(fs.files["out.asm"].clone()).unwrap();
     let rust = crate::asm::assemble(&asm, &dir).unwrap();
     assert!(fs.files["out.nex"] == rust.nex.as_ref().unwrap().1, "out.nex differs from the Rust assembler's");
     let want = run("sh_chain", prog).unwrap();
     assert_eq!(run_asm(&asm), want);
+
+    // with assets: lexer -> codegen -> assets -> asm; out.nex run as it is
+    let ex = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/assets");
+    let prog = "asset sheet = \"assets/sprites.png\"\nasset pic = image(\"assets/badge.png\")\nasset zap = \"assets/zap.wav\"\nsprite_load(0, sheet)\nsprite[0].show(1)\nlayer2_visible(true)\ndraw_image(pic, 10, 20)\nsample_play(zap)\nprint(sprite[0].pattern, image_width(pic), sample_playing())\n";
+    let mut fs = base.clone();
+    fs.files.insert("in.lz80n".into(), prog.as_bytes().to_vec());
+    for f in ["sprites.png", "badge.png", "zap.wav"] {
+        fs.files.insert(format!("assets/{f}"), std::fs::read(ex.join(f)).unwrap());
+    }
+    let (stages, fs) = chain(fs);
+    assert_eq!(stages, ["lexer.nex", "codegen.nex", "assets.nex", "asm.nex"]);
+    let (want, rcpu) = run_with("sh_chain_assets", prog, |_| {}).unwrap();
+    let mut cpu = load_nex(&fs.files["out.nex"]).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::default());
+    // the symbols of the program, from the Rust assembler on the same files
+    let adir = std::env::temp_dir().join("lz80n_export_assets");
+    let _ = std::fs::remove_dir_all(&adir);
+    for (n, d) in &fs.files {
+        let p = adir.join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, d).unwrap();
+    }
+    let asm = String::from_utf8(fs.files["out.asm"].clone()).unwrap();
+    let syms = crate::asm::assemble(&asm, &adir).unwrap().symbols16();
+    let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+    let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+    // (an interrupt returning to rt_putc / rt_newline is not a new call)
+    let (isr, mut prev) = (syms["__isr"], 0u16);
+    let mut got = String::new();
+    while cpu.pc != end {
+        let from_isr = prev >= isr && prev < isr + 512;
+        if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+            got.push(cpu.a as char);
+        } else if !from_isr && cpu.pc == newline {
+            got.push('\n');
+        }
+        prev = cpu.pc;
+        cpu.tick().unwrap();
+    }
+    assert_eq!(got, want);
+    assert_eq!(rcpu.patterns, cpu.patterns, "patterns");
+    for page in 16u8..28 {
+        assert_eq!(rcpu.pages.get(&page), cpu.pages.get(&page), "Layer 2 page {page}");
+    }
 }
 
 /// Layer 2 graphics, palettes and hardware registers through the
@@ -4945,15 +5035,340 @@ fn selfhost_codegen_examples() {
         .filter(|p| p.extension().is_some_and(|x| x == "lz80n"))
         .collect();
     names.sort();
+    // the assets and included files of the examples on the SD card
+    let mut extra: Vec<(String, Vec<u8>)> = vec![];
+    for sub in ["assets", "lib"] {
+        for e in std::fs::read_dir(root.join(sub)).unwrap() {
+            let p = e.unwrap().path();
+            if p.metadata().unwrap().len() < 200_000 {
+                extra.push((format!("{sub}/{}", p.file_name().unwrap().to_string_lossy()), std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let dir = std::env::temp_dir().join("lz80n_sh_examples");
     for p in names {
         let src = std::fs::read_to_string(&p).unwrap();
         let name = p.file_name().unwrap().to_string_lossy().to_string();
-        match sh.compile(&src) {
-            Ok(asm) => match crate::asm::assemble(&asm, std::path::Path::new(".")) {
-                Ok(_) => eprintln!("EXAMPLE ok {name}"),
-                Err(e) => eprintln!("EXAMPLE asm-error {name}: {}", e[0]),
-            },
+        let mut srcs: Vec<(&str, &[u8])> = vec![("in.lz80n", src.as_bytes())];
+        for (n, d) in &extra {
+            srcs.push((n, d));
+        }
+        match sh.compile_sd(&srcs) {
+            Ok((asm, files)) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                for (n, d) in &files {
+                    let p = dir.join(n);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(p, d).unwrap();
+                }
+                match crate::asm::assemble(&asm, &dir) {
+                    Ok(_) => eprintln!("EXAMPLE ok {name}"),
+                    Err(e) => eprintln!("EXAMPLE asm-error {name}: {}", e[0]),
+                }
+            }
             Err(e) => eprintln!("EXAMPLE skip {name}: {e}"),
         }
     }
 }
+
+/// A PNG with uncompressed (stored) deflate blocks, made by hand.
+fn stored_png(w: u32, h: u32, ctype: u8, depth: u8, raw: &[u8]) -> Vec<u8> {
+    fn crc32(d: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for &b in d {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, t: &[u8], body: &[u8]) {
+        out.extend((body.len() as u32).to_be_bytes());
+        let mut c = t.to_vec();
+        c.extend(body);
+        out.extend(&c);
+        out.extend(crc32(&c).to_be_bytes());
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(100).collect();
+    for (i, b) in blocks.iter().enumerate() {
+        z.push((i + 1 == blocks.len()) as u8);
+        z.extend((b.len() as u16).to_le_bytes());
+        z.extend((!(b.len() as u16)).to_le_bytes());
+        z.extend(*b);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in raw {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend((b << 16 | a).to_be_bytes());
+    let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend(h.to_be_bytes());
+    ihdr.extend([depth, ctype, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    // the image data in two IDAT chunks
+    let half = z.len() / 2;
+    chunk(&mut out, b"IDAT", &z[..half]);
+    chunk(&mut out, b"IDAT", &z[half..]);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// PNG files of many kinds, made with the png crate.
+fn test_pngs() -> Vec<(String, Vec<u8>)> {
+    let mut v = vec![];
+    let mk = |w: u32, h: u32, color: png::ColorType, depth: png::BitDepth, data: &[u8], pal: Option<(&[u8], &[u8])>, trns: Option<&[u8]>, comp: png::Compression, filt: png::FilterType| {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(color);
+            enc.set_depth(depth);
+            enc.set_compression(comp);
+            enc.set_filter(filt);
+            if let Some((p, t)) = pal {
+                enc.set_palette(p.to_vec());
+                if !t.is_empty() {
+                    enc.set_trns(t.to_vec());
+                }
+            }
+            if let Some(t) = trns {
+                enc.set_trns(t.to_vec());
+            }
+            let mut wr = enc.write_header().unwrap();
+            wr.write_image_data(data).unwrap();
+        }
+        out
+    };
+    let mut seed = 12345u32;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        (seed >> 16) as u8
+    };
+    use png::{BitDepth as D, ColorType as C, Compression as Z, FilterType as F};
+    let (w, h) = (32u32, 16u32);
+    let rgba: Vec<u8> = (0..w * h * 4).map(|i| if i % 4 == 3 { if i % 7 == 0 { 0 } else { 255 } } else { rnd() }).collect();
+    let rgb: Vec<u8> = (0..w * h * 3).map(|_| rnd()).collect();
+    let rgb16: Vec<u8> = (0..w * h * 6).map(|_| rnd()).collect();
+    let rgba16: Vec<u8> = (0..w * h * 8).map(|_| rnd()).collect();
+    let ga: Vec<u8> = (0..w * h * 2).map(|_| rnd()).collect();
+    let gray: Vec<u8> = (0..w * h).map(|i| (i * 3) as u8).collect();
+    let smooth: Vec<u8> = (0..w * h * 3).map(|i| (i / 40) as u8).collect();
+    for (k, (filt, comp)) in [(F::NoFilter, Z::Fast), (F::Sub, Z::Best), (F::Up, Z::Default), (F::Avg, Z::Best), (F::Paeth, Z::Fast)].into_iter().enumerate() {
+        v.push((format!("rgba{k}.png"), mk(w, h, C::Rgba, D::Eight, &rgba, None, None, comp, filt)));
+        v.push((format!("smooth{k}.png"), mk(w, h, C::Rgb, D::Eight, &smooth, None, None, comp, filt)));
+    }
+    v.push(("rgb.png".into(), mk(w, h, C::Rgb, D::Eight, &rgb, None, Some(&[0, rgb[0], 0, rgb[1], 0, rgb[2]]), Z::Default, F::Paeth)));
+    v.push(("rgb16.png".into(), mk(w, h, C::Rgb, D::Sixteen, &rgb16, None, None, Z::Default, F::Avg)));
+    v.push(("rgba16.png".into(), mk(w, h, C::Rgba, D::Sixteen, &rgba16, None, None, Z::Best, F::Up)));
+    v.push(("ga.png".into(), mk(w, h, C::GrayscaleAlpha, D::Eight, &ga, None, None, Z::Default, F::Sub)));
+    v.push(("gray.png".into(), mk(w, h, C::Grayscale, D::Eight, &gray, None, Some(&[0, 9]), Z::Default, F::Paeth)));
+    for (d, bits) in [(D::One, 1u32), (D::Two, 2), (D::Four, 4)] {
+        let n = (w * bits).div_ceil(8) * h;
+        let data: Vec<u8> = (0..n).map(|_| rnd()).collect();
+        v.push((format!("gray{bits}.png"), mk(w, h, C::Grayscale, d, &data, None, None, Z::Default, F::Up)));
+        let pal: Vec<u8> = (0..(3 << bits)).map(|_| rnd()).collect();
+        let trns: Vec<u8> = (0..(1u32 << bits).min(3)).map(|i| (i * 100) as u8).collect();
+        v.push((format!("pal{bits}.png"), mk(w, h, C::Indexed, d, &data, Some((&pal, &trns)), None, Z::Fast, F::NoFilter)));
+    }
+    let idx: Vec<u8> = (0..w * h).map(|_| rnd()).collect();
+    let pal: Vec<u8> = (0..768).map(|_| rnd()).collect();
+    v.push(("pal8.png".into(), mk(w, h, C::Indexed, D::Eight, &idx, Some((&pal, &[])), None, Z::Best, F::NoFilter)));
+    // a stored (uncompressed) deflate stream
+    let mut raw = vec![];
+    for y in 0..h {
+        raw.push((y % 5) as u8);
+        raw.extend(&rgb[(y * w * 3) as usize..((y + 1) * w * 3) as usize]);
+    }
+    v.push(("stored.png".into(), stored_png(w, h, 2, 8, &raw)));
+    v
+}
+
+/// The asset stage (selfhost/assets.lz80n) converts PNG and WAV files like
+/// compiler/src/assets.rs: sprite patterns, pictures and samples.
+#[test]
+fn selfhost_assets_match_rust() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = std::fs::read_to_string(root.join("selfhost/assets.lz80n")).unwrap();
+    let stage = build_in(&root.join("selfhost"), &src);
+    let mut files = std::collections::HashMap::new();
+    let mut list = String::new();
+    let mut want: Vec<(String, Vec<u8>)> = vec![];
+    let mut n = 0;
+    let dir = std::env::temp_dir().join("lz80n_assets_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut pngs = test_pngs();
+    for f in ["sprites.png", "ships.png", "badge.png", "landscape.png"] {
+        pngs.push((format!("assets/{f}"), std::fs::read(root.join("examples/assets").join(f)).unwrap()));
+    }
+    for (name, data) in &pngs {
+        let p = dir.join(name.replace('/', "_"));
+        std::fs::write(&p, data).unwrap();
+        // patterns, when it is a sheet of 16x16 cells
+        if let Ok(a) = crate::assets::load(&p) {
+            n += 1;
+            list.push_str(&format!("p t{n} {name}\n"));
+            want.push((format!("a_t{n}.bin"), a.bytes));
+        }
+        let img = crate::assets::load_image(&p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        n += 1;
+        list.push_str(&format!("i t{n} {name}\n"));
+        want.push((format!("a_t{n}.bin"), img.pages.concat()));
+        want.push((format!("a_t{n}.msk"), vec![img.masked as u8]));
+        files.insert(name.clone(), data.clone());
+    }
+    let mut wavs: Vec<(String, Vec<u8>)> = vec![];
+    for f in ["boom.wav", "zap.wav", "hum.wav"] {
+        wavs.push((format!("assets/{f}"), std::fs::read(root.join("examples/assets").join(f)).unwrap()));
+    }
+    // other formats and rates: 16-bit stereo, 44.1 kHz (resampled), 3 kHz
+    let wav = |rate: u32, chans: u16, bits: u16, n: usize| {
+        let data: Vec<u8> = (0..n * chans as usize * bits as usize / 8).map(|i| (i * 37 % 251) as u8).collect();
+        let mut w = Vec::new();
+        w.extend(b"RIFF");
+        w.extend(&(36 + data.len() as u32).to_le_bytes());
+        w.extend(b"WAVEfmt ");
+        w.extend(&16u32.to_le_bytes());
+        w.extend(&1u16.to_le_bytes());
+        w.extend(&chans.to_le_bytes());
+        w.extend(&rate.to_le_bytes());
+        w.extend(&(rate * chans as u32 * bits as u32 / 8).to_le_bytes());
+        w.extend(&(chans * bits / 8).to_le_bytes());
+        w.extend(&bits.to_le_bytes());
+        w.extend(b"LIST\x03\x00\x00\x00abc\x00");
+        w.extend(b"data");
+        w.extend(&(data.len() as u32).to_le_bytes());
+        w.extend(data);
+        w
+    };
+    wavs.push(("s16.wav".into(), wav(22050, 2, 16, 3000)));
+    wavs.push(("s44.wav".into(), wav(44100, 1, 16, 5000)));
+    wavs.push(("s3.wav".into(), wav(3000, 2, 8, 700)));
+    for (name, data) in &wavs {
+        let smp = crate::assets::wav_to_sample(data).unwrap();
+        n += 1;
+        list.push_str(&format!("w t{n} {name}\n"));
+        want.push((format!("a_t{n}.bin"), smp.bytes));
+        files.insert(name.clone(), data.clone());
+    }
+    files.insert("assets.lst".into(), list.clone().into_bytes());
+    let out = run_stage(&stage.0, &stage.1, files);
+    if let Some(e) = out.get("assets.err") {
+        panic!("asset stage: {}\n{list}", String::from_utf8_lossy(e));
+    }
+    for (f, bytes) in want {
+        let got = out.get(&f).unwrap_or_else(|| panic!("no {f}\n{list}"));
+        if let Some(k) = (0..bytes.len().max(got.len())).find(|&k| bytes.get(k) != got.get(k)) {
+            panic!("{f}: differs at {k} (lz80nc {:?}, self-hosted {:?}), lengths {} / {}\n{list}", bytes.get(k), got.get(k), bytes.len(), got.len());
+        }
+    }
+}
+
+/// Assets compiled by the self-hosted compiler (PNG patterns, .spr files,
+/// pictures, samples): the same output, patterns, sprites and Layer 2
+/// pages as with lz80nc.
+#[test]
+fn selfhost_codegen_assets() {
+    let sh = SelfHost::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let ex = root.join("examples");
+    let spr: Vec<u8> = (0..512).map(|i| (i * 7) as u8).collect();
+    std::fs::write(ex.join("assets/test_tmp.spr"), &spr).unwrap();
+    let programs: &[&str] = &[
+        r#"
+asset sheet = "assets/sprites.png"
+asset ships = "assets/ships.png"
+asset more = "assets/test_tmp.spr"
+sprite_load(0, sheet)
+sprite_load(2, ships)
+sprite_load(60, more)
+sprites_visible(true, false)
+for i = 0, 3 do
+    sprite[i].position(word(i) * 40 + 32, 80)
+    sprite[i].show(i)
+end
+print(sprite[1].pattern, sprite[3].x)
+"#,
+        r#"
+asset landscape = image("assets/landscape.png")
+asset badge = image("assets/badge.png")
+const W = image_width(badge)
+layer2_visible(true)
+layer2_clear(0)
+draw_image(landscape, 0, 40)
+draw_image(badge, 100, 20)
+draw_image(badge, -10, 180)
+print(W, image_height(badge), image_width(landscape), image_height(landscape))
+far byte big[20000]
+big[19999] = 5
+print(big[19999] + 1)
+"#,
+        r#"
+asset boom = "assets/boom.wav"
+asset hum = "assets/hum.wav"
+print(sample_playing())
+sample_play(boom)
+print(sample_playing())
+sample_stop()
+print(sample_playing())
+sample_loop(hum)
+vsync()
+print(sample_playing())
+sample_stop()
+"#,
+    ];
+    let mut sd: Vec<(String, Vec<u8>)> = vec![];
+    for f in ["sprites.png", "ships.png", "test_tmp.spr", "landscape.png", "badge.png", "boom.wav", "hum.wav"] {
+        sd.push((format!("assets/{f}"), std::fs::read(ex.join("assets").join(f)).unwrap()));
+    }
+    let dir = std::env::temp_dir().join("lz80n_sh_assets");
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_as_{i}"), src, |_| {}).unwrap();
+        let mut srcs: Vec<(&str, &[u8])> = vec![("in.lz80n", src.as_bytes())];
+        for (n, d) in &sd {
+            srcs.push((n, d));
+        }
+        let (asm, files) = sh.compile_sd(&srcs).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (n, d) in &files {
+            let p = dir.join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, d).unwrap();
+        }
+        let out = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("program {i}: assembler: {}", e[0]));
+        let syms = out.symbols16();
+        let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+        cpu.esx = Some(crate::emu::EsxFs::default());
+        let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+        let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+        let (isr, mut prev) = (syms["__isr"], 0u16);
+        let mut got = String::new();
+        let mut n = 0u64;
+        while cpu.pc != end {
+            let from_isr = prev >= isr && prev < isr + 512;
+            if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+                got.push(cpu.a as char);
+            } else if !from_isr && cpu.pc == newline {
+                got.push('\n');
+            }
+            prev = cpu.pc;
+            cpu.tick().unwrap();
+            n += 1;
+            assert!(n < 500_000_000, "program {i} did not finish");
+        }
+        assert_eq!(got, want, "program {i}: output\n{src}");
+        assert_eq!(rcpu.patterns, cpu.patterns, "program {i}: patterns");
+        assert_eq!(rcpu.sprite_attr, cpu.sprite_attr, "program {i}: sprites");
+        for page in 16u8..28 {
+            let a = rcpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            let b = cpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            if let Some(k) = (0..8192).find(|&k| a[k] != b[k]) {
+                panic!("program {i}: Layer 2 page {page} differs at {k}: lz80nc {:02X}, self-hosted {:02X}", a[k], b[k]);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(ex.join("assets/test_tmp.spr"));
+}
+

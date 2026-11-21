@@ -39,6 +39,7 @@
 -- fr_NAME_end - to the stack before the call and back after it.
 
 include "parser_core.lz80n"
+include "asset_info.lz80n"
 
 -- ---------------------------------------------------------------- output
 
@@ -267,7 +268,7 @@ end
 -- bytes of storage
 function tstore(byte t) -> word
     if t == TY_STR then return 65 end
-    if is_struct(t) then return st_size[t - TY_STRUCT] end
+    if is_struct(t) then return tabw[W_ST_SIZE + (t - TY_STRUCT)] end
     return tsize(t)
 end
 
@@ -293,22 +294,39 @@ end
 
 -- ---------------------------------------------------------------- structs
 
+-- small tables, packed into two far arrays (each far array takes whole 8K pages)
+const W_ST_NAME = 0
+const W_ST_SIZE = 200
+const W_ST_FF = 400
+const W_ST_NF = 600
+const W_ST_INIT = 800
+const W_FD_NAME = 1000
+const W_FD_LEN = 3000
+const W_FD_OFF = 5000
+const W_FD_DEFL = 7000
+const W_FD_DEFH = 9000
+const W_AS_NAME = 11000
+const W_AS_PATH = 11064
+const W_AS_W = 11128
+const W_AS_H = 11192
+const W_AS_LENL = 11256
+const W_AS_LENH = 11320
+const W_AS_N = 11384
+const B_ST_PARENT = 0
+const B_FD_TY = 200
+const B_FD_HASDEF = 2200
+const B_AS_KIND = 4200
+const B_AS_PAGE = 4264
+const B_AS_NP = 4328
+const B_AS_RPP = 4392
+const B_AS_PRESC = 4456
+const B_PASSET = 4520
+far word tabw[11448]
+far byte tabb[4776]
+
 const MAXSTRUCT = 200
-far word st_name[200]       -- name token
-far word st_size[200]
-far byte st_parent[200]     -- 255 = none
-far word st_ff[200]         -- first field
-far word st_nf[200]         -- number of fields (the parent's first)
-far word st_init[200]       -- the `init` method (its own or inherited), 0 = none
 byte nstructs = 0
-const MAXFIELD = 3000
-far word fd_name[3000]
-far byte fd_ty[3000]
-far word fd_len[3000]       -- array fields: element count
-far word fd_off[3000]
-far byte fd_hasdef[3000]
-far word fd_defl[3000]      -- the default value
-far word fd_defh[3000]
+const MAXFIELD = 2000
 word nfields = 0
 
 function is_struct(byte t) -> bool
@@ -320,7 +338,7 @@ function struct_by_name(word t) -> byte
     if tk[t] ~= T_IDENT then return 255 end
     byte k = 0
     while k < nstructs do
-        if toff[st_name[k]] == toff[t] then return k end
+        if toff[tabw[W_ST_NAME + k]] == toff[t] then return k end
         k += 1
     end
     return 255
@@ -328,10 +346,10 @@ end
 
 -- the field `name` of struct k, 0 if there is none
 function field_find(byte k, word name) -> word
-    word f = st_ff[k]
+    word f = tabw[W_ST_FF + k]
     word n = 0
-    while n < st_nf[k] do
-        if toff[fd_name[f + n]] == toff[name] then return f + n end
+    while n < tabw[W_ST_NF + k] do
+        if toff[tabw[W_FD_NAME + (f + n)]] == toff[name] then return f + n end
         n += 1
     end
     return 0
@@ -339,12 +357,12 @@ end
 
 -- does struct k (or a struct inside it) have field defaults?
 function has_defaults(byte k) -> bool
-    word f = st_ff[k]
+    word f = tabw[W_ST_FF + k]
     word n = 0
-    while n < st_nf[k] do
+    while n < tabw[W_ST_NF + k] do
         word x = f + n
-        if fd_hasdef[x] ~= 0 then return true end
-        if is_struct(fd_ty[x]) and has_defaults(fd_ty[x] - TY_STRUCT) then return true end
+        if tabb[B_FD_HASDEF + x] ~= 0 then return true end
+        if is_struct(tabb[B_FD_TY + x]) and has_defaults(tabb[B_FD_TY + x] - TY_STRUCT) then return true end
         n += 1
     end
     return false
@@ -381,6 +399,7 @@ const SK_PARAM = 2
 const SK_LOCAL = 3
 const SK_CONST = 4
 const SK_FUNC = 5
+const SK_ASSET = 6          -- sid: the asset number
 
 const MAXSY = 8000
 far byte sk[8000]           -- kind
@@ -432,7 +451,7 @@ function method_find(byte k, word name) -> word
             if sk[s] == SK_FUNC and sstruct[s] == k + 1 and toff[sname[s]] == toff[name] then return s end
             s = snext[s]
         end
-        k = st_parent[k]
+        k = tabb[B_ST_PARENT + k]
     end
     return 0
 end
@@ -493,7 +512,7 @@ end
 -- the name part of function f's labels: `name`, or `Struct_name` for a method
 function o_fnname(word f)
     if sstruct[f] ~= 0 then
-        otok(st_name[sstruct[f] - 1])
+        otok(tabw[W_ST_NAME + (sstruct[f] - 1)])
         ob('_')
     end
     otok(sname[f])
@@ -624,6 +643,12 @@ function const_eval(word e) -> bool
     end
     if k == E_CALL then
         word a = n2[e]
+        if (text_is(n1[e], "image_width") or text_is(n1[e], "image_height")) and a ~= 0 and nx[a] == 0 then
+            byte im = asset_arg(a, AK_IMG)
+            if im == 255 then return false end
+            if text_is(n1[e], "image_width") then cv = tabw[W_AS_W + im] else cv = tabw[W_AS_H + im] end
+            return true
+        end
         bool is_abs = text_is(n1[e], "abs")
         bool is_min = text_is(n1[e], "min")
         if not is_abs and not is_min and not text_is(n1[e], "max") then return false end
@@ -690,7 +715,7 @@ function nat(word e) -> byte
     if k == E_NAME then
         if is_self(n1[e]) then return TY_STRUCT + sstruct[cur_fn] - 1 end
         word s = lookup(n1[e])
-        if s == 0 or sk[s] == SK_CONST then return TY_NONE end
+        if s == 0 or sk[s] == SK_CONST or sk[s] == SK_ASSET then return TY_NONE end
         return sty[s]
     end
     if k == E_INDEX then
@@ -724,7 +749,9 @@ function nat(word e) -> byte
         if (text_is(name, "abs") or text_is(name, "min") or text_is(name, "max")) and const_eval(e) then return TY_NONE end
         if text_is(name, "chr") or text_is(name, "str") then return TY_STR end
         if text_is(name, "len") or text_is(name, "asc") then return TY_BYTE end
-        if text_is(name, "addr") then return TY_WORD end
+        if text_is(name, "addr") or text_is(name, "image_width") or text_is(name, "image_height") then return TY_WORD end
+        if text_is(name, "sample_playing") then return TY_BOOL end
+        if text_is(name, "note_period") then return TY_WORD end
         word s = lookup(name)
         if s ~= 0 and sk[s] == SK_FUNC then return sty[s] end
         byte sk_ = struct_by_name(name)
@@ -890,6 +917,15 @@ function var_sym(word n, word t) -> word
         if fail_node(n) then msg("a function is not a value") end
         return 0
     end
+    if sk[s] == SK_ASSET then
+        if fail_node(n) then
+            msg("`")
+            msg_text(t)
+            msg("` is an asset (use it with `s")
+            msg("prite_load`)")
+        end
+        return 0
+    end
     return s
 end
 
@@ -988,7 +1024,7 @@ function place_type(word e) -> bool
             return true
         end
         word s = lookup(n1[e])
-        if s == 0 or sk[s] == SK_CONST or sk[s] == SK_FUNC then return false end
+        if s == 0 or sk[s] == SK_CONST or sk[s] == SK_FUNC or sk[s] == SK_ASSET then return false end
         pt_ty = sty[s]
         pt_len = slen[s]
         return true
@@ -1007,8 +1043,8 @@ function place_type(word e) -> bool
         if not place_type(n1[e]) or not is_struct(pt_ty) or pt_len ~= 0 then return false end
         word f = field_find(pt_ty - TY_STRUCT, n2[e])
         if f == 0 then return false end
-        pt_ty = fd_ty[f]
-        pt_len = fd_len[f]
+        pt_ty = tabb[B_FD_TY + f]
+        pt_len = tabw[W_FD_LEN + f]
         return true
     end
     if k == E_CALL or k == E_METHOD then
@@ -1123,14 +1159,14 @@ function gen_place(word e)
             end
             return
         end
-        if fd_off[f] ~= 0 then
+        if tabw[W_FD_OFF + f] ~= 0 then
             os("    ld de,")
-            odec(fd_off[f])
+            odec(tabw[W_FD_OFF + f])
             onl()
             oi("add hl,de")
         end
-        pl_ty = fd_ty[f]
-        pl_len = fd_len[f]
+        pl_ty = tabb[B_FD_TY + f]
+        pl_len = tabw[W_FD_LEN + f]
         return
     end
     if k == E_CALL or k == E_METHOD then
@@ -1717,6 +1753,33 @@ function builtin_expr(word e, byte w) -> bool
     word name = n1[e]
     word a = n2[e]
     byte rt = TY_NONE
+    if text_is(name, "image_width") or text_is(name, "image_height") then
+        if not want_args(e, 1) then return true end
+        if not const_eval(e) then
+            if fail_node(a) then msg("expected an image asset: `asset name = image(\"file.png\")`") end
+            return true
+        end
+        load_const(cv, 2, false)
+        if w == 4 then extend32(false) end
+        return true
+    end
+    if text_is(name, "note_period") then
+        if not want_args(e, 1) then return true end
+        uses_notes = true
+        gen(a, 1, false)
+        oi("ld a,l")
+        oi("call rt_note_period")
+        if w == 4 then extend32(false) end
+        return true
+    end
+    if text_is(name, "sample_playing") then
+        if not want_args(e, 0) then return true end
+        uses_samples = true
+        oi("ld a,(rt_smp_on)")
+        extend_a(TY_BYTE)
+        if w == 4 then extend32(false) end
+        return true
+    end
     if text_isx(name, "p|oint") then
         if not want_args(e, 2) then return true end
         gen(nx[a], 1, false)
@@ -1832,6 +1895,112 @@ end
 function builtin_stmt(word e) -> bool
     word name = n1[e]
     word a = n2[e]
+    if text_isx(name, "s|prite_load") then
+        if not want_args(e, 2) then return true end
+        byte sa = asset_arg(nx[a], AK_PAT)
+        if sa == 255 then
+            if fail_node(nx[a]) then msg("second argument must be a pattern asset (.png / .spr)") end
+            return true
+        end
+        if const_eval(a) then
+            if cv < 0 or cv + tabw[W_AS_N + sa] > 64 then
+                if fail_node(a) then msg("these patterns do not fit the 64 pattern slots") end
+                return true
+            end
+        end
+        gen(a, 1, false)
+        oi("ld a,l")
+        os("    ld hl,")
+        o_asset(sa)
+        os("\n    ld d,")
+        odec(tabw[W_AS_N + sa])
+        os("\n    call rt_s")
+        os("prite_upload\n")
+        return true
+    end
+    if text_is(name, "draw_image") then
+        if not want_args(e, 3) then return true end
+        byte ia = asset_arg(a, AK_IMG)
+        if ia == 255 then
+            if fail_node(a) then msg("expected an image asset: `asset name = image(\"file.png\")`") end
+            return true
+        end
+        gen(nx[a], 2, true)
+        oi("ld (rt_img_x),hl")
+        gen(nx[nx[a]], 2, true)
+        oi("ld (rt_img_y),hl")
+        os("    ld hl,")
+        o_asset(ia)
+        os("\n    call rt_draw_image\n")
+        return true
+    end
+    if text_is(name, "sample_play") or text_is(name, "sample_loop") then
+        if not want_args(e, 1) then return true end
+        byte wa = asset_arg(a, AK_WAV)
+        if wa == 255 then
+            if fail_node(a) then msg("expected the name of a sample asset (`asset name = \"file.wav\"`)") end
+            return true
+        end
+        uses_samples = true
+        os("    ld hl,")
+        o_asset(wa)
+        onl()
+        if text_is(name, "sample_loop") then oi("ld a,1") else oi("xor a") end
+        oi("call rt_smp_play")
+        return true
+    end
+    if text_is(name, "dma_copy") or text_is(name, "dma_fill") then
+        -- copy: HL = source, DE = destination, BC = length;
+        -- fill: DE = destination, BC = length, A = value
+        if not want_args(e, 3) then return true end
+        bool fill = text_is(name, "dma_fill")
+        if fill then gen(nx[nx[a]], 1, false) else gen(nx[nx[a]], 2, false) end
+        oi("push hl")
+        gen(nx[a], 2, false)
+        oi("push hl")
+        gen(a, 2, false)
+        if fill then
+            oi("ex de,hl")
+            oi("pop bc")
+            oi("pop hl")
+            oi("ld a,l")
+            oi("call rt_dma_fill")
+        else
+            oi("pop de")
+            oi("pop bc")
+            oi("call rt_dma_copy")
+        end
+        return true
+    end
+    if text_is(name, "cpu_speed") then
+        if not want_args(e, 1) then return true end
+        gen(a, 1, false)
+        oi("ld a,l")
+        oi("and 3")
+        oi("nextreg $07,a")
+        return true
+    end
+    if text_is(name, "ay_write") then
+        if not want_args(e, 3) then return true end
+        gen(nx[nx[a]], 1, false)
+        oi("push hl")
+        gen(nx[a], 1, false)
+        oi("push hl")
+        gen(a, 1, false)
+        oi("ld d,l")
+        oi("pop hl")
+        oi("ld a,l")
+        oi("pop hl")
+        oi("ld e,l")
+        oi("call rt_ay_write")
+        return true
+    end
+    if text_is(name, "sample_stop") then
+        if not want_args(e, 0) then return true end
+        uses_samples = true
+        oi("call rt_smp_stop")
+        return true
+    end
     if text_isx(name, "p|lot") or text_isx(name, "h|line") then
         -- D = y, HL = x, A = colour, BC = length (horizontal line)
         bool h = text_isx(name, "h|line")
@@ -1930,7 +2099,7 @@ end
 function is_sub(byte a, byte b) -> bool
     while a ~= 255 do
         if a == b then return true end
-        a = st_parent[a]
+        a = tabb[B_ST_PARENT + a]
     end
     return false
 end
@@ -1938,9 +2107,9 @@ end
 function not_a(word e, byte a, byte b)
     if fail_node(e) then
         msg("a `")
-        msg_text(st_name[a])
+        msg_text(tabw[W_ST_NAME + a])
         msg("` is not a `")
-        msg_text(st_name[b])
+        msg_text(tabw[W_ST_NAME + b])
         msg("`")
     end
 end
@@ -1970,7 +2139,7 @@ end
 
 function o_sd(byte k)
     os("sd_")
-    otok(st_name[k])
+    otok(tabw[W_ST_NAME + k])
 end
 
 -- the return buffer of function f (strings, structs)
@@ -1996,7 +2165,7 @@ function copy_image(byte k)
     os("    ld hl,")
     o_sd(k)
     onl()
-    o_ldir(st_size[k])
+    o_ldir(tabw[W_ST_SIZE + k])
 end
 
 -- a hidden word local holding HL (a destination address)
@@ -2042,40 +2211,40 @@ function fill_fields(word e, byte k, word d, word items)
     word n = 0
     word it = items
     while it ~= 0 and not failed do
-        if n >= st_nf[k] then
+        if n >= tabw[W_ST_NF + k] then
             if fail_node(e) then
                 msg("`")
-                msg_text(st_name[k])
+                msg_text(tabw[W_ST_NAME + k])
                 msg("` has ")
-                msg_dec(0, st_nf[k])
+                msg_dec(0, tabw[W_ST_NF + k])
                 msg(" fields (or give it an `init` method)")
             end
             return
         end
-        word x = st_ff[k] + n
-        if fd_len[x] ~= 0 then
+        word x = tabw[W_ST_FF + k] + n
+        if tabw[W_FD_LEN + x] ~= 0 then
             if nk[it] ~= E_LIST then
                 if fail_node(it) then
                     msg("field `")
-                    msg_text(fd_name[x])
+                    msg_text(tabw[W_FD_NAME + x])
                     msg("` is an array: give it a `{...}` list")
                 end
                 return
             end
             word el = n1[it]
             word j = 0
-            word esz = tstore(fd_ty[x])
+            word esz = tstore(tabb[B_FD_TY + x])
             while el ~= 0 and not failed do
-                if j >= fd_len[x] then
+                if j >= tabw[W_FD_LEN + x] then
                     if fail_node(el) then msg("too many values for this array field") end
                     return
                 end
-                elem_store(fd_ty[x], d, fd_off[x] + j * esz, el)
+                elem_store(tabb[B_FD_TY + x], d, tabw[W_FD_OFF + x] + j * esz, el)
                 el = nx[el]
                 j += 1
             end
         else
-            elem_store(fd_ty[x], d, fd_off[x], it)
+            elem_store(tabb[B_FD_TY + x], d, tabw[W_FD_OFF + x], it)
         end
         it = nx[it]
         n += 1
@@ -2093,7 +2262,7 @@ function construct(word e, byte k)
     word d = hold_hl()
     oi("ex de,hl")
     copy_image(k)
-    word f = st_init[k]
+    word f = tabw[W_ST_INIT + k]
     if f ~= 0 then
         ps_kind = 3
         ps_val = d
@@ -2133,13 +2302,13 @@ function struct_into_hl(byte t, word v)
         construct(v, ck)
         o_ins_lab("ld hl,", tmp, "")
         oi("pop de")
-        o_ldir(st_size[k])
+        o_ldir(tabw[W_ST_SIZE + k])
         return
     end
     if not place_type(v) or not is_struct(pt_ty) or pt_len ~= 0 then
         if fail_node(v) then
             msg("expected a `")
-            msg_text(st_name[k])
+            msg_text(tabw[W_ST_NAME + k])
             msg("` value")
         end
         return
@@ -2151,7 +2320,7 @@ function struct_into_hl(byte t, word v)
     oi("push hl")
     gen_place(v)
     oi("pop de")
-    o_ldir(st_size[k])
+    o_ldir(tabw[W_ST_SIZE + k])
 end
 
 -- the address of a struct argument for a parameter of type t (a made value:
@@ -2168,7 +2337,7 @@ function gen_struct_arg(word a, byte t)
     if not place_type(a) or not is_struct(pt_ty) or pt_len ~= 0 then
         if fail_node(a) then
             msg("expected a `")
-            msg_text(st_name[t - TY_STRUCT])
+            msg_text(tabw[W_ST_NAME + (t - TY_STRUCT)])
             msg("` value")
         end
         return
@@ -2206,7 +2375,7 @@ function resolve_method(word e) -> word
     if nk[obj] == E_NAME and not is_self(n1[obj]) and lookup(n1[obj]) == 0 then
         if text_is(n1[obj], "super") then
             if cur_fn == 0 or sstruct[cur_fn] == 0 then return 0 end
-            byte p = st_parent[sstruct[cur_fn] - 1]
+            byte p = tabb[B_ST_PARENT + (sstruct[cur_fn] - 1)]
             if p == 255 then return 0 end
             rm_kind = 2
             return method_find(p, name)
@@ -2244,7 +2413,7 @@ function declare_struct_var(word v, word init)
     byte ty = sty[v]
     byte k = ty - TY_STRUCT
     word n = slen[v]
-    word size = st_size[k]
+    word size = tabw[W_ST_SIZE + k]
     if has_defaults(k) then
         o_ins_lab("ld de,", v, "")
         if n <= 1 then
@@ -2291,12 +2460,12 @@ end
 
 -- the default image of struct k (data)
 function out_image(byte k)
-    word f = st_ff[k]
+    word f = tabw[W_ST_FF + k]
     word n = 0
-    while n < st_nf[k] do
+    while n < tabw[W_ST_NF + k] do
         word x = f + n
-        byte t = fd_ty[x]
-        word cnt = fd_len[x]
+        byte t = tabb[B_FD_TY + x]
+        word cnt = tabw[W_FD_LEN + x]
         if cnt == 0 then cnt = 1 end
         if is_struct(t) then
             word j = 0
@@ -2304,9 +2473,9 @@ function out_image(byte k)
                 out_image(t - TY_STRUCT)
                 j += 1
             end
-        elseif fd_hasdef[x] ~= 0 then
+        elseif tabb[B_FD_HASDEF + x] ~= 0 then
             os("    db ")
-            word v = fd_defl[x]
+            word v = tabw[W_FD_DEFL + x]
             odec(v & 255)
             if tsize(t) >= 2 then
                 ob(',')
@@ -2314,9 +2483,9 @@ function out_image(byte k)
             end
             if tsize(t) == 4 then
                 ob(',')
-                odec(fd_defh[x] & 255)
+                odec(tabw[W_FD_DEFH + x] & 255)
                 ob(',')
-                odec(fd_defh[x] >> 8)
+                odec(tabw[W_FD_DEFH + x] >> 8)
             end
             onl()
         else
@@ -2344,11 +2513,11 @@ function declare_struct(word it)
         return
     end
     byte k = nstructs
-    st_name[k] = name
-    st_parent[k] = 255
-    st_ff[k] = nfields + 1
-    st_nf[k] = 0
-    st_init[k] = 0
+    tabw[W_ST_NAME + k] = name
+    tabb[B_ST_PARENT + k] = 255
+    tabw[W_ST_FF + k] = nfields + 1
+    tabw[W_ST_NF + k] = 0
+    tabw[W_ST_INIT + k] = 0
     long off = 0
     if n2[it] ~= 0 then
         byte p = struct_by_name(n2[it])
@@ -2360,26 +2529,26 @@ function declare_struct(word it)
             end
             return
         end
-        st_parent[k] = p
+        tabb[B_ST_PARENT + k] = p
         word i = 0
-        while i < st_nf[p] do
+        while i < tabw[W_ST_NF + p] do
             if nfields >= MAXFIELD - 1 then
                 if fail_node(it) then msg("too many fields") end
                 return
             end
-            word a = st_ff[p] + i
+            word a = tabw[W_ST_FF + p] + i
             nfields += 1
-            fd_name[nfields] = fd_name[a]
-            fd_ty[nfields] = fd_ty[a]
-            fd_len[nfields] = fd_len[a]
-            fd_off[nfields] = fd_off[a]
-            fd_hasdef[nfields] = fd_hasdef[a]
-            fd_defl[nfields] = fd_defl[a]
-            fd_defh[nfields] = fd_defh[a]
+            tabw[W_FD_NAME + nfields] = tabw[W_FD_NAME + a]
+            tabb[B_FD_TY + nfields] = tabb[B_FD_TY + a]
+            tabw[W_FD_LEN + nfields] = tabw[W_FD_LEN + a]
+            tabw[W_FD_OFF + nfields] = tabw[W_FD_OFF + a]
+            tabb[B_FD_HASDEF + nfields] = tabb[B_FD_HASDEF + a]
+            tabw[W_FD_DEFL + nfields] = tabw[W_FD_DEFL + a]
+            tabw[W_FD_DEFH + nfields] = tabw[W_FD_DEFH + a]
             i += 1
         end
-        st_nf[k] = st_nf[p]
-        off = st_size[p]
+        tabw[W_ST_NF + k] = tabw[W_ST_NF + p]
+        off = tabw[W_ST_SIZE + p]
     end
     word fdn = n3[it]
     while fdn ~= 0 do
@@ -2414,13 +2583,13 @@ function declare_struct(word it)
             return
         end
         nfields += 1
-        fd_name[nfields] = n1[fdn]
-        fd_ty[nfields] = t
-        fd_len[nfields] = cnt
-        fd_off[nfields] = word(off)
-        fd_hasdef[nfields] = 0
-        fd_defl[nfields] = 0
-        fd_defh[nfields] = 0
+        tabw[W_FD_NAME + nfields] = n1[fdn]
+        tabb[B_FD_TY + nfields] = t
+        tabw[W_FD_LEN + nfields] = cnt
+        tabw[W_FD_OFF + nfields] = word(off)
+        tabb[B_FD_HASDEF + nfields] = 0
+        tabw[W_FD_DEFL + nfields] = 0
+        tabw[W_FD_DEFH + nfields] = 0
         if n4[fdn] ~= 0 then
             if is_struct(t) or t == TY_STR or cnt ~= 0 then
                 if fail_node(n4[fdn]) then msg("only number fields can have a default") end
@@ -2430,11 +2599,11 @@ function declare_struct(word it)
                 if fail_node(n4[fdn]) then msg("field defaults must be compile-time constants") end
                 return
             end
-            fd_hasdef[nfields] = 1
-            fd_defl[nfields] = word(cv)
-            fd_defh[nfields] = word(cv >> 16)
+            tabb[B_FD_HASDEF + nfields] = 1
+            tabw[W_FD_DEFL + nfields] = word(cv)
+            tabw[W_FD_DEFH + nfields] = word(cv >> 16)
         end
-        st_nf[k] += 1
+        tabw[W_ST_NF + k] += 1
         long c = long(cnt)
         if c == 0 then c = 1 end
         off += c * tstore(t)
@@ -2444,7 +2613,7 @@ function declare_struct(word it)
         end
         fdn = nx[fdn]
     end
-    st_size[k] = word(off)
+    tabw[W_ST_SIZE + k] = word(off)
     nstructs += 1
 end
 
@@ -2493,6 +2662,316 @@ function declare_func(word it, byte k)
     snp[f] = np
 end
 
+-- ---------------------------------------------------------------- assets
+
+const AK_PAT = 1            -- a PNG sheet of 16x16 patterns (converted: a_NAME.bin)
+const AK_RAW = 2            -- the file as it is (.spr: patterns)
+const AK_IMG = 3            -- a picture for Layer 2, in 8K pages
+const AK_WAV = 4            -- a sample, in 8K pages
+const MAXASSET = 64
+byte nassets = 0
+word far_arr_pages = 0      -- pages of far arrays (cleared at startup)
+bool uses_samples = false
+bool uses_notes = false
+string apath = ""
+
+function asset_err(word it, string m)
+    if fail_node(it) then
+        msg("`")
+        msg(apath)
+        msg("`: ")
+        msg(m)
+    end
+end
+
+function lc(byte c) -> byte
+    if c >= 'A' and c <= 'Z' then return c + 32 end
+    return c
+end
+
+-- the extension of apath, lower case, is e?
+function ext_is(string e) -> bool
+    byte n = len(apath)
+    byte k = len(e)
+    if n <= k then return false end
+    if asc(apath, n - k - 1) ~= '.' then return false end
+    byte i = 0
+    while i < k do
+        if lc(asc(apath, n - k + i)) ~= asc(e, i) then return false end
+        i += 1
+    end
+    return true
+end
+
+function asset_pages(word it, byte a, word n) -> bool
+    if word(next_page) + n > 224 then
+        if fail_node(it) then msg("pictures and `far` arrays need more than the Next's 1 MB of memory") end
+        return false
+    end
+    tabb[B_AS_PAGE + a] = next_page
+    tabb[B_AS_NP + a] = byte(n)
+    word i = 0
+    while i < n do
+        tabb[B_PASSET + (next_page + i)] = 1
+        i += 1
+    end
+    next_page += byte(n)
+    return true
+end
+
+-- `asset name = "file"` / `asset name = image("file.png")`: what the file
+-- holds is read now (sizes); asset.nex converts it after this stage
+function declare_asset(word it)
+    word name = n1[it]
+    if lookup(name) ~= 0 then
+        if fail_node(it) then
+            msg("`")
+            msg_text(name)
+            msg("` is already defined")
+        end
+        return
+    end
+    if nassets >= MAXASSET then
+        if fail_node(it) then msg("too many assets") end
+        return
+    end
+    word pt = n2[it]
+    if tlen[pt] > 64 then
+        if fail_node(it) then msg("the path of an asset can be at most 64 characters") end
+        return
+    end
+    apath = ""
+    word i = 0
+    while i < tlen[pt] do
+        apath = apath .. chr(tpool[toff[pt] + i])
+        i += 1
+    end
+    byte a = nassets
+    tabw[W_AS_NAME + a] = name
+    tabw[W_AS_PATH + a] = pt
+    tabb[B_AS_NP + a] = 0
+    tabw[W_AS_N + a] = 0
+    tabw[W_AS_LENL + a] = 0
+    tabw[W_AS_LENH + a] = 0
+    if nf[it] == 0 and ext_is("pt3") then
+        unsupported(it, "music assets (.pt3)")
+        return
+    end
+    if not ai_open(apath) then
+        asset_err(it, ai_err)
+        return
+    end
+    if nf[it] ~= 0 then
+        tabb[B_AS_KIND + a] = AK_IMG
+        if png_header() then
+            if ai_wid == 0 or ai_hgt == 0 or ai_wid > 256 or ai_hgt > 255 then
+                ai_close()
+                asset_err(it, "images can be at most 256x255 pixels")
+                return
+            end
+            word rpp = 8192 / ai_wid
+            if rpp > 255 then rpp = 255 end
+            tabw[W_AS_W + a] = ai_wid
+            tabw[W_AS_H + a] = ai_hgt
+            tabb[B_AS_RPP + a] = byte(rpp)
+            ai_close()
+            if not asset_pages(it, a, (ai_hgt + rpp - 1) / rpp) then return end
+        end
+    elseif ext_is("wav") then
+        tabb[B_AS_KIND + a] = AK_WAV
+        if wav_header() then
+            tabb[B_AS_PRESC + a] = ai_presc
+            tabw[W_AS_LENL + a] = word(ai_len)
+            tabw[W_AS_LENH + a] = word(ai_len >> 16)
+            ai_close()
+            if not asset_pages(it, a, word((ai_len + 8191) / 8192)) then return end
+        end
+    elseif ext_is("png") then
+        tabb[B_AS_KIND + a] = AK_PAT
+        if png_header() then
+            if ai_wid == 0 or ai_hgt == 0 or ai_wid % 16 ~= 0 or ai_hgt % 16 ~= 0 then
+                ai_close()
+                asset_err(it, "sheets of patterns must be multiples of 16x16 pixels")
+                return
+            end
+            long n = long(ai_wid / 16) * long(ai_hgt / 16)
+            if n > 64 then
+                ai_close()
+                asset_err(it, "more than the 64 8-bit patterns the Next holds")
+                return
+            end
+            tabw[W_AS_N + a] = word(n)
+            tabw[W_AS_LENL + a] = word(n) * 256
+        end
+    else
+        tabb[B_AS_KIND + a] = AK_RAW
+        long size = file_size(ai_fh)
+        if size > 32768 then
+            ai_close()
+            asset_err(it, "too large for the program's memory")
+            return
+        end
+        tabw[W_AS_LENL + a] = word(size)
+        if ext_is("spr") then
+            if size == 0 or size % 256 ~= 0 then
+                ai_close()
+                asset_err(it, ".spr size must be a multiple of 256 bytes")
+                return
+            end
+            tabw[W_AS_N + a] = word(size / 256)
+        end
+    end
+    ai_close()
+    if ai_bad then
+        asset_err(it, ai_err)
+        return
+    end
+    word s = new_sym(SK_ASSET, name, TY_NONE)
+    sid[s] = a
+    nassets += 1
+end
+
+-- the asset named by expression e, of the kind k (AK_PAT also takes a
+-- .spr), 255 if it is none
+function asset_arg(word e, byte k) -> byte
+    if nk[e] ~= E_NAME then return 255 end
+    word s = lookup(n1[e])
+    if s == 0 or sk[s] ~= SK_ASSET then return 255 end
+    byte a = byte(sid[s])
+    if tabb[B_AS_KIND + a] == k then return a end
+    if k == AK_PAT and tabb[B_AS_KIND + a] == AK_RAW and tabw[W_AS_N + a] ~= 0 then return a end
+    return 255
+end
+
+function o_asset(byte a)
+    os("a_")
+    otok(tabw[W_AS_NAME + a])
+end
+
+function odec32(long v)
+    dec32(word(v >> 16), word(v))
+    while ndig > 0 do
+        ndig -= 1
+        ob(digits[ndig])
+    end
+end
+
+-- the descriptors and resident data of the assets
+function asset_data()
+    byte a = 0
+    while a < nassets do
+        o_asset(a)
+        os(":\n")
+        byte k = tabb[B_AS_KIND + a]
+        if k == AK_PAT then
+            os("    incbin \"")
+            o_asset(a)
+            os(".bin\"\n")
+        elseif k == AK_RAW then
+            os("    incbin \"")
+            otok(tabw[W_AS_PATH + a])
+            os("\"\n")
+        elseif k == AK_IMG then
+            os("    db ")
+            odec(tabb[B_AS_PAGE + a])
+            os("\n    dw ")
+            odec(tabw[W_AS_W + a])
+            os("\n    db ")
+            odec(tabw[W_AS_H + a])
+            ob(',')
+            odec(tabb[B_AS_RPP + a])
+            os("\n    incbin \"")
+            o_asset(a)
+            os(".msk\"\n")
+        else
+            os("    db ")
+            odec(tabb[B_AS_PAGE + a])
+            ob(',')
+            odec(tabb[B_AS_PRESC + a])
+            os("\n    dw ")
+            odec(tabw[W_AS_LENL + a])
+            os("\n    db ")
+            odec(tabw[W_AS_LENH + a] & 255)
+            onl()
+        end
+        a += 1
+    end
+end
+
+-- the 8K pages of the pictures and samples
+function asset_pages_out()
+    byte a = 0
+    while a < nassets do
+        byte k = tabb[B_AS_KIND + a]
+        if k == AK_IMG or k == AK_WAV then
+            long total = long(tabw[W_AS_LENH + a]) << 16 | long(tabw[W_AS_LENL + a])
+            long per = 8192
+            if k == AK_IMG then
+                total = long(tabw[W_AS_W + a]) * tabw[W_AS_H + a]
+                per = long(tabw[W_AS_W + a]) * tabb[B_AS_RPP + a]
+            end
+            byte i = 0
+            while i < tabb[B_AS_NP + a] do
+                long off = long(i) * per
+                long n = total - off
+                if n > per then n = per end
+                if k == AK_IMG then os("; picture ") else os("; sample ") end
+                otok(tabw[W_AS_NAME + a])
+                os("\n    MMU 1 e, ")
+                odec(tabb[B_AS_PAGE + a] + i)
+                os("\n    ORG $2000\n    incbin \"")
+                o_asset(a)
+                os(".bin\", ")
+                odec32(off)
+                os(", ")
+                odec32(n)
+                onl()
+                i += 1
+            end
+        end
+        a += 1
+    end
+end
+
+-- assets.lst for the asset stage: true if there is something to convert
+function asset_list() -> bool
+    bool any = false
+    byte a = 0
+    while a < nassets do
+        if tabb[B_AS_KIND + a] ~= AK_RAW then any = true end
+        a += 1
+    end
+    if not any then
+        if file_exists("assets.lst") then file_delete("assets.lst") end
+        return false
+    end
+    byte h = file_open("assets.lst", FILE_WRITE)
+    if h == FILE_ERROR then return false end
+    to_file(h)
+    a = 0
+    while a < nassets do
+        byte k = tabb[B_AS_KIND + a]
+        if k ~= AK_RAW then
+            if k == AK_PAT then
+                ob('p')
+            elseif k == AK_IMG then
+                ob('i')
+            else
+                ob('w')
+            end
+            ob(' ')
+            otok(tabw[W_AS_NAME + a])
+            ob(' ')
+            otok(tabw[W_AS_PATH + a])
+            onl()
+        end
+        a += 1
+    end
+    to_file(0)
+    file_close(h)
+    return true
+end
+
 -- ---- call graph (for recursion)
 
 const MAXEDGE = 4000
@@ -2523,7 +3002,7 @@ function collect_calls(word f, word n)
                 add_edge(f, c)
             elseif c == 0 then
                 byte st = struct_by_name(n1[n])
-                if st ~= 255 and st_init[st] ~= 0 then add_edge(f, st_init[st]) end
+                if st ~= 255 and tabw[W_ST_INIT + st] ~= 0 then add_edge(f, tabw[W_ST_INIT + st]) end
             end
         elseif k == E_METHOD then
             word m = shead[toff[n2[n]] & 1023]
@@ -2822,6 +3301,7 @@ function declare_var(word s, bool top, bool far_)
             end
             spage[v] = next_page
             next_page += pages
+            far_arr_pages += pages
         end
     end
     if pass_declare then return end
@@ -2958,7 +3438,7 @@ function assign(word s)
             gen_place(target)
             oi("ex de,hl")
             o_ins_lab("ld hl,", tmp, "")
-            o_ldir(st_size[ety - TY_STRUCT])
+            o_ldir(tabw[W_ST_SIZE + (ety - TY_STRUCT)])
             return
         end
         gen_place(target)
@@ -3249,7 +3729,7 @@ function cg_stmt(word s)
         end
         -- declared in the first pass
     elseif k == S_ASSET then
-        unsupported(s, "assets")
+        if fail_node(s) then msg("`asset` declarations must be at the top level") end
     else
         unsupported(s, "this statement")
     end
@@ -3295,7 +3775,7 @@ function declare_all()
         elseif k == I_INTERRUPT then
             unsupported(it, "interrupts")
         elseif k == S_ASSET then
-            unsupported(it, "assets")
+            declare_asset(it)
         end
         it = nx[it]
     end
@@ -3303,14 +3783,14 @@ function declare_all()
     -- the init method of each class (its own, else its parent's)
     word m = 1
     while m <= nsy do
-        if sk[m] == SK_FUNC and sstruct[m] ~= 0 and text_is(sname[m], "init") then st_init[sstruct[m] - 1] = m end
+        if sk[m] == SK_FUNC and sstruct[m] ~= 0 and text_is(sname[m], "init") then tabw[W_ST_INIT + (sstruct[m] - 1)] = m end
         m += 1
     end
     byte c = 0
     while c < nstructs do
         byte q = c
-        while st_init[q] == 0 and st_parent[q] ~= 255 do q = st_parent[q] end
-        st_init[c] = st_init[q]
+        while tabw[W_ST_INIT + q] == 0 and tabb[B_ST_PARENT + q] ~= 255 do q = tabb[B_ST_PARENT + q] end
+        tabw[W_ST_INIT + c] = tabw[W_ST_INIT + q]
         c += 1
     end
     -- the call graph
@@ -3355,7 +3835,13 @@ function global_data() -> word
     end
     byte k = 0
     while k < nstructs do
-        total += st_size[k]
+        total += tabw[W_ST_SIZE + k]
+        k += 1
+    end
+    k = 0
+    while k < nassets do
+        total += tabw[W_AS_LENL + k] + 6
+        if tabb[B_AS_KIND + k] == AK_WAV then total -= tabw[W_AS_LENL + k] end
         k += 1
     end
     return total
@@ -3364,19 +3850,20 @@ end
 -- bytes of resident data the code will need besides the globals: locals,
 -- loop variables, string temporaries and literals (from the whole tree,
 -- before any function is placed; generous rather than short)
-far byte ntop[30000]        -- top-level declarations (globals: counted apart)
 function data_reserve() -> long
+    -- top-level declarations (globals: counted apart; far data is paged)
+    -- are marked with bit 1 of nf for the time of the count
     word it = prog_first
     while it ~= 0 do
-        ntop[it] = 1
-        if nk[it] == S_FAR then ntop[n1[it]] = 1 end     -- far data is paged
+        if nk[it] == S_VAR then nf[it] = nf[it] | 2 end
+        if nk[it] == S_FAR then nf[n1[it]] = nf[n1[it]] | 2 end
         it = nx[it]
     end
     long total = 0
     word n = 1
     while n <= nnodes do
         byte k = nk[n]
-        if k == S_VAR and ntop[n] == 0 and nf[n] == 0 then
+        if k == S_VAR and nf[n] == 0 then
             byte t = TY_WORD
             if n1[n] ~= 0 then t = type_of(n1[n]) end
             if t == TY_BAD then t = TY_WORD end
@@ -3397,13 +3884,19 @@ function data_reserve() -> long
         elseif k == E_CALL and (text_is(n1[n], "chr") or text_is(n1[n], "str")) then
             total += 65
         elseif k == E_CALL and struct_by_name(n1[n]) ~= 255 then
-            total += st_size[struct_by_name(n1[n])] + 2
+            total += tabw[W_ST_SIZE + (struct_by_name(n1[n]))] + 2
         elseif k == E_LIST then
             total += 2
         elseif k == E_STR then
             total += tlen[n1[n]] + 2
         end
         n += 1
+    end
+    it = prog_first
+    while it ~= 0 do
+        if nk[it] == S_VAR then nf[it] = nf[it] & 1 end
+        if nk[it] == S_FAR then nf[n1[it]] = nf[n1[it]] & 1 end
+        it = nx[it]
     end
     return total
 end
@@ -3562,6 +4055,26 @@ function generate()
     est_globals = global_data()
     est_reserve = data_reserve()
     resident_used = RUNTIME_SIZE + LONG_SIZE + est_globals + est_reserve + 500
+    -- the runtime parts for pictures (measured: about 450 bytes), samples
+    -- (390) and notes (240)
+    byte ka = 0
+    bool img_ = false
+    bool wav_ = false
+    while ka < nassets do
+        if tabb[B_AS_KIND + ka] == AK_IMG then img_ = true end
+        if tabb[B_AS_KIND + ka] == AK_WAV then wav_ = true end
+        ka += 1
+    end
+    if img_ then resident_used += 500 end
+    if wav_ then resident_used += 450 end
+    word tn = 1
+    while tn < ntok do
+        if tk[tn] == T_IDENT and text_is(tn, "note_period") then
+            resident_used += 260
+            break
+        end
+        tn += 1
+    end
     to_file(outh)
     os("; Generated by codegen.lz80n (self-hosted LZ80N compiler)\n")
     oi("OPT --zxnext")
@@ -3571,14 +4084,14 @@ function generate()
     ocopy("rt_start.asm")
     oi("ei")
     os("\n; ---- main program ----\n")
-    if next_page > first_page then oi("call rt_far_zero") end
+    if far_arr_pages > 0 then oi("call rt_far_zero") end
     long cost0 = cost_out
     word it = prog_first
     while it ~= 0 and not failed do
         byte k = nk[it]
         if k == S_VAR then
             declare_var(it, true, false)
-        elseif k ~= I_FUNC and k ~= I_STRUCT then
+        elseif k ~= I_FUNC and k ~= I_STRUCT and k ~= S_ASSET then
             cg_stmt(it)
         end
         it = nx[it]
@@ -3607,19 +4120,47 @@ function generate()
     if cur_page ~= 0 then ocopy("rt_banked.asm") end
     ocopy("rt_lib.asm")         -- starts with __main_end
     if uses_long then ocopy("rt_long.asm") end
+    bool any_img = false
+    byte ai = 0
+    while ai < nassets do
+        if tabb[B_AS_KIND + ai] == AK_IMG then any_img = true end
+        ai += 1
+    end
+    if any_img then ocopy("rt_images.asm") end
+    if uses_samples then ocopy("rt_samples.asm") end
+    if uses_notes then ocopy("rt_notes.asm") end
+    -- the background driver of the sound module
+    word drv = 0
+    word df = 1
+    while df <= nsy do
+        if sk[df] == SK_FUNC and sstruct[df] == 0 and text_isx(sname[df], "s|ound_tick") then drv = df end
+        df += 1
+    end
+    -- slot 1 (far data, pictures) and the code page may be remapped by the
+    -- drivers the handler calls
+    bool slot1 = far_end > first_page
+    bool banked = cur_page ~= 0
     os("\n; ---- interrupt service routine ----\n")
     os("__isr:\n    push af\n    push bc\n    push de\n    push hl\n")
+    if slot1 then os("    ld a,(rt_farpage)\n    push af\n") end
+    if banked then os("    ld a,(rt_codepage)\n    push af\n    ld a,(rt_bret)\n    push af\n") end
     os("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n")
+    if drv ~= 0 then o_ins_lab("call ", drv, "") end
+    if uses_samples then oi("call rt_smp_tick") end
+    if banked then os("    pop af\n    ld (rt_bret),a\n    pop af\n    ld (rt_codepage),a\n    nextreg $52,a\n") end
+    if slot1 then os("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n") end
     os("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n")
     ocopy("rt_font.asm")
-    if far_end > first_page then
+    if far_arr_pages > 0 then
         os("; clear the far pages at startup\nrt_far_zero:\n    ld hl,rt_far_zero_tab\n.p:\n    ld a,(hl)\n    or a\n    ret z\n")
         os("    push hl\n    ld (rt_farpage),a\n    nextreg $51,a\n    xor a\n    ld de,$2000\n    ld bc,8192\n")
         os("    call rt_dma_fill\n    pop hl\n    inc hl\n    jr .p\nrt_far_zero_tab: db ")
         byte p = first_page
         while p < far_end do
-            odec(p)
-            ob(',')
+            if tabb[B_PASSET + p] == 0 then
+                odec(p)
+                ob(',')
+            end
             p += 1
         end
         os("0\n")
@@ -3655,6 +4196,7 @@ function generate()
         out_image(sk2)
         sk2 += 1
     end
+    asset_data()
     word rf = 1
     while rf <= nsy do
         if sk[rf] == SK_FUNC and (sty[rf] == TY_STR or is_struct(sty[rf])) then
@@ -3698,7 +4240,8 @@ function generate()
     os("\n__program_end:\n")
     oi("ASSERT __program_end <= $FD00, \"main program and data too large\"")
     onl()
-    -- the banked functions
+    -- the pictures and samples, the banked functions
+    asset_pages_out()
     to_file(0)
     file_close(bankh)
     to_file(outh)
@@ -3755,9 +4298,14 @@ if load_tokens() then
         print("")
     else
         print("codegen:", nsy, "symbols, out.asm written")
-        -- the next stage (lexer -> codegen -> asm)
+        -- the next stage (lexer -> codegen -> [assets ->] asm)
+        bool conv = asset_list()
         if file_exists("chain.on") then
-            if not file_exec("nexload asm.nex") then print("cannot start asm.nex, error", file_status) end
+            if conv then
+                if not file_exec("nexload assets.nex") then print("cannot start assets.nex, error", file_status) end
+            elseif not file_exec("nexload asm.nex") then
+                print("cannot start asm.nex, error", file_status)
+            end
         end
     end
 end

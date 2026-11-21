@@ -572,6 +572,7 @@ end
 
 word ntokens = 0
 string included[16]
+string cur_dir = ""         -- the directory of the file being read
 byte nincluded = 0
 
 -- lex one file (no T_EOF); false if it cannot be opened
@@ -607,9 +608,11 @@ function include_file(word l, word c)
     word sc = cno
     string_lit_text()
     if failed then return end
-    string path = ""
+    -- relative to the including file
+    string path = cur_dir
     word i = 0
-    while i < tlen and i < 64 do
+    if tlen > 0 and text[0] == '/' then path = "" end
+    while i < tlen and len(path) < 64 do
         path = path .. chr(text[i])
         i += 1
     end
@@ -630,10 +633,21 @@ function include_file(word l, word c)
     byte b = c1
     word ln = lno
     word cn = cno
+    string dir = cur_dir
+    -- the directory of the included file
+    cur_dir = ""
+    byte j = len(path)
+    while j > 0 and asc(path, j - 1) ~= '/' do j -= 1 end
+    byte q = 0
+    while q < j do
+        cur_dir = cur_dir .. chr(asc(path, q))
+        q += 1
+    end
     if not lex_file(path) then
         error(sl, sc, "cannot read the included file")
         return
     end
+    cur_dir = dir
     inh = h
     size = sz
     pos = p
