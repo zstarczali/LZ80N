@@ -1,6 +1,7 @@
 -- selfhost/asm.lz80n - the LZ80N assembler, written in LZ80N
 --
--- Assembles in.asm (Z80N, the sjasmplus subset lz80nc generates) into the
+-- Assembles in.asm (or out.asm from codegen.lz80n; Z80N, the sjasmplus
+-- subset lz80nc generates) into the
 -- NEX file named by its `SAVENEX OPEN`. It follows compiler/src/asm/
 -- (expressions, encoder, directives, NEX writer); the test
 -- `selfhost_asm_matches_rust` compares the NEX byte for byte with the one
@@ -2256,10 +2257,12 @@ function run_pass()
     for i = 0, 223 do pdir[i] = 0 end
     nslots = 0
     in_eof = false
-    inh = file_open("in.asm", FILE_READ)
+    inh = file_open(in_name, FILE_READ)
     if inh == FILE_ERROR then
-        print("cannot open in.asm, error", file_status)
         failed = true
+        err_line = 0
+        elen = 0
+        msg("cannot open the input (in.asm or out.asm)")
         return
     end
     while not failed and read_line() do
@@ -2271,6 +2274,9 @@ end
 
 -- ---------------------------------------------------------------- main
 
+-- in.asm, or out.asm (written by codegen.nex)
+string in_name = "in.asm"
+if not file_exists(in_name) then in_name = "out.asm" end
 mn_init()
 nex_init_order()
 strict = false
@@ -2285,16 +2291,30 @@ end
 if failed then
     outh = file_open("asm.err", FILE_WRITE)
     string head = str(err_line) .. ": "
-    if len(head) > 0 then
-        for k = 0, len(head) - 1 do out_byte(asc(head, k)) end
-    end
+    for k = 0, len(head) - 1 do out_byte(asc(head, k)) end
     if elen > 0 then
         for k = 0, elen - 1 do out_byte(emsg[k]) end
     end
     out_byte(10)
     flush()
     file_close(outh)
-    print("error in line", err_line)
+    write("asm: error in line ", err_line, ": ")
+    word k = 0
+    while k < elen do
+        write(chr(emsg[k]))
+        k += 1
+    end
+    print("")
 else
-    print(pass, "passes", nsym, "symbols")
+    string name = ""
+    byte i = 0
+    while i < nex_nlen do
+        name = name .. chr(nex_name[i])
+        i += 1
+    end
+    print("asm:", pass, "passes,", nsym, "symbols, wrote", name)
+    -- run the result when run.on exists
+    if nex_nlen > 0 and file_exists("run.on") then
+        if not file_exec("nexload " .. name) then print("cannot start", name, "error", file_status) end
+    end
 end

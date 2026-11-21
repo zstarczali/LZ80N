@@ -4248,22 +4248,7 @@ fn selfhost_asm_errors() {
 
 /// The runtime files the self-hosted code generator copies from the SD card.
 fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
-    let startup = crate::runtime::STARTUP.trim_end();
-    let startup = startup.strip_suffix("ei").expect("startup ends with ei");
-    let mut font = String::from("rt_font:\n");
-    for glyph in crate::font::bytes().chunks(8) {
-        let row: Vec<String> = glyph.iter().map(|b| format!("${b:02X}")).collect();
-        font.push_str(&format!("    db {}\n", row.join(",")));
-    }
-    vec![
-        ("rt_start.asm".into(), startup.as_bytes().to_vec()),
-        ("rt_lib.asm".into(), crate::runtime::RUNTIME.as_bytes().to_vec()),
-        ("rt_font.asm".into(), font.into_bytes()),
-        ("rt_long.asm".into(), crate::runtime::long().into_bytes()),
-        ("rt_banked.asm".into(), crate::runtime::BANKED.as_bytes().to_vec()),
-        ("lib_file.lz80n".into(), crate::prelude::FILE.as_bytes().to_vec()),
-        ("expand.on".into(), b"1".to_vec()),
-    ]
+    crate::selfhost_support_files()
 }
 
 struct SelfHost {
@@ -4682,3 +4667,51 @@ fn selfhost_bootstrap() {
     assert!(asm3 == asm2, "stage 2 compiles itself differently from stage 1");
 }
 
+
+/// lz80nc --export-selfhost, then the whole chain on the virtual SD card:
+/// lexer.nex starts codegen.nex, which starts asm.nex (M_EXECCMD
+/// `nexload`), which writes out.nex; out.nex prints what it should.
+#[test]
+fn selfhost_export_and_chain() {
+    let dir = std::env::temp_dir().join("lz80n_export_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let built = crate::export_selfhost(&dir).unwrap();
+    let mut fs = crate::emu::EsxFs::default();
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        fs.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
+    }
+    let prog = "function sq(word x) -> word\n    return x * x\nend\nstring s = \"sq\" .. sq(12)\nprint(s, 1000000 / 3)\n";
+    fs.files.insert("in.lz80n".into(), prog.as_bytes().to_vec());
+    let mut next = "lexer.nex".to_string();
+    let mut stages = vec![];
+    loop {
+        let (_, nex, syms) = built.iter().find(|b| b.0 == next).unwrap_or_else(|| panic!("no {next}"));
+        stages.push(next.clone());
+        let mut cpu = load_nex(nex).unwrap();
+        fs.exec.clear();
+        cpu.esx = Some(fs);
+        let end = syms["__main_end"] as u16;
+        let mut n = 0u64;
+        while cpu.pc != end {
+            cpu.tick().unwrap();
+            n += 1;
+            assert!(n < 4_000_000_000, "{next} did not finish");
+            if !cpu.esx.as_ref().unwrap().exec.is_empty() {
+                break;
+            }
+        }
+        fs = cpu.esx.unwrap();
+        match fs.exec.first().and_then(|c| c.strip_prefix("nexload ")) {
+            Some(n) => next = n.to_string(),
+            None => break,
+        }
+    }
+    assert_eq!(stages, ["lexer.nex", "codegen.nex", "asm.nex"]);
+    assert!(fs.files.get("asm.err").is_none(), "{}", String::from_utf8_lossy(&fs.files["asm.err"]));
+    let asm = String::from_utf8(fs.files["out.asm"].clone()).unwrap();
+    let rust = crate::asm::assemble(&asm, &dir).unwrap();
+    assert!(fs.files["out.nex"] == rust.nex.as_ref().unwrap().1, "out.nex differs from the Rust assembler's");
+    let want = run("sh_chain", prog).unwrap();
+    assert_eq!(run_asm(&asm), want);
+}

@@ -2382,7 +2382,7 @@ function generate()
     to_file(outh)
     ocopy("bank.asm")
     onl()
-    oi("SAVENEX OPEN \"t.nex\", __start, $FDFD")
+    oi("SAVENEX OPEN \"out.nex\", __start, $FDFD")
     oi("SAVENEX CORE 3,0,0")
     oi("SAVENEX CFG 0")
     oi("SAVENEX AUTO")
@@ -2424,8 +2424,18 @@ if load_tokens() then
         onl()
         flush()
         file_close(outh)
-        print("error", err_l, err_c)
+        write("error ", err_l, ":", err_c, " ")
+        word k = 0
+        while k < elen do
+            write(chr(emsg[k]))
+            k += 1
+        end
+        print("")
     else
-        print(nsy, "symbols", nlabel, "labels")
+        print("codegen:", nsy, "symbols, out.asm written")
+        -- the next stage (lexer -> codegen -> asm)
+        if file_exists("chain.on") then
+            if not file_exec("nexload asm.nex") then print("cannot start asm.nex, error", file_status) end
+        end
     end
 end

@@ -114,6 +114,31 @@ compiled code generator is a 115K NEX (9 code pages). It uses 8K pages up to
 191, so it needs a 2 MB Next: the token and tree arrays are the bulk and can
 shrink later (positions only for errors, tokens freed after parsing).
 
-The four stages are separate NEX programs that hand over files on the SD card
-(`in.lz80n` -> `tokens.bin` -> `out.asm` -> `.nex`); on the Next a NextBASIC
-program can run them one after the other.
+## Running it on the Next
+
+```
+lz80nc --export-selfhost DIR
+```
+
+writes everything into DIR: `lexer.nex`, `codegen.nex`, `asm.nex` (built from
+these sources), the runtime and module files, the sources themselves, and
+`chain.on`. Copy DIR to the SD card (a 2 MB Next), then in NextBASIC:
+
+```
+.cd /lz80n                     (the folder you copied)
+COPY "myprog.lz80n" TO "in.lz80n"
+.nexload lexer.nex
+```
+
+`lexer.nex` writes `tokens.bin` and starts `codegen.nex` (esxDOS
+`M_EXECCMD`, `nexload`), which writes `out.asm` and starts `asm.nex`, which
+writes `out.nex`. With a file named `run.on` in the folder `out.nex` is started
+too. Errors appear on the screen (and in `codegen.err` / `asm.err`). Without
+`chain.on` every stage stops after its work. `file_exec` / `file_exists` are
+new in the file module for this.
+
+`selfhost_export_and_chain` runs exactly this in the emulator (its virtual
+SD card implements `M_EXECCMD` as "start that NEX") and checks `out.nex`
+byte for byte and by its output. **Not yet tried on a real Next or in
+CSpect**: whether `.nexload` started from a running NEX through
+`M_EXECCMD` behaves there as expected is the first thing to check.

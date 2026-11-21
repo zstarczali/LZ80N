@@ -122,6 +122,8 @@ pub struct EsxFs {
     pub mmu_not_rom: bool,
     /// a call was made with interrupts enabled
     pub with_interrupts: bool,
+    /// dot commands run with M_EXECCMD ($8F), in order
+    pub exec: Vec<String>,
 }
 
 /// esxDOS error codes used by the virtual SD card
@@ -758,6 +760,12 @@ impl Cpu {
                     for (k, b) in st.iter().enumerate() {
                         self.wr(self.ix.wrapping_add(k as u16), *b);
                     }
+                }
+                0x8F => {
+                    // M_EXECCMD: IX = command line (without the dot); recorded,
+                    // the test runner acts on `nexload`
+                    let cmd = name_at(self, self.ix);
+                    fs.exec.push(cmd);
                 }
                 0xAD => {
                     let name = name_at(self, self.ix);
