@@ -251,6 +251,7 @@ const TY_WORD = 4
 const TY_SWORD = 5
 const TY_LONG = 6
 const TY_STR = 9
+const TY_STRUCT = 16        -- struct number k: TY_STRUCT + k
 const TY_BAD = 255
 
 function tsize(byte t) -> byte
@@ -264,8 +265,9 @@ function tsigned(byte t) -> bool
 end
 
 -- bytes of storage
-function tstore(byte t) -> byte
+function tstore(byte t) -> word
     if t == TY_STR then return 65 end
+    if is_struct(t) then return st_size[t - TY_STRUCT] end
     return tsize(t)
 end
 
@@ -289,6 +291,65 @@ function join(byte a, byte b) -> byte
     return make_ty(sz, tsigned(a) or tsigned(b))
 end
 
+-- ---------------------------------------------------------------- structs
+
+const MAXSTRUCT = 200
+far word st_name[200]       -- name token
+far word st_size[200]
+far byte st_parent[200]     -- 255 = none
+far word st_ff[200]         -- first field
+far word st_nf[200]         -- number of fields (the parent's first)
+far word st_init[200]       -- the `init` method (its own or inherited), 0 = none
+byte nstructs = 0
+const MAXFIELD = 3000
+far word fd_name[3000]
+far byte fd_ty[3000]
+far word fd_len[3000]       -- array fields: element count
+far word fd_off[3000]
+far byte fd_hasdef[3000]
+far word fd_defl[3000]      -- the default value
+far word fd_defh[3000]
+word nfields = 0
+
+function is_struct(byte t) -> bool
+    return t >= TY_STRUCT and t < TY_BAD
+end
+
+-- the struct named by token t, 255 if there is none
+function struct_by_name(word t) -> byte
+    if tk[t] ~= T_IDENT then return 255 end
+    byte k = 0
+    while k < nstructs do
+        if toff[st_name[k]] == toff[t] then return k end
+        k += 1
+    end
+    return 255
+end
+
+-- the field `name` of struct k, 0 if there is none
+function field_find(byte k, word name) -> word
+    word f = st_ff[k]
+    word n = 0
+    while n < st_nf[k] do
+        if toff[fd_name[f + n]] == toff[name] then return f + n end
+        n += 1
+    end
+    return 0
+end
+
+-- does struct k (or a struct inside it) have field defaults?
+function has_defaults(byte k) -> bool
+    word f = st_ff[k]
+    word n = 0
+    while n < st_nf[k] do
+        word x = f + n
+        if fd_hasdef[x] ~= 0 then return true end
+        if is_struct(fd_ty[x]) and has_defaults(fd_ty[x] - TY_STRUCT) then return true end
+        n += 1
+    end
+    return false
+end
+
 -- type of a type-name token, TY_BAD if it is none (or not supported)
 function type_of(word t) -> byte
     if text_is(t, "bool") then return TY_BOOL end
@@ -298,6 +359,8 @@ function type_of(word t) -> byte
     if text_is(t, "sword") then return TY_SWORD end
     if text_is(t, "long") then return TY_LONG end
     if text_is(t, "string") then return TY_STR end
+    byte k = struct_by_name(t)
+    if k ~= 255 then return TY_STRUCT + k end
     return TY_BAD
 end
 
@@ -332,6 +395,7 @@ far byte sdead[8000]        -- out of scope
 far byte snp[8000]          -- functions: number of parameters
 far byte spage[8000]        -- far arrays: first 8K page (0 = not far)
 far byte sbank[8000]        -- functions: code page (0 = resident)
+far byte sstruct[8000]      -- methods: struct number + 1 (0 = a plain function)
 far word snext[8000]        -- the previous symbol with the same name hash
 far word shead[1024]        -- name hash -> the newest symbol
 word nsy = 0
@@ -353,11 +417,34 @@ function lookup(word t) -> word
         if sdead[s] == 0 and toff[sname[s]] == o then
             byte k = sk[s]
             if k == SK_LOCAL or k == SK_PARAM then return s end
-            if other == 0 then other = s end
+            if other == 0 and not (k == SK_FUNC and sstruct[s] ~= 0) then other = s end
         end
         s = snext[s]
     end
     return other
+end
+
+-- the method `name` of struct k or of its parents, 0 if there is none
+function method_find(byte k, word name) -> word
+    while k ~= 255 do
+        word s = shead[toff[name] & 1023]
+        while s ~= 0 do
+            if sk[s] == SK_FUNC and sstruct[s] == k + 1 and toff[sname[s]] == toff[name] then return s end
+            s = snext[s]
+        end
+        k = st_parent[k]
+    end
+    return 0
+end
+
+-- `self` inside a method
+function is_self(word t) -> bool
+    return cur_fn ~= 0 and sstruct[cur_fn] ~= 0 and text_is(t, "self")
+end
+
+-- a parameter holding an address (strings and structs are passed by reference)
+function is_ref_param(word s) -> bool
+    return sk[s] == SK_PARAM and (sty[s] == TY_STR or is_struct(sty[s]))
 end
 
 function new_sym(byte kind, word name, byte ty) -> word
@@ -377,6 +464,7 @@ function new_sym(byte kind, word name, byte ty) -> word
     sv2[s] = 0
     spage[s] = 0
     sbank[s] = 0
+    sstruct[s] = 0
     if name ~= 0 then
         word h = name_hash(name)
         snext[s] = shead[h]
@@ -402,6 +490,15 @@ function temp_str() -> word
     return t
 end
 
+-- the name part of function f's labels: `name`, or `Struct_name` for a method
+function o_fnname(word f)
+    if sstruct[f] ~= 0 then
+        otok(st_name[sstruct[f] - 1])
+        ob('_')
+    end
+    otok(sname[f])
+end
+
 -- the label of symbol s
 function olab(word s)
     byte k = sk[s]
@@ -409,16 +506,16 @@ function olab(word s)
         os("g_")
         otok(sname[s])
     elseif k == SK_FUNC then
-        os("f_")
-        otok(sname[s])
+        if sstruct[s] ~= 0 then os("m_") else os("f_") end
+        o_fnname(s)
     elseif k == SK_PARAM then
         os("p_")
-        otok(sname[sown[s]])
+        o_fnname(sown[s])
         ob('_')
-        otok(sname[s])
+        if sname[s] == 0 then os("self") else otok(sname[s]) end
     else
         os("l_")
-        if sown[s] == 0 then os("main") else otok(sname[sown[s]]) end
+        if sown[s] == 0 then os("main") else o_fnname(sown[s]) end
         ob('_')
         if sname[s] == 0 then os("_t") else otok(sname[s]) end
         ob('_')
@@ -458,10 +555,10 @@ function jp(string how, word n)
 end
 
 -- string literals: zero-terminated s_N (print) and length-prefixed ps_N (values)
-const MAXSTR = 1000
-far word strs[1000]
+const MAXSTR = 3000
+far word strs[3000]
 word nstrs = 0
-far word pstrs[1000]
+far word pstrs[3000]
 word npstrs = 0
 
 function str_label(word tok) -> word
@@ -591,15 +688,24 @@ function nat(word e) -> byte
     if k == E_BOOL then return TY_BOOL end
     if k == E_STR then return TY_STR end
     if k == E_NAME then
+        if is_self(n1[e]) then return TY_STRUCT + sstruct[cur_fn] - 1 end
         word s = lookup(n1[e])
         if s == 0 or sk[s] == SK_CONST then return TY_NONE end
         return sty[s]
     end
     if k == E_INDEX then
         if is_hw(e) ~= 0 then return TY_BYTE end
-        word s = lookup(n1[n1[e]])
-        if s == 0 then return TY_NONE end
-        return sty[s]
+        if place_type(e) then return pt_ty end
+        return TY_NONE
+    end
+    if k == E_FIELD then
+        if place_type(e) then return pt_ty end
+        return TY_NONE
+    end
+    if k == E_METHOD then
+        word f = resolve_method(e)
+        if f == 0 then return TY_NONE end
+        return sty[f]
     end
     if k == E_UNARY then
         if nf[e] == 1 then return TY_BOOL end
@@ -621,6 +727,8 @@ function nat(word e) -> byte
         if text_is(name, "addr") then return TY_WORD end
         word s = lookup(name)
         if s ~= 0 and sk[s] == SK_FUNC then return sty[s] end
+        byte sk_ = struct_by_name(name)
+        if sk_ ~= 255 and s == 0 then return TY_STRUCT + sk_ end
         if text_isx(name, "p|oint") or text_is(name, "kempston") then return TY_BYTE end
         if text_isx(name, "l|ayer2_width") or text_isx(name, "l|ayer2_height") or text_is(name, "frames") or text_is(name, "random") then return TY_WORD end
         if text_is(name, "key") or text_is(name, "any_key") then return TY_BOOL end
@@ -731,7 +839,7 @@ end
 -- store HL (DE:HL) into symbol s; a string parameter takes an address
 function store_sym(word s)
     byte t = sty[s]
-    if t == TY_STR then
+    if t == TY_STR or is_struct(t) then
         o_ins_lab("ld (", s, "),hl")
     elseif tsize(t) == 1 then
         oi("ld a,l")
@@ -866,48 +974,177 @@ function gen_hw_write(word target, word value, byte hw, byte op)
     oi("out (c),a")
 end
 
--- address of element e (an E_INDEX) in HL; its element type in elem_ty.
+
 -- A far element is mapped into MMU slot 1 last (after the index).
-byte elem_ty
-function gen_addr(word e)
-    word base = n1[e]
-    if nk[base] ~= E_NAME then
-        unsupported(e, "indexing anything but an array variable")
-        return
+-- what gen_place would give, without code: pt_ty, pt_len (array: count)
+byte pt_ty
+word pt_len
+function place_type(word e) -> bool
+    byte k = nk[e]
+    if k == E_NAME then
+        if is_self(n1[e]) then
+            pt_ty = TY_STRUCT + sstruct[cur_fn] - 1
+            pt_len = 0
+            return true
+        end
+        word s = lookup(n1[e])
+        if s == 0 or sk[s] == SK_CONST or sk[s] == SK_FUNC then return false end
+        pt_ty = sty[s]
+        pt_len = slen[s]
+        return true
     end
-    if is_hw(e) == 1 then
-        gen(n2[e], 2, false)
-        elem_ty = TY_BYTE
-        return
+    if k == E_INDEX then
+        if is_hw(e) ~= 0 then
+            pt_ty = TY_BYTE
+            pt_len = 0
+            return true
+        end
+        if not place_type(n1[e]) or pt_len == 0 then return false end
+        pt_len = 0
+        return true
     end
-    word s = var_sym(base, n1[base])
-    if s == 0 then return end
-    if slen[s] == 0 then
-        if fail_node(e) then msg("not an array") end
-        return
+    if k == E_FIELD then
+        if not place_type(n1[e]) or not is_struct(pt_ty) or pt_len ~= 0 then return false end
+        word f = field_find(pt_ty - TY_STRUCT, n2[e])
+        if f == 0 then return false end
+        pt_ty = fd_ty[f]
+        pt_len = fd_len[f]
+        return true
     end
-    byte t = sty[s]
-    gen(n2[e], 2, false)
-    elem_ty = t
-    if t == TY_STR then
-        oi("ld de,65")
-        oi("call rt_mul16")
-    elseif tsize(t) == 2 then
-        oi("add hl,hl")
-    elseif tsize(t) == 4 then
-        oi("add hl,hl")
-        oi("add hl,hl")
+    if k == E_CALL or k == E_METHOD then
+        byte t = nat(e)
+        if is_struct(t) then
+            pt_ty = t
+            pt_len = 0
+            return true
+        end
     end
-    if spage[s] ~= 0 then
-        os("    ld a,")
-        odec(spage[s])
-        onl()
-        oi("call rt_far_map")
-        return
-    end
-    o_ins_lab("ld de,", s, "")
-    oi("add hl,de")
+    return false
 end
+
+-- HL = element index * size of t
+function scale(byte t)
+    word sz = tstore(t)
+    if sz == 1 then return end
+    if sz == 2 then
+        oi("add hl,hl")
+    elseif sz == 4 then
+        oi("add hl,hl")
+        oi("add hl,hl")
+    else
+        os("    ld de,")
+        odec(sz)
+        onl()
+        oi("call rt_mul16")
+    end
+end
+
+-- the address of a variable, element or field in HL; its type in pl_ty,
+-- its element count in pl_len (0 = not an array). A far element is mapped
+-- into MMU slot 1 last.
+byte pl_ty
+word pl_len
+function gen_place(word e)
+    if failed then return end
+    byte k = nk[e]
+    if k == E_NAME then
+        if is_self(n1[e]) then
+            o_ins_lab("ld hl,(", cur_fn + 1, ")")
+            pl_ty = TY_STRUCT + sstruct[cur_fn] - 1
+            pl_len = 0
+            return
+        end
+        word s = var_sym(e, n1[e])
+        if s == 0 then return end
+        if sk[s] == SK_CONST or spage[s] ~= 0 then
+            if fail_node(e) then msg("this has no address") end
+            return
+        end
+        pl_ty = sty[s]
+        pl_len = slen[s]
+        if is_ref_param(s) then o_ins_lab("ld hl,(", s, ")") else o_ins_lab("ld hl,", s, "") end
+        return
+    end
+    if k == E_INDEX then
+        byte hw = is_hw(e)
+        if hw == 1 then
+            gen(n2[e], 2, false)
+            pl_ty = TY_BYTE
+            pl_len = 0
+            return
+        end
+        if hw >= 2 then
+            if fail_node(e) then msg("registers and ports have no address") end
+            return
+        end
+        word base = n1[e]
+        if nk[base] == E_NAME and not is_self(n1[base]) then
+            word s = lookup(n1[base])
+            if s ~= 0 and spage[s] ~= 0 then
+                gen(n2[e], 2, false)
+                scale(sty[s])
+                os("    ld a,")
+                odec(spage[s])
+                onl()
+                oi("call rt_far_map")
+                pl_ty = sty[s]
+                pl_len = 0
+                return
+            end
+        end
+        if not place_type(base) or pt_len == 0 then
+            if fail_node(e) then msg("not an array") end
+            return
+        end
+        byte et = pt_ty
+        gen(n2[e], 2, false)
+        scale(et)
+        oi("push hl")
+        gen_place(base)
+        oi("pop de")
+        oi("add hl,de")
+        pl_ty = et
+        pl_len = 0
+        return
+    end
+    if k == E_FIELD then
+        gen_place(n1[e])
+        if failed then return end
+        if not is_struct(pl_ty) or pl_len ~= 0 then
+            if fail_node(e) then msg("not a struct") end
+            return
+        end
+        word f = field_find(pl_ty - TY_STRUCT, n2[e])
+        if f == 0 then
+            if fail_node(e) then
+                msg("no field `")
+                msg_text(n2[e])
+                msg("`")
+            end
+            return
+        end
+        if fd_off[f] ~= 0 then
+            os("    ld de,")
+            odec(fd_off[f])
+            onl()
+            oi("add hl,de")
+        end
+        pl_ty = fd_ty[f]
+        pl_len = fd_len[f]
+        return
+    end
+    if k == E_CALL or k == E_METHOD then
+        byte t = nat(e)
+        if is_struct(t) then
+            gen_struct_value(e, t)
+            pl_ty = t
+            pl_len = 0
+            return
+        end
+    end
+    if fail_node(e) then msg("not a variable") end
+end
+
 
 -- load the value at HL (element type t) into HL / DE:HL
 function load_at_hl(byte t)
@@ -1123,7 +1360,7 @@ function gen(word e, byte w, bool sg)
         if s == 0 then return end
         if sk[s] == SK_CONST then
             load_const(const_value(s), w, sg)
-        elseif slen[s] ~= 0 or sty[s] == TY_STR then
+        elseif slen[s] ~= 0 or sty[s] == TY_STR or is_struct(sty[s]) then
             if fail_node(e) then msg("not a number") end
         else
             load_sym(s)
@@ -1134,13 +1371,27 @@ function gen(word e, byte w, bool sg)
             gen_hw_read(e, hw)
             return
         end
-        gen_addr(e)
+        gen_place(e)
         if failed then return end
-        if elem_ty == TY_STR then
+        if pl_ty == TY_STR or is_struct(pl_ty) or pl_len ~= 0 then
             if fail_node(e) then msg("not a number") end
             return
         end
-        load_at_hl(elem_ty)
+        load_at_hl(pl_ty)
+    elseif k == E_FIELD then
+        gen_place(e)
+        if failed then return end
+        if pl_ty == TY_STR or is_struct(pl_ty) or pl_len ~= 0 then
+            if fail_node(e) then msg("not a number") end
+            return
+        end
+        load_at_hl(pl_ty)
+    elseif k == E_METHOD then
+        gen_method_call(e)
+        word f = resolve_method(e)
+        if f ~= 0 and sty[f] ~= TY_NONE and not is_struct(sty[f]) and sty[f] ~= TY_STR then
+            if tsize(sty[f]) == 1 then extend_a(sty[f]) end
+        end
     elseif k == E_UNARY then
         byte op = nf[e]
         if op == 1 then
@@ -1215,9 +1466,11 @@ function gen32(word e)
     if t == TY_LONG then
         if k == E_NAME then
             load_sym(lookup(n1[e]))
-        elseif k == E_INDEX then
-            gen_addr(e)
+        elseif k == E_INDEX or k == E_FIELD then
+            gen_place(e)
             load_at_hl(TY_LONG)
+        elseif k == E_METHOD then
+            gen_method_call(e)
         elseif k == E_UNARY then
             gen32(n1[e])
             if nf[e] == 0 then oi("call rt_neg32") else oi("call rt_cpl32") end
@@ -1289,25 +1542,16 @@ function gen_str(word e)
         onl()
         return
     end
-    if k == E_NAME then
-        word s = var_sym(e, n1[e])
-        if s == 0 then return end
-        if sty[s] ~= TY_STR or slen[s] ~= 0 then
+    if k == E_NAME or k == E_INDEX or k == E_FIELD then
+        gen_place(e)
+        if failed then return end
+        if pl_ty ~= TY_STR or pl_len ~= 0 then
             if fail_node(e) then msg("not a string") end
-            return
-        end
-        if sk[s] == SK_PARAM then
-            o_ins_lab("ld hl,(", s, ")")
-        else
-            o_ins_lab("ld hl,", s, "")
         end
         return
     end
-    if k == E_INDEX then
-        gen_addr(e)
-        if elem_ty ~= TY_STR then
-            if fail_node(e) then msg("not a string") end
-        end
+    if k == E_METHOD then
+        gen_method_call(e)
         return
     end
     word t = 0
@@ -1339,6 +1583,11 @@ function gen_str(word e)
             o_ins_lab("ld (", t, "),a")
             str_add(t, n2[e])
             o_ins_lab("ld hl,", t, "")
+            return
+        end
+        word f = lookup(name)
+        if f ~= 0 and sk[f] == SK_FUNC and sty[f] == TY_STR then
+            call_func(e, f, n2[e])
             return
         end
         unsupported(e, "this string function")
@@ -1665,25 +1914,583 @@ end
 
 -- addr(x): a variable, an array or an element
 function gen_address_of(word a)
-    if nk[a] == E_INDEX then
-        gen_addr(a)
+    if nk[a] == E_NAME and not is_self(n1[a]) then
+        word s = lookup(n1[a])
+        if s ~= 0 and (sk[s] == SK_CONST or spage[s] ~= 0) then
+            unsupported(a, "addr() of this")
+            return
+        end
+    end
+    gen_place(a)
+end
+
+-- ---- structs: values, constructors, methods
+
+-- is struct a the struct b or derived from it?
+function is_sub(byte a, byte b) -> bool
+    while a ~= 255 do
+        if a == b then return true end
+        a = st_parent[a]
+    end
+    return false
+end
+
+function not_a(word e, byte a, byte b)
+    if fail_node(e) then
+        msg("a `")
+        msg_text(st_name[a])
+        msg("` is not a `")
+        msg_text(st_name[b])
+        msg("`")
+    end
+end
+
+-- `Type(args)`: a constructor call
+function is_ctor(word e) -> bool
+    if nk[e] ~= E_CALL or struct_by_name(n1[e]) == 255 then return false end
+    word f = lookup(n1[e])
+    return f == 0 or sk[f] ~= SK_FUNC
+end
+
+-- a value that is made rather than read: a `{...}` list, a constructor or
+-- a call returning a struct
+function is_maker(word e) -> bool
+    byte k = nk[e]
+    if k == E_LIST then return true end
+    return (k == E_CALL or k == E_METHOD) and is_struct(nat(e))
+end
+
+function add_off(word off)
+    if off == 0 then return end
+    os("    ld de,")
+    odec(off)
+    onl()
+    oi("add hl,de")
+end
+
+function o_sd(byte k)
+    os("sd_")
+    otok(st_name[k])
+end
+
+-- the return buffer of function f (strings, structs)
+function o_ret(string ins, word f)
+    os("    ")
+    os(ins)
+    os("r_")
+    o_fnname(f)
+    onl()
+end
+
+-- copy `size` bytes from HL to DE (nothing for 0)
+function o_ldir(word size)
+    if size == 0 then return end
+    os("    ld bc,")
+    odec(size)
+    onl()
+    oi("ldir")
+end
+
+-- DE = destination: copy the default image of struct k there
+function copy_image(byte k)
+    os("    ld hl,")
+    o_sd(k)
+    onl()
+    o_ldir(st_size[k])
+end
+
+-- a hidden word local holding HL (a destination address)
+function hold_hl() -> word
+    word d = new_local(0, TY_WORD)
+    sdead[d] = 1
+    o_ins_lab("ld (", d, "),hl")
+    return d
+end
+
+-- the value `item` into the element of type t at (d) + off
+function elem_store(byte t, word d, word off, word item)
+    if failed then return end
+    if is_struct(t) then
+        o_ins_lab("ld hl,(", d, ")")
+        add_off(off)
+        struct_into_hl(t, item)
         return
     end
-    if nk[a] ~= E_NAME then
-        unsupported(a, "addr() of this")
+    if t == TY_STR then
+        gen_str(item)
+        oi("push hl")
+        o_ins_lab("ld hl,(", d, ")")
+        add_off(off)
+        oi("ex de,hl")
+        oi("pop hl")
+        oi("call rt_scopy")
         return
     end
-    word s = var_sym(a, n1[a])
-    if s == 0 then return end
-    if sk[s] == SK_CONST or spage[s] ~= 0 then
-        unsupported(a, "addr() of this")
+    if nk[item] == E_LIST then
+        if fail_node(item) then msg("a list for a field that is not a struct or an array") end
         return
     end
-    if sk[s] == SK_PARAM and sty[s] == TY_STR then
-        o_ins_lab("ld hl,(", s, ")")
+    gen_for(item, t)
+    push_val(t)
+    o_ins_lab("ld hl,(", d, ")")
+    add_off(off)
+    store_at_hl(t)
+end
+
+-- values to the fields of struct k (at the address in d), in order
+function fill_fields(word e, byte k, word d, word items)
+    word n = 0
+    word it = items
+    while it ~= 0 and not failed do
+        if n >= st_nf[k] then
+            if fail_node(e) then
+                msg("`")
+                msg_text(st_name[k])
+                msg("` has ")
+                msg_dec(0, st_nf[k])
+                msg(" fields (or give it an `init` method)")
+            end
+            return
+        end
+        word x = st_ff[k] + n
+        if fd_len[x] ~= 0 then
+            if nk[it] ~= E_LIST then
+                if fail_node(it) then
+                    msg("field `")
+                    msg_text(fd_name[x])
+                    msg("` is an array: give it a `{...}` list")
+                end
+                return
+            end
+            word el = n1[it]
+            word j = 0
+            word esz = tstore(fd_ty[x])
+            while el ~= 0 and not failed do
+                if j >= fd_len[x] then
+                    if fail_node(el) then msg("too many values for this array field") end
+                    return
+                end
+                elem_store(fd_ty[x], d, fd_off[x] + j * esz, el)
+                el = nx[el]
+                j += 1
+            end
+        else
+            elem_store(fd_ty[x], d, fd_off[x], it)
+        end
+        it = nx[it]
+        n += 1
+    end
+end
+
+-- self for the next call_args: 0 none, 1 the object node ps_val,
+-- 2 the current self, 3 the word in symbol ps_val
+byte ps_kind = 0
+word ps_val = 0
+
+-- `Type(args)` built at the address in HL: the defaults, then `init(args)`
+-- if the class has one, else the arguments to the fields in order
+function construct(word e, byte k)
+    word d = hold_hl()
+    oi("ex de,hl")
+    copy_image(k)
+    word f = st_init[k]
+    if f ~= 0 then
+        ps_kind = 3
+        ps_val = d
+        call_func(e, f, n2[e])
         return
     end
-    o_ins_lab("ld hl,", s, "")
+    fill_fields(e, k, d, n2[e])
+end
+
+-- the struct value v (of type t, or derived) into the struct at the
+-- address in HL; v may not use that struct (see assign)
+function struct_into_hl(byte t, word v)
+    if failed then return end
+    byte k = t - TY_STRUCT
+    if nk[v] == E_LIST then
+        word d = hold_hl()
+        oi("ex de,hl")
+        copy_image(k)
+        fill_fields(v, k, d, n1[v])
+        return
+    end
+    if is_ctor(v) then
+        byte ck = struct_by_name(n1[v])
+        if not is_sub(ck, k) then
+            not_a(v, ck, k)
+            return
+        end
+        if ck == k then
+            construct(v, k)
+            return
+        end
+        -- a derived class into a base: built aside, its base part copied
+        oi("push hl")
+        word tmp = new_local(0, TY_STRUCT + ck)
+        sdead[tmp] = 1
+        o_ins_lab("ld hl,", tmp, "")
+        construct(v, ck)
+        o_ins_lab("ld hl,", tmp, "")
+        oi("pop de")
+        o_ldir(st_size[k])
+        return
+    end
+    if not place_type(v) or not is_struct(pt_ty) or pt_len ~= 0 then
+        if fail_node(v) then
+            msg("expected a `")
+            msg_text(st_name[k])
+            msg("` value")
+        end
+        return
+    end
+    if not is_sub(pt_ty - TY_STRUCT, k) then
+        not_a(v, pt_ty - TY_STRUCT, k)
+        return
+    end
+    oi("push hl")
+    gen_place(v)
+    oi("pop de")
+    o_ldir(st_size[k])
+end
+
+-- the address of a struct argument for a parameter of type t (a made value:
+-- built in a hidden local first)
+function gen_struct_arg(word a, byte t)
+    if is_maker(a) then
+        word tmp = new_local(0, t)
+        sdead[tmp] = 1
+        o_ins_lab("ld hl,", tmp, "")
+        struct_into_hl(t, a)
+        o_ins_lab("ld hl,", tmp, "")
+        return
+    end
+    if not place_type(a) or not is_struct(pt_ty) or pt_len ~= 0 then
+        if fail_node(a) then
+            msg("expected a `")
+            msg_text(st_name[t - TY_STRUCT])
+            msg("` value")
+        end
+        return
+    end
+    if not is_sub(pt_ty - TY_STRUCT, t - TY_STRUCT) then
+        not_a(a, pt_ty - TY_STRUCT, t - TY_STRUCT)
+        return
+    end
+    gen_place(a)
+end
+
+-- a call or constructor making a struct: its address in HL
+function gen_struct_value(word e, byte t)
+    if is_ctor(e) then
+        word tmp = new_local(0, t)
+        sdead[tmp] = 1
+        o_ins_lab("ld hl,", tmp, "")
+        struct_into_hl(t, e)
+        o_ins_lab("ld hl,", tmp, "")
+        return
+    end
+    if nk[e] == E_METHOD then
+        gen_method_call(e)
+        return
+    end
+    call_func(e, lookup(n1[e]), n2[e])  -- HL = its return buffer
+end
+
+-- the method an E_METHOD calls (0: none); how self is given in rm_kind:
+-- 1 the object, 2 the current self (`super`), 0 the first argument (`Type.m(obj)`)
+byte rm_kind = 0
+function resolve_method(word e) -> word
+    word obj = n1[e]
+    word name = n2[e]
+    if nk[obj] == E_NAME and not is_self(n1[obj]) and lookup(n1[obj]) == 0 then
+        if text_is(n1[obj], "super") then
+            if cur_fn == 0 or sstruct[cur_fn] == 0 then return 0 end
+            byte p = st_parent[sstruct[cur_fn] - 1]
+            if p == 255 then return 0 end
+            rm_kind = 2
+            return method_find(p, name)
+        end
+        byte k = struct_by_name(n1[obj])
+        if k == 255 then return 0 end
+        rm_kind = 0
+        return method_find(k, name)
+    end
+    if not place_type(obj) or not is_struct(pt_ty) or pt_len ~= 0 then return 0 end
+    byte k = pt_ty - TY_STRUCT
+    rm_kind = 1
+    return method_find(k, name)
+end
+
+-- a method call (the value in A / HL / DE:HL as for a function)
+function gen_method_call(word e)
+    if failed then return end
+    word f = resolve_method(e)
+    if f == 0 then
+        if fail_node(e) then
+            msg("no method `")
+            msg_text(n2[e])
+            msg("` for this")
+        end
+        return
+    end
+    ps_kind = rm_kind
+    ps_val = n1[e]
+    call_func(e, f, n3[e])
+end
+
+-- an array or a single struct variable: defaults, then the initializer
+function declare_struct_var(word v, word init)
+    byte ty = sty[v]
+    byte k = ty - TY_STRUCT
+    word n = slen[v]
+    word size = st_size[k]
+    if has_defaults(k) then
+        o_ins_lab("ld de,", v, "")
+        if n <= 1 then
+            copy_image(k)
+        else
+            os("    ld hl,")
+            odec(n)
+            onl()
+            word lp = new_label()
+            label(lp)
+            oi("push hl")
+            copy_image(k)
+            oi("pop hl")
+            oi("dec hl")
+            oi("ld a,h")
+            oi("or l")
+            jp("jp nz,", lp)
+        end
+    end
+    if init == 0 then return end
+    if n == 0 then
+        o_ins_lab("ld hl,", v, "")
+        struct_into_hl(ty, init)
+        return
+    end
+    if nk[init] ~= E_LIST then
+        if fail_node(init) then msg("an array of structs takes a `{...}` list") end
+        return
+    end
+    word item = n1[init]
+    word i = 0
+    while item ~= 0 and not failed do
+        if i >= n then
+            if fail_node(item) then msg("too many values for this array") end
+            return
+        end
+        o_ins_lab("ld hl,", v, "")
+        add_off(i * size)
+        struct_into_hl(ty, item)
+        item = nx[item]
+        i += 1
+    end
+end
+
+-- the default image of struct k (data)
+function out_image(byte k)
+    word f = st_ff[k]
+    word n = 0
+    while n < st_nf[k] do
+        word x = f + n
+        byte t = fd_ty[x]
+        word cnt = fd_len[x]
+        if cnt == 0 then cnt = 1 end
+        if is_struct(t) then
+            word j = 0
+            while j < cnt do
+                out_image(t - TY_STRUCT)
+                j += 1
+            end
+        elseif fd_hasdef[x] ~= 0 then
+            os("    db ")
+            word v = fd_defl[x]
+            odec(v & 255)
+            if tsize(t) >= 2 then
+                ob(',')
+                odec(v >> 8)
+            end
+            if tsize(t) == 4 then
+                ob(',')
+                odec(fd_defh[x] & 255)
+                ob(',')
+                odec(fd_defh[x] >> 8)
+            end
+            onl()
+        else
+            os("    ds ")
+            odec(cnt * tstore(t))
+            onl()
+        end
+        n += 1
+    end
+end
+
+-- a struct declaration: its fields (the parent's first)
+function declare_struct(word it)
+    word name = n1[it]
+    if nstructs >= MAXSTRUCT then
+        if fail_node(it) then msg("too many structs") end
+        return
+    end
+    if struct_by_name(name) ~= 255 or lookup(name) ~= 0 then
+        if fail_node(it) then
+            msg("`")
+            msg_text(name)
+            msg("` is already defined")
+        end
+        return
+    end
+    byte k = nstructs
+    st_name[k] = name
+    st_parent[k] = 255
+    st_ff[k] = nfields + 1
+    st_nf[k] = 0
+    st_init[k] = 0
+    long off = 0
+    if n2[it] ~= 0 then
+        byte p = struct_by_name(n2[it])
+        if p == 255 then
+            if fail_node(it) then
+                msg("unknown parent class `")
+                msg_text(n2[it])
+                msg("` (declare it first)")
+            end
+            return
+        end
+        st_parent[k] = p
+        word i = 0
+        while i < st_nf[p] do
+            if nfields >= MAXFIELD - 1 then
+                if fail_node(it) then msg("too many fields") end
+                return
+            end
+            word a = st_ff[p] + i
+            nfields += 1
+            fd_name[nfields] = fd_name[a]
+            fd_ty[nfields] = fd_ty[a]
+            fd_len[nfields] = fd_len[a]
+            fd_off[nfields] = fd_off[a]
+            fd_hasdef[nfields] = fd_hasdef[a]
+            fd_defl[nfields] = fd_defl[a]
+            fd_defh[nfields] = fd_defh[a]
+            i += 1
+        end
+        st_nf[k] = st_nf[p]
+        off = st_size[p]
+    end
+    word fdn = n3[it]
+    while fdn ~= 0 do
+        if field_find(k, n1[fdn]) ~= 0 then
+            if fail_node(fdn) then
+                msg("duplicate field `")
+                msg_text(n1[fdn])
+                msg("`")
+            end
+            return
+        end
+        byte t = type_of(n2[fdn])
+        if t == TY_BAD then
+            unsupported(fdn, "this field type")
+            return
+        end
+        word cnt = 0
+        word size = n3[fdn]
+        if size ~= 0 then
+            if nk[size] == E_LIST then
+                unsupported(fdn, "array fields of more than one dimension")
+                return
+            end
+            if not const_eval(size) or cv < 1 or cv > 65535 then
+                if fail_node(size) then msg("an array size must be a constant 1..65535") end
+                return
+            end
+            cnt = word(cv)
+        end
+        if nfields >= MAXFIELD - 1 then
+            if fail_node(it) then msg("too many fields") end
+            return
+        end
+        nfields += 1
+        fd_name[nfields] = n1[fdn]
+        fd_ty[nfields] = t
+        fd_len[nfields] = cnt
+        fd_off[nfields] = word(off)
+        fd_hasdef[nfields] = 0
+        fd_defl[nfields] = 0
+        fd_defh[nfields] = 0
+        if n4[fdn] ~= 0 then
+            if is_struct(t) or t == TY_STR or cnt ~= 0 then
+                if fail_node(n4[fdn]) then msg("only number fields can have a default") end
+                return
+            end
+            if not const_eval(n4[fdn]) then
+                if fail_node(n4[fdn]) then msg("field defaults must be compile-time constants") end
+                return
+            end
+            fd_hasdef[nfields] = 1
+            fd_defl[nfields] = word(cv)
+            fd_defh[nfields] = word(cv >> 16)
+        end
+        st_nf[k] += 1
+        long c = long(cnt)
+        if c == 0 then c = 1 end
+        off += c * tstore(t)
+        if off > 65535 then
+            if fail_node(it) then msg("struct too large") end
+            return
+        end
+        fdn = nx[fdn]
+    end
+    st_size[k] = word(off)
+    nstructs += 1
+end
+
+-- a function (k = 255) or a method of struct k
+function declare_func(word it, byte k)
+    word f = new_sym(SK_FUNC, n1[it], TY_NONE)
+    if f == 0 then return end
+    sv2[f] = it
+    byte np = 0
+    if k ~= 255 then
+        sstruct[f] = k + 1
+        if field_find(k, n1[it]) ~= 0 then
+            if fail_node(it) then
+                msg("method `")
+                msg_text(n1[it])
+                msg("` has the same name as a field")
+            end
+            return
+        end
+        word ps = new_sym(SK_PARAM, 0, TY_STRUCT + k)     -- self
+        sown[ps] = f
+        sdead[ps] = 1
+        np = 1
+    end
+    if n3[it] ~= 0 then
+        byte r = type_of(n3[it])
+        if r == TY_BAD then
+            unsupported(it, "this return type")
+            return
+        end
+        sty[f] = r
+    end
+    word p = n2[it]
+    while p ~= 0 do
+        byte pt = type_of(n2[p])
+        if pt == TY_BAD then
+            unsupported(p, "this parameter type")
+            return
+        end
+        word ps = new_sym(SK_PARAM, n1[p], pt)
+        sown[ps] = f
+        sdead[ps] = 1
+        np += 1
+        p = nx[p]
+    end
+    snp[f] = np
 end
 
 -- ---- call graph (for recursion)
@@ -1697,16 +2504,32 @@ word seen_mark = 0
 far word seen_at[8000]
 
 -- record the calls in the subtree of node n (a function's body) for f
+function add_edge(word f, word c)
+    if nedge >= MAXEDGE - 1 then return end
+    nedge += 1
+    eto[nedge] = c
+    enext[nedge] = efirst[f]
+    efirst[f] = nedge
+end
+
+-- record the calls in the subtree of node n (a function's body) for f
+-- (a method call: every method of that name; a constructor: its init)
 function collect_calls(word f, word n)
     while n ~= 0 do
         byte k = nk[n]
         if k == E_CALL then
             word c = lookup(n1[n])
-            if c ~= 0 and sk[c] == SK_FUNC and nedge < MAXEDGE - 1 then
-                nedge += 1
-                eto[nedge] = c
-                enext[nedge] = efirst[f]
-                efirst[f] = nedge
+            if c ~= 0 and sk[c] == SK_FUNC then
+                add_edge(f, c)
+            elseif c == 0 then
+                byte st = struct_by_name(n1[n])
+                if st ~= 255 and st_init[st] ~= 0 then add_edge(f, st_init[st]) end
+            end
+        elseif k == E_METHOD then
+            word m = shead[toff[n2[n]] & 1023]
+            while m ~= 0 do
+                if sk[m] == SK_FUNC and sstruct[m] ~= 0 and toff[sname[m]] == toff[n2[n]] then add_edge(f, m) end
+                m = snext[m]
             end
         end
         if k == E_INDEX or k == E_BINARY then
@@ -1769,7 +2592,7 @@ end
 -- frame label of function f: `fr_name` / `fr_name_end`
 function ofr(word f, bool at_end)
     os("fr_")
-    otok(sname[f])
+    o_fnname(f)
     if at_end then os("_end") end
 end
 
@@ -1833,32 +2656,61 @@ function call_func(word e, word f, word alist)
 end
 
 function call_args(word e, word f, word alist)
+    byte kind = ps_kind
+    word sv = ps_val
+    ps_kind = 0
     byte np = snp[f]
-    if count(alist) ~= np then
+    byte given = count(alist)
+    byte shown = np
+    if kind ~= 0 then
+        given += 1
+        shown -= 1
+    end
+    if given ~= np then
         if fail_node(e) then
             msg("`")
             msg_text(sname[f])
             msg("` expects ")
-            msg_dec(0, np)
+            msg_dec(0, shown)
             msg(" argument(s)")
         end
         return
     end
-    word a = alist
     byte i = 0
-    while a ~= 0 do
+    if kind ~= 0 then
+        if kind == 1 then
+            gen_struct_arg(sv, sty[f + 1])
+        elseif kind == 2 then
+            o_ins_lab("ld hl,(", cur_fn + 1, ")")
+        else
+            o_ins_lab("ld hl,(", sv, ")")
+        end
+        oi("push hl")
+        i = 1
+    end
+    word a = alist
+    while a ~= 0 and not failed do
         word p = f + 1 + i
         byte pt = sty[p]
-        gen_for(a, pt)
-        if pt == TY_STR then oi("push hl") else push_val(pt) end
+        if is_struct(pt) then
+            gen_struct_arg(a, pt)
+            oi("push hl")
+        elseif pt == TY_STR then
+            gen_str(a)
+            oi("push hl")
+        else
+            gen_for(a, pt)
+            push_val(pt)
+        end
         a = nx[a]
         i += 1
     end
+    if failed then return end
     while i > 0 do
         i -= 1
         word p = f + 1 + i
         oi("pop hl")
-        if sty[p] ~= TY_STR and tsize(sty[p]) == 4 then oi("pop de") end
+        if sty[p] ~= TY_STR and not is_struct(sty[p]) and tsize(sty[p]) == 4 then oi("pop de") end
         store_sym(p)
     end
     o_ins_lab("call ", f, "")
@@ -1963,7 +2815,8 @@ function declare_var(word s, bool top, bool far_)
         if far_ then
             long bytes = long(slen[v]) * tstore(ty)
             byte pages = byte((bytes + 8191) / 8192)
-            if init ~= 0 or ty == TY_STR or bytes > 65536 then
+            bool defs = is_struct(ty) and has_defaults(ty - TY_STRUCT)
+            if init ~= 0 or ty == TY_STR or bytes > 65536 or defs then
                 unsupported(s, "this far array")
                 return
             end
@@ -1972,6 +2825,10 @@ function declare_var(word s, bool top, bool far_)
         end
     end
     if pass_declare then return end
+    if is_struct(ty) then
+        if spage[v] == 0 then declare_struct_var(v, init) end
+        return
+    end
     if slen[v] ~= 0 then
         if init == 0 then return end
         if sk[v] == SK_GLOBAL and ty ~= TY_STR then
@@ -2021,7 +2878,7 @@ function declare_var(word s, bool top, bool far_)
     end
     if init ~= 0 then
         if nk[init] == E_LIST then
-            unsupported(init, "struct values")
+            if fail_node(init) then msg("a list for a variable that is not a struct or an array") end
             return
         end
         gen_for(init, ty)
@@ -2036,31 +2893,8 @@ function assign(word s)
     word target = n1[s]
     word value = n2[s]
     byte op = nf[s]
-    if nk[target] == E_NAME then
-        word v = var_sym(target, n1[target])
-        if v == 0 then return end
-        if sk[v] == SK_CONST or slen[v] ~= 0 then
-            if fail_node(s) then msg("cannot assign to this") end
-            return
-        end
-        if sty[v] == TY_STR then
-            if op ~= 0 then
-                if fail_node(s) then msg("strings take `=` only") end
-                return
-            end
-            assign_str_sym(v, value)
-            return
-        end
-        byte t = ctx_ty(sty[v], value)
-        if op == 0 then
-            gen(value, tsize(t), tsigned(t))
-        else
-            gen_op_assign(op - 1, target, value, sty[v])
-        end
-        store_sym(v)
-        return
-    end
-    if nk[target] == E_INDEX then
+    byte k = nk[target]
+    if k == E_INDEX then
         byte hw = is_hw(target)
         if hw >= 2 then
             byte o = 255
@@ -2068,36 +2902,77 @@ function assign(word s)
             gen_hw_write(target, value, hw, o)
             return
         end
-        byte ety = TY_BYTE
-        if hw == 0 then
-            word v = var_sym(n1[target], n1[n1[target]])
-            if v == 0 then return end
-            ety = sty[v]
-        end
-        if ety == TY_STR then
-            if op ~= 0 then
-                if fail_node(s) then msg("strings take `=` only") end
-                return
-            end
-            gen_str(value)
-            oi("push hl")
-            gen_addr(target)
-            oi("ex de,hl")
-            oi("pop hl")
-            oi("call rt_scopy")
-            return
-        end
-        if op == 0 then
-            gen_for(value, ety)
-        else
-            gen_op_assign(op - 1, target, value, ety)
-        end
-        push_val(ety)
-        gen_addr(target)
-        store_at_hl(ety)
+    end
+    if k ~= E_NAME and k ~= E_INDEX and k ~= E_FIELD then
+        unsupported(s, "assigning to this")
         return
     end
-    unsupported(s, "assigning to this")
+    if k == E_NAME and not is_self(n1[target]) then
+        word v = var_sym(target, n1[target])
+        if v == 0 then return end
+        if sk[v] == SK_CONST or slen[v] ~= 0 then
+            if fail_node(s) then msg("cannot assign to this") end
+            return
+        end
+        if sty[v] ~= TY_STR and not is_struct(sty[v]) then
+            byte t = ctx_ty(sty[v], value)
+            if op == 0 then
+                gen(value, tsize(t), tsigned(t))
+            else
+                gen_op_assign(op - 1, target, value, sty[v])
+            end
+            store_sym(v)
+            return
+        end
+    end
+    if not place_type(target) then
+        gen_place(target)       -- reports what is wrong
+        if not failed and fail_node(s) then msg("cannot assign to this") end
+        return
+    end
+    byte ety = pt_ty
+    if pt_len ~= 0 then
+        if fail_node(s) then msg("cannot assign to a whole array") end
+        return
+    end
+    if (ety == TY_STR or is_struct(ety)) and op ~= 0 then
+        if fail_node(s) then msg("this takes `=` only") end
+        return
+    end
+    if ety == TY_STR then
+        gen_str(value)
+        oi("push hl")
+        gen_place(target)
+        oi("ex de,hl")
+        oi("pop hl")
+        oi("call rt_scopy")
+        return
+    end
+    if is_struct(ety) then
+        if nk[value] == E_LIST or is_ctor(value) then
+            -- built aside first: the value may read the target (`v = {v.y, v.x}`)
+            word tmp = new_local(0, ety)
+            sdead[tmp] = 1
+            o_ins_lab("ld hl,", tmp, "")
+            struct_into_hl(ety, value)
+            gen_place(target)
+            oi("ex de,hl")
+            o_ins_lab("ld hl,", tmp, "")
+            o_ldir(st_size[ety - TY_STRUCT])
+            return
+        end
+        gen_place(target)
+        struct_into_hl(ety, value)
+        return
+    end
+    if op == 0 then
+        gen_for(value, ety)
+    else
+        gen_op_assign(op - 1, target, value, ety)
+    end
+    push_val(ety)
+    gen_place(target)
+    store_at_hl(ety)
 end
 
 -- target op= value: the new value in HL (DE:HL)
@@ -2287,7 +3162,7 @@ end
 
 function call_stmt(word e)
     if nk[e] == E_METHOD then
-        unsupported(e, "methods")
+        gen_method_call(e)
         return
     end
     word name = n1[e]
@@ -2343,11 +3218,18 @@ function cg_stmt(word s)
                 return
             end
             if r == TY_STR then
-                unsupported(s, "functions returning strings")
-                return
+                gen_str(n1[s])
+                o_ret("ld de,", cur_fn)
+                oi("call rt_scopy")
+                o_ret("ld hl,", cur_fn)
+            elseif is_struct(r) then
+                o_ret("ld hl,", cur_fn)
+                struct_into_hl(r, n1[s])
+                o_ret("ld hl,", cur_fn)
+            else
+                gen_for(n1[s], r)
+                if tsize(r) == 1 then oi("ld a,l") end
             end
-            gen_for(n1[s], r)
-            if tsize(r) == 1 then oi("ld a,l") end
         end
         oi("ret")
     elseif k == S_EXPR then
@@ -2386,47 +3268,50 @@ end
 -- first pass: functions, globals and constants (usable before their place)
 function declare_all()
     pass_declare = true
+    -- the struct types first (usable by everything else), with the
+    -- constants their sizes may use
     word it = prog_first
+    while it ~= 0 and not failed do
+        if nk[it] == I_STRUCT then declare_struct(it) end
+        if nk[it] == S_VAR and nf[it] ~= 0 and nk[n4[it]] ~= E_STR and const_eval(n4[it]) then declare_var(it, true, false) end
+        it = nx[it]
+    end
+    it = prog_first
     while it ~= 0 and not failed do
         byte k = nk[it]
         if k == I_FUNC then
-            word f = new_sym(SK_FUNC, n1[it], TY_NONE)
-            sv2[f] = it
-            if n3[it] ~= 0 then
-                byte r = type_of(n3[it])
-                if r == TY_BAD then
-                    unsupported(it, "this return type")
-                    return
-                end
-                sty[f] = r
+            declare_func(it, 255)
+        elseif k == I_STRUCT then
+            byte st = struct_by_name(n1[it])
+            word m = n4[it]
+            while m ~= 0 and not failed do
+                declare_func(m, st)
+                m = nx[m]
             end
-            word p = n2[it]
-            byte np = 0
-            while p ~= 0 do
-                byte pt = type_of(n2[p])
-                if pt == TY_BAD then
-                    unsupported(p, "this parameter type")
-                    return
-                end
-                word ps = new_sym(SK_PARAM, n1[p], pt)
-                sown[ps] = f
-                sdead[ps] = 1
-                np += 1
-                p = nx[p]
-            end
-            snp[f] = np
         elseif k == S_VAR then
             declare_var(it, true, false)
         elseif k == S_FAR then
             declare_var(n1[it], true, true)
-        elseif k == I_STRUCT then
-            unsupported(it, "structs and classes")
         elseif k == I_INTERRUPT then
             unsupported(it, "interrupts")
         elseif k == S_ASSET then
             unsupported(it, "assets")
         end
         it = nx[it]
+    end
+    if failed then return end
+    -- the init method of each class (its own, else its parent's)
+    word m = 1
+    while m <= nsy do
+        if sk[m] == SK_FUNC and sstruct[m] ~= 0 and text_is(sname[m], "init") then st_init[sstruct[m] - 1] = m end
+        m += 1
+    end
+    byte c = 0
+    while c < nstructs do
+        byte q = c
+        while st_init[q] == 0 and st_parent[q] ~= 255 do q = st_parent[q] end
+        st_init[c] = st_init[q]
+        c += 1
     end
     -- the call graph
     word f = 1
@@ -2463,9 +3348,15 @@ function global_data() -> word
             total += n * tstore(sty[s])
         end
         if sk[s] == SK_PARAM then
-            if sty[s] == TY_STR then total += 2 else total += tsize(sty[s]) end
+            if sty[s] == TY_STR or is_struct(sty[s]) then total += 2 else total += tsize(sty[s]) end
         end
+        if sk[s] == SK_FUNC and (sty[s] == TY_STR or is_struct(sty[s])) then total += tstore(sty[s]) end
         s += 1
+    end
+    byte k = 0
+    while k < nstructs do
+        total += st_size[k]
+        k += 1
     end
     return total
 end
@@ -2505,6 +3396,10 @@ function data_reserve() -> long
             total += 65
         elseif k == E_CALL and (text_is(n1[n], "chr") or text_is(n1[n], "str")) then
             total += 65
+        elseif k == E_CALL and struct_by_name(n1[n]) ~= 255 then
+            total += st_size[struct_by_name(n1[n])] + 2
+        elseif k == E_LIST then
+            total += 2
         elseif k == E_STR then
             total += tlen[n1[n]] + 2
         end
@@ -2586,9 +3481,9 @@ function data_sym(word s)
     word n = slen[s]
     if n == 0 then n = 1 end
     word init = 0
-    if k == SK_GLOBAL and slen[s] ~= 0 and sty[s] ~= TY_STR then init = sv2[s] end
-    byte esz = tstore(sty[s])
-    if k == SK_PARAM and sty[s] == TY_STR then esz = 2 end
+    if k == SK_GLOBAL and slen[s] ~= 0 and sty[s] ~= TY_STR and not is_struct(sty[s]) then init = sv2[s] end
+    word esz = tstore(sty[s])
+    if is_ref_param(s) then esz = 2 end
     if init == 0 then
         os(": ds ")
         odec(n * esz)
@@ -2683,7 +3578,7 @@ function generate()
         byte k = nk[it]
         if k == S_VAR then
             declare_var(it, true, false)
-        elseif k ~= I_FUNC then
+        elseif k ~= I_FUNC and k ~= I_STRUCT then
             cg_stmt(it)
         end
         it = nx[it]
@@ -2752,6 +3647,25 @@ function generate()
         i += 1
     end
     os("sh_ret: ds 4\nsh_reta: db 0\n")
+    -- the default images of the structs, the return buffers
+    byte sk2 = 0
+    while sk2 < nstructs do
+        o_sd(sk2)
+        os(":\n")
+        out_image(sk2)
+        sk2 += 1
+    end
+    word rf = 1
+    while rf <= nsy do
+        if sk[rf] == SK_FUNC and (sty[rf] == TY_STR or is_struct(sty[rf])) then
+            os("r_")
+            o_fnname(rf)
+            os(": ds ")
+            odec(tstore(sty[rf]))
+            onl()
+        end
+        rf += 1
+    end
     -- globals and the main program's locals
     word s = 1
     while s <= nsy and not failed do

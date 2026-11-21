@@ -4790,5 +4790,170 @@ print(frames() < 1000, kempston() & 0, key(KEY_A), random(1))
     }
 }
 
+/// Structs and classes (fields, defaults, methods, `self`, inheritance,
+/// `super`, struct arrays and values) and sprites compiled by the
+/// self-hosted compiler: the same output and sprite attributes as with lz80nc.
+#[test]
+fn selfhost_codegen_structs() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+struct Point
+    sword x
+    sword y
+end
+struct Rect
+    Point a
+    Point b
+    byte tag = 7
+    string name
+    word w[3]
+end
+Point p = {3, -4}
+Point q
+q = p
+q.x += 10
+print(p.x, p.y, q.x, q.y)
+Rect r
+print(r.tag, len(r.name))
+r = {{1, 2}, {30, 40}, 9, "box", {5, 6, 7}}
+print(r.a.x, r.b.y, r.tag, r.name, r.w[0] + r.w[1] + r.w[2])
+r.b = p
+r.name = r.name .. "!"
+print(r.b.x, r.b.y, r.name)
+Point pts[4]
+for i = 0, 3 do
+    pts[i].x = sword(i) * 10
+    pts[i].y = -sword(i)
+end
+sword sum = 0
+for i = 0, 3 do sum += pts[i].x + pts[i].y end
+print(sum, pts[2].x)
+p = {p.y, p.x}
+print(p.x, p.y)
+function swap(Point a) -> Point
+    return {a.y, a.x}
+end
+function area(Rect x) -> word
+    return word(x.b.x - x.a.x) * word(x.b.y - x.a.y)
+end
+Point s = swap(q)
+print(s.x, s.y, area(r), area({{0, 0}, {4, 5}}))
+function name_of(Rect x) -> string
+    return "R:" .. x.name
+end
+print(name_of(r), len(name_of(r)))
+"#,
+        r#"
+class Counter
+    word n = 100
+    byte step = 1
+    function bump()
+        self.n += self.step
+    end
+    function get() -> word
+        return self.n
+    end
+    function add(Counter other) -> word
+        return self.n + other.n
+    end
+end
+Counter c
+c.bump()
+c.bump()
+print(c.get(), c.n)
+Counter d = Counter(5, 2)
+d.bump()
+print(d.n, c.add(d), d.add(Counter(1, 1)))
+Counter many[3]
+many[1].bump()
+for i = 0, 2 do write(many[i].get(), " ") end
+print("")
+class Ball
+    word x
+    word y
+    sbyte dx = 1
+    function init(word px, word py)
+        self.x = px
+        self.y = py
+        self.dx = -1
+    end
+    function move()
+        self.x = word(sword(self.x) + self.dx)
+    end
+    function describe() -> string
+        return "ball " .. self.x .. "," .. self.y
+    end
+end
+Ball b = Ball(10, 20)
+b.move()
+print(b.describe(), b.dx)
+class Bouncy extends Ball
+    byte bounces
+    function move()
+        super.move()
+        self.bounces += 1
+    end
+    function fact(byte n) -> word
+        if n <= 1 then return 1 end
+        return word(n) * self.fact(n - 1)
+    end
+end
+Bouncy y = Bouncy(50, 60)
+y.move()
+y.move()
+Ball.move(y)
+print(y.x, y.y, y.bounces, y.describe(), y.fact(6))
+Ball copy = y
+print(copy.x, copy.dx)
+"#,
+        r#"
+for i = 0, 3 do
+    sprite[i].position(word(i) * 20 + 32, 100)
+    sprite[i].show(i)
+end
+sprite[1].mirror_x = true
+sprite[1].update()
+sprite[2].hide()
+sprite[3].scale = 1
+sprite[3].update()
+print(sprite[0].id, sprite[3].id, sprite[0].x, sprite[1].x, sprite[0].overlaps(sprite[1]), sprite[3].visible)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_st_{i}"), src, |_| {}).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let (got, scpu) = run_asm_cpu(&asm);
+        assert_eq!(got, want, "program {i}: output\n{src}");
+        assert_eq!(rcpu.sprite_attr, scpu.sprite_attr, "program {i}: sprite attributes");
+    }
+}
 
 
+
+
+/// Which examples the self-hosted compiler compiles (and assembles); a
+/// report, not a check: `cargo test --release selfhost_codegen_examples -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn selfhost_codegen_examples() {
+    let sh = SelfHost::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut names: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "lz80n"))
+        .collect();
+    names.sort();
+    for p in names {
+        let src = std::fs::read_to_string(&p).unwrap();
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        match sh.compile(&src) {
+            Ok(asm) => match crate::asm::assemble(&asm, std::path::Path::new(".")) {
+                Ok(_) => eprintln!("EXAMPLE ok {name}"),
+                Err(e) => eprintln!("EXAMPLE asm-error {name}: {}", e[0]),
+            },
+            Err(e) => eprintln!("EXAMPLE skip {name}: {e}"),
+        }
+    }
+}
