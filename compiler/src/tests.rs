@@ -27,7 +27,7 @@ fn sjasmplus() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Compile and assemble; checks sjasmplus accepts the generated code.
+/// Compile and assemble; checks the assembler accepts the generated code.
 fn assembles(name: &str, src: &str) {
     build(name, src);
 }
@@ -45,34 +45,20 @@ fn build_opts(name: &str, src: &str, bank_all: bool) -> Option<(Vec<u8>, HashMap
         Ok(a) => a,
         Err(e) => panic!("unexpected errors: {:?}", e.iter().map(|d| d.to_string()).collect::<Vec<_>>()),
     };
-    let sj = sjasmplus()?;
-    let dir = std::env::temp_dir().join(format!("lz80nc_test_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("t.asm"), &asm).unwrap();
-    let out = Command::new(sj)
-        .current_dir(&dir)
-        .args(["--nologo", "--msg=war", "--sym=t.sym", "t.asm"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success() && dir.join("t.nex").exists(),
-        "sjasmplus failed:\n{}{}\n--- asm ---\n{asm}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let mut syms = HashMap::new();
-    for line in std::fs::read_to_string(dir.join("t.sym")).unwrap().lines() {
-        if let Some((name, val)) = line.split_once(": EQU ") {
-            if let Ok(v) = u32::from_str_radix(val.trim().trim_start_matches("0x"), 16) {
-                syms.insert(name.trim().to_string(), v as u16);
-            }
-        }
-    }
-    Some((std::fs::read(dir.join("t.nex")).unwrap(), syms))
+    let _ = name;
+    let out = match crate::asm::assemble(&asm, &base) {
+        Ok(o) => o,
+        Err(e) => panic!(
+            "assembler failed:\n{}\n--- asm ---\n{asm}",
+            e.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
+        ),
+    };
+    let syms = out.symbols16();
+    let (_, nex) = out.nex.expect("no SAVENEX in the generated code");
+    Some((nex, syms))
 }
 
 /// Run a program in the test emulator and return everything it printed.
-/// Returns None when sjasmplus is not available.
 fn run_with(name: &str, src: &str, setup: impl FnOnce(&mut Cpu)) -> Option<(String, Cpu)> {
     run_opts(name, src, false, setup)
 }
@@ -106,7 +92,7 @@ fn run(name: &str, src: &str) -> Option<String> {
     run_with(name, src, |_| {}).map(|r| r.0)
 }
 
-/// Assert the printed output (skipped without sjasmplus).
+/// Assert the printed output.
 fn expect(name: &str, src: &str, want: &str) {
     if let Some(out) = run(name, src) {
         assert_eq!(out, want, "program:\n{src}");
@@ -829,12 +815,8 @@ fn example_sprites_behaviour() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/sprites.lz80n");
     let src = std::fs::read_to_string(&path).unwrap();
     let asm = crate::compile_with(&src, "t.nex", true, path.parent().unwrap()).unwrap();
-    let Some(sj) = sjasmplus() else { return };
-    let dir = std::env::temp_dir().join("lz80nc_test_ex_sprites_b");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("t.asm"), asm).unwrap();
-    assert!(Command::new(sj).current_dir(&dir).args(["--nologo", "t.asm"]).status().unwrap().success());
-    let mut cpu = load_nex(&std::fs::read(dir.join("t.nex")).unwrap()).unwrap();
+    let nex = crate::asm::assemble(&asm, path.parent().unwrap()).unwrap().nex.unwrap().1;
+    let mut cpu = load_nex(&nex).unwrap();
     let pos = |a: &[u8; 5]| ((a[0] as u16) | ((a[2] as u16 & 1) << 8), (a[1] as u16) | ((a[4] as u16 & 1) << 8));
     let mut frames = 0;
     let mut first = None;
@@ -3419,3 +3401,34 @@ fn run_plot_y_offset() {
         "7 8 9\n",
     );
 }
+
+/// The built-in assembler must produce exactly the NEX SjASMPlus makes, for
+/// every example (runs only where SjASMPlus is installed: SJASMPLUS or tools/).
+#[test]
+fn builtin_assembler_matches_sjasmplus() {
+    let Some(sj) = sjasmplus() else { return };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "lz80n") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(&path).unwrap();
+        let Ok(asm) = crate::compile_main(&src, Some(&path), "t.nex", true, &dir, false) else { continue };
+        let mine = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("{stem}: {}", e[0])).nex.unwrap().1;
+        let tmp = std::env::temp_dir().join(format!("lz80nc_cmp_{stem}"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("t.asm"), &asm).unwrap();
+        assert!(Command::new(&sj).current_dir(&tmp).args(["--nologo", "t.asm"]).status().unwrap().success());
+        let theirs = std::fs::read(tmp.join("t.nex")).unwrap();
+        assert_eq!(mine.len(), theirs.len(), "{stem}: NEX size differs");
+        if let Some(i) = (0..mine.len()).find(|&i| mine[i] != theirs[i]) {
+            panic!("{stem}: NEX differs at offset {i} (${i:X}): built-in {:02X}, sjasmplus {:02X}", mine[i], theirs[i]);
+        }
+        checked += 1;
+    }
+    assert!(checked > 10);
+}
+

@@ -1,7 +1,8 @@
 //! lz80nc — LZ80N compiler.
 //!
-//! Usage: lz80nc <input.lz80n> [-o out.nex] [-S] [--sjasmplus PATH]
+//! Usage: lz80nc <input.lz80n> [-o out.nex] [-S] [--sym] [--sjasmplus PATH]
 
+mod asm;
 mod assets;
 mod ast;
 mod codegen;
@@ -146,33 +147,67 @@ fn library_name_errors(prog: &ast::Program) -> Vec<diag::Diag> {
     out
 }
 
-fn find_sjasmplus(explicit: Option<PathBuf>) -> Option<PathBuf> {
-    if explicit.is_some() {
+/// `--sjasmplus auto`: $SJASMPLUS, next to lz80nc, tools/sjasmplus, the PATH.
+fn find_sjasmplus(explicit: PathBuf) -> PathBuf {
+    if explicit.as_os_str() != "auto" {
         return explicit;
     }
     if let Ok(p) = std::env::var("SJASMPLUS") {
-        return Some(p.into());
+        return p.into();
     }
-    let exe = std::env::current_exe().ok()?;
-    // release packages: sjasmplus next to lz80nc
     let name = if cfg!(windows) { "sjasmplus.exe" } else { "sjasmplus" };
-    if let Some(dir) = exe.parent() {
-        let cand = dir.join(name);
-        if cand.exists() {
-            return Some(cand);
+    if let Ok(exe) = std::env::current_exe() {
+        // release packages: sjasmplus next to lz80nc
+        if let Some(dir) = exe.parent() {
+            let cand = dir.join(name);
+            if cand.exists() {
+                return cand;
+            }
+        }
+        // tools/ folder next to the compiler workspace
+        for dir in exe.ancestors() {
+            let cand = dir.join("tools/sjasmplus/sjasmplus-1.24.0.win/sjasmplus.exe");
+            if cand.exists() {
+                return cand;
+            }
         }
     }
-    // tools/ folder next to the compiler workspace
-    for dir in exe.ancestors() {
-        let cand = dir.join("tools/sjasmplus/sjasmplus-1.24.0.win/sjasmplus.exe");
-        if cand.exists() {
-            return Some(cand);
-        }
-    }
-    Some(PathBuf::from("sjasmplus"))
+    PathBuf::from(name)
 }
 
-const USAGE: &str = "usage: lz80nc <input.lz80n> [-o out.nex] [-S] [-O0] [--bank-all] [--sjasmplus PATH]
+/// Assemble with the built-in assembler and write the NEX (and `.sym`).
+fn assemble_builtin(asm: &str, asm_path: &Path, nex: &Path, base_dir: &Path, sym: bool) -> ExitCode {
+    let out = match asm::assemble(asm, base_dir) {
+        Ok(o) => o,
+        Err(errs) => {
+            for e in &errs {
+                eprintln!("{}:{e}", asm_path.display());
+            }
+            eprintln!("{} assembler error(s)", errs.len());
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((_, bytes)) = &out.nex else {
+        eprintln!("{}: no SAVENEX in the assembly", asm_path.display());
+        return ExitCode::FAILURE;
+    };
+    if let Err(e) = std::fs::write(nex, bytes) {
+        eprintln!("{}: {e}", nex.display());
+        return ExitCode::FAILURE;
+    }
+    if sym {
+        let p = nex.with_extension("sym");
+        if let Err(e) = std::fs::write(&p, out.sym_file()) {
+            eprintln!("{}: {e}", p.display());
+            return ExitCode::FAILURE;
+        }
+        println!("wrote {}", p.display());
+    }
+    println!("wrote {}", nex.display());
+    ExitCode::SUCCESS
+}
+
+const USAGE: &str = "usage: lz80nc <input.lz80n> [-o out.nex] [-S] [-O0] [--bank-all] [--sym] [--sjasmplus PATH|auto]
        lz80nc --help | --version";
 
 const HELP: &str = "lz80nc — the LZ80N compiler: a Lua-like language for the ZX Spectrum Next
@@ -184,19 +219,21 @@ usage:
 
 options:
   -o FILE           the NEX to write (default: the input with a .nex extension);
-                    the assembly (.asm) and listing (.lst) go next to it
+                    the assembly (.asm) goes next to it
   -S                stop after writing the assembly (.asm), no NEX
   -O0               no peephole optimisation of the generated assembly
   --bank-all        every function in its own 8K code page (to try code banking;
                     normally only when the program does not fit in the 31K area)
-  --sjasmplus PATH  the SjASMPlus to assemble with (default: $SJASMPLUS, then the
-                    one next to lz80nc, then tools/sjasmplus, then the PATH)
+  --sym             also write a symbol file (.sym, sjasmplus format)
+  --sjasmplus PATH  assemble with an external SjASMPlus instead of the built-in
+                    assembler (writes a .lst listing too); `auto` = $SJASMPLUS,
+                    then the one next to lz80nc, then tools/sjasmplus, then the PATH
 
 `include` and `asset` paths (.png .bmp .wav .pt3 ...) are relative to the source
 file that names them.
 
 exit status: 0 = built, 1 = compile error (FILE:LINE:COL: error: message on stderr)
-             or SjASMPlus failed, 2 = bad usage";
+             or the assembler failed, 2 = bad usage";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -210,6 +247,7 @@ fn main() -> ExitCode {
     let mut sjasm = None;
     let mut optimize = true;
     let mut bank_all = false;
+    let mut sym = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" | "--sjasmplus" => {
@@ -227,6 +265,7 @@ fn main() -> ExitCode {
             "-S" => asm_only = true,
             "-O0" => optimize = false,
             "--bank-all" => bank_all = true,
+            "--sym" => sym = true,
             "-V" | "--version" => {
                 println!("lz80nc {}", env!("CARGO_PKG_VERSION"));
                 return ExitCode::SUCCESS;
@@ -285,7 +324,10 @@ fn main() -> ExitCode {
     if asm_only {
         return ExitCode::SUCCESS;
     }
-    let sj = find_sjasmplus(sjasm).unwrap();
+    let Some(sjasm) = sjasm else {
+        return assemble_builtin(&asm, &asm_path, &nex, &base_dir, sym);
+    };
+    let sj = find_sjasmplus(sjasm);
     let dir = asm_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let status = Command::new(&sj)
         .current_dir(dir)
