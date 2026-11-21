@@ -1,0 +1,1668 @@
+-- selfhost/codegen.lz80n - the LZ80N code generator, written in LZ80N
+--
+-- Reads tokens.bin (lexer.lz80n), parses it (parser_core.lz80n) and writes
+-- the Z80N assembly of the program to out.asm, ready for asm.lz80n. The
+-- runtime library comes from three files on the SD card: rt_start.asm
+-- (startup code), rt_lib.asm (runtime routines), rt_font.asm (text font);
+-- they are the texts of compiler/src/runtime.rs and font.rs. On an error
+-- codegen.err holds `error LINE:COL message`.
+--
+-- It is not a copy of compiler/src/codegen.rs: it makes simpler code (no
+-- optimisation), but the same labels (g_ p_ l_ f_ s_), the same calling
+-- convention and the same runtime, so `asm` blocks and the standard modules
+-- work unchanged. The test `selfhost_codegen_runs_like_rust` runs programs
+-- compiled both ways in the emulator and compares what they print.
+--
+-- Values are computed in HL. An expression is evaluated at a width (1 or 2
+-- bytes) and a signedness: the wider of its own type and the destination's
+-- (spec: "an operation is evaluated at the width of the destination").
+-- A 1-byte result is kept extended in HL (H = 0, or the sign of L).
+--
+-- This first version: bool, byte, sbyte, word, sword; constants; globals,
+-- locals and parameters; one-dimensional arrays; all integer operators;
+-- casts; if, while, for, break, return; functions, recursion included;
+-- print, write, memory[], asm. Not yet: string variables, fixed, long,
+-- structs, classes, far, assets, interrupts, built-in and library functions.
+--
+-- Recursion: parameters and locals have fixed addresses (static frames, as
+-- in codegen.rs). A call that can lead back to the calling function (found
+-- in the call graph) copies the caller's frame - the block fr_NAME ..
+-- fr_NAME_end - to the stack before the call and back after it.
+
+include "parser_core.lz80n"
+
+-- ---------------------------------------------------------------- output
+
+byte outh
+byte obuf[256]
+word olen = 0
+
+function flush()
+    if olen > 0 then
+        file_write(outh, addr(obuf), olen)
+        olen = 0
+    end
+end
+
+function ob(byte b)
+    obuf[olen] = b
+    olen += 1
+    if olen == 256 then flush() end
+end
+
+function os(string s)
+    byte n = len(s)
+    byte i = 0
+    while i < n do
+        ob(asc(s, i))
+        i += 1
+    end
+end
+
+function onl()
+    ob(10)
+end
+
+-- an instruction line
+function oi(string s)
+    os("    ")
+    os(s)
+    onl()
+end
+
+function otok(word t)
+    word i = 0
+    word o = toff[t]
+    while i < tlen[t] do
+        ob(tpool[o + i])
+        i += 1
+    end
+end
+
+function odec(word v)
+    dec32(0, v)
+    while ndig > 0 do
+        ndig -= 1
+        ob(digits[ndig])
+    end
+end
+
+-- copy a file from the SD card into the output
+function ocopy(string name)
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then
+        if fail_at(0, 0) then
+            msg("cannot open ")
+            msg(name)
+        end
+        return
+    end
+    word c = file_getc(h)
+    while c ~= FILE_EOF do
+        ob(byte(c))
+        c = file_getc(h)
+    end
+    file_close(h)
+end
+
+-- ---------------------------------------------------------------- errors
+
+function fail_node(word n) -> bool
+    return fail_at(nl[n], nc[n])
+end
+
+function unsupported(word n, string what)
+    if fail_node(n) then
+        msg("not supported by the self-hosted compiler yet: ")
+        msg(what)
+    end
+end
+
+-- ---------------------------------------------------------------- types
+
+const TY_NONE = 0           -- an untyped constant
+const TY_BOOL = 1
+const TY_BYTE = 2
+const TY_SBYTE = 3
+const TY_WORD = 4
+const TY_SWORD = 5
+const TY_STR = 9            -- a string literal
+const TY_BAD = 255
+
+function tsize(byte t) -> byte
+    if t >= TY_WORD and t <= TY_SWORD then return 2 end
+    return 1
+end
+
+function tsigned(byte t) -> bool
+    return t == TY_SBYTE or t == TY_SWORD
+end
+
+function make_ty(byte size, bool sg) -> byte
+    if size == 2 then
+        if sg then return TY_SWORD end
+        return TY_WORD
+    end
+    if sg then return TY_SBYTE end
+    return TY_BYTE
+end
+
+function join(byte a, byte b) -> byte
+    if a == TY_NONE then return b end
+    if b == TY_NONE then return a end
+    if a == TY_BOOL and b == TY_BOOL then return TY_BOOL end
+    byte sz = tsize(a)
+    if tsize(b) > sz then sz = tsize(b) end
+    return make_ty(sz, tsigned(a) or tsigned(b))
+end
+
+-- type of a type-name token, TY_BAD if it is none (or not supported)
+function type_of(word t) -> byte
+    if text_is(t, "bool") then return TY_BOOL end
+    if text_is(t, "byte") then return TY_BYTE end
+    if text_is(t, "sbyte") then return TY_SBYTE end
+    if text_is(t, "word") then return TY_WORD end
+    if text_is(t, "sword") then return TY_SWORD end
+    return TY_BAD
+end
+
+function lit_ty(long v) -> byte
+    if v >= 0 and v <= 255 then return TY_BYTE end
+    if v >= -128 and v < 0 then return TY_SBYTE end
+    if v >= 0 and v <= 65535 then return TY_WORD end
+    return TY_SWORD
+end
+
+-- ---------------------------------------------------------------- symbols
+
+const SK_GLOBAL = 1
+const SK_PARAM = 2
+const SK_LOCAL = 3
+const SK_CONST = 4
+const SK_FUNC = 5
+
+const MAXSY = 3000
+far byte sk[3000]           -- kind
+far byte sty[3000]          -- type (function: return type, TY_NONE = none)
+far word sname[3000]        -- name token
+far word sown[3000]         -- params / locals: the function symbol (0 = main)
+far word sid[3000]          -- locals: number; constants: value (low word)
+far word sv2[3000]          -- constants: value (high word); functions: node;
+                            -- global arrays: initializer list
+far word slen[3000]         -- arrays: element count (0 = scalar)
+far byte sdead[3000]        -- out of scope
+far byte snp[3000]          -- functions: number of parameters
+word nsy = 0
+word nlocal = 0             -- numbers for local labels
+word cur_fn = 0             -- function being compiled (0 = main program)
+
+function tok_eq(word a, word b) -> bool
+    if tlen[a] ~= tlen[b] then return false end
+    word oa = toff[a]
+    word ob2 = toff[b]
+    word i = 0
+    while i < tlen[a] do
+        if tpool[oa + i] ~= tpool[ob2 + i] then return false end
+        i += 1
+    end
+    return true
+end
+
+function lookup(word t) -> word
+    word s = nsy
+    while s > 0 do
+        if sdead[s] == 0 and tok_eq(sname[s], t) then return s end
+        s -= 1
+    end
+    return 0
+end
+
+function new_sym(byte kind, word name, byte ty) -> word
+    if nsy >= MAXSY - 1 then
+        if fail_tok(name) then msg("too many symbols") end
+        return 0
+    end
+    nsy += 1
+    word s = nsy
+    sk[s] = kind
+    sname[s] = name
+    sty[s] = ty
+    sown[s] = cur_fn
+    sdead[s] = 0
+    slen[s] = 0
+    sid[s] = 0
+    sv2[s] = 0
+    return s
+end
+
+-- the label of symbol s
+function olab(word s)
+    byte k = sk[s]
+    if k == SK_GLOBAL then
+        os("g_")
+        otok(sname[s])
+    elseif k == SK_FUNC then
+        os("f_")
+        otok(sname[s])
+    elseif k == SK_PARAM then
+        os("p_")
+        otok(sname[sown[s]])
+        ob('_')
+        otok(sname[s])
+    else
+        os("l_")
+        if sown[s] == 0 then os("main") else otok(sname[sown[s]]) end
+        ob('_')
+        otok(sname[s])
+        ob('_')
+        odec(sid[s])
+    end
+end
+
+function const_value(word s) -> long
+    return long(sv2[s]) << 16 | long(sid[s])
+end
+
+-- ---------------------------------------------------------------- labels
+
+word nlabel = 0
+
+function new_label() -> word
+    nlabel += 1
+    return nlabel
+end
+
+function oL(word n)
+    os("__L")
+    odec(n)
+end
+
+function label(word n)
+    oL(n)
+    ob(':')
+    onl()
+end
+
+function jp(string how, word n)
+    os("    ")
+    os(how)
+    oL(n)
+    onl()
+end
+
+-- string literals: their token numbers in order (s_0, s_1 ...)
+const MAXSTR = 1000
+far word strs[1000]
+word nstrs = 0
+
+function str_label(word tok) -> word
+    if nstrs >= MAXSTR then
+        if fail_tok(tok) then msg("too many string literals") end
+        return 0
+    end
+    strs[nstrs] = tok
+    nstrs += 1
+    return nstrs - 1
+end
+
+-- ---------------------------------------------------------------- constants
+
+long cv                     -- result of const_eval
+
+function lit_val(word n) -> long
+    word t = n1[n]
+    long v = long(tvh[t]) << 16 | long(tvl[t])
+    if nf[n] ~= 0 then v = 0 - v end
+    return v
+end
+
+-- the compile-time value of e (in cv), false if it has none
+function const_eval(word e) -> bool
+    byte k = nk[e]
+    if k == E_INT then
+        cv = lit_val(e)
+        return true
+    end
+    if k == E_BOOL then
+        cv = nf[e]
+        return true
+    end
+    if k == E_NAME then
+        word s = lookup(n1[e])
+        if s ~= 0 and sk[s] == SK_CONST then
+            cv = const_value(s)
+            return true
+        end
+        return false
+    end
+    if k == E_UNARY then
+        if not const_eval(n1[e]) then return false end
+        if nf[e] == 0 then
+            cv = 0 - cv
+        elseif nf[e] == 2 then
+            cv = ~cv
+        else
+            return false
+        end
+        return true
+    end
+    if k == E_BINARY then
+        byte op = nf[e]
+        if op > B_SHR or op == B_CONCAT then return false end
+        if not const_eval(n1[e]) then return false end
+        long a = cv
+        if not const_eval(n2[e]) then return false end
+        long b = cv
+        if op == B_ADD then
+            cv = a + b
+        elseif op == B_SUB then
+            cv = a - b
+        elseif op == B_MUL then
+            cv = a * b
+        elseif op == B_DIV then
+            if b == 0 then return false end
+            cv = a / b
+        elseif op == B_MOD then
+            if b == 0 then return false end
+            cv = a % b
+        elseif op == B_AND then
+            cv = a & b
+        elseif op == B_OR then
+            cv = a | b
+        elseif op == B_XOR then
+            cv = a ~ b
+        elseif op == B_SHL then
+            cv = a << byte(b & 31)
+        else
+            cv = a >> byte(b & 31)
+        end
+        return true
+    end
+    return false
+end
+
+-- ---------------------------------------------------------------- types of expressions
+
+function is_cast(word t) -> byte
+    byte ty = type_of(t)
+    if ty == TY_BOOL then return TY_BAD end
+    return ty
+end
+
+-- the natural type of e
+function nat(word e) -> byte
+    byte k = nk[e]
+    if k == E_INT then return TY_NONE end
+    if k == E_BOOL then return TY_BOOL end
+    if k == E_STR then return TY_STR end
+    if k == E_NAME then
+        word s = lookup(n1[e])
+        if s == 0 or sk[s] == SK_CONST then return TY_NONE end
+        return sty[s]
+    end
+    if k == E_INDEX then
+        if nk[n1[e]] == E_NAME and text_is(n1[n1[e]], "memory") then return TY_BYTE end
+        word s = lookup(n1[n1[e]])
+        if s == 0 then return TY_NONE end
+        return sty[s]
+    end
+    if k == E_UNARY then
+        if nf[e] == 1 then return TY_BOOL end
+        return nat(n1[e])
+    end
+    if k == E_BINARY then
+        byte op = nf[e]
+        if op >= B_EQ then return TY_BOOL end
+        return join(nat(n1[e]), nat(n2[e]))
+    end
+    if k == E_CALL then
+        byte c = is_cast(n1[e])
+        if c ~= TY_BAD then return c end
+        word s = lookup(n1[e])
+        if s ~= 0 and sk[s] == SK_FUNC then return sty[s] end
+        return TY_NONE
+    end
+    return TY_NONE
+end
+
+-- the type an expression is computed at for a destination of type d
+function ctx_ty(byte d, word e) -> byte
+    byte t = join(d, nat(e))
+    if t == TY_NONE then
+        if const_eval(e) then return lit_ty(cv) end
+        return TY_WORD
+    end
+    if t == TY_BOOL then return TY_BYTE end
+    return t
+end
+
+-- ---------------------------------------------------------------- code: values
+
+-- keep a 1-byte result extended in HL
+function fix(byte w, bool sg)
+    if w ~= 1 then return end
+    if sg then
+        oi("ld a,l")
+        oi("rla")
+        oi("sbc a,a")
+        oi("ld h,a")
+    else
+        oi("ld h,0")
+    end
+end
+
+function load_const(long v, byte w, bool sg)
+    word x = word(v)
+    if w == 1 then
+        x = x & 255
+        if sg and x >= 128 then x = x | 0xFF00 end
+    end
+    os("    ld hl,")
+    odec(x)
+    onl()
+end
+
+-- A (loaded) -> HL, extended by the type t
+function extend_a(byte t)
+    oi("ld l,a")
+    if tsigned(t) then
+        oi("rla")
+        oi("sbc a,a")
+        oi("ld h,a")
+    else
+        oi("ld h,0")
+    end
+end
+
+-- load symbol s into HL
+function load_sym(word s)
+    if tsize(sty[s]) == 1 then
+        os("    ld a,(")
+        olab(s)
+        ob(')')
+        onl()
+        extend_a(sty[s])
+    else
+        os("    ld hl,(")
+        olab(s)
+        ob(')')
+        onl()
+    end
+end
+
+-- store HL into symbol s
+function store_sym(word s)
+    if tsize(sty[s]) == 1 then
+        oi("ld a,l")
+        os("    ld (")
+        olab(s)
+        os("),a")
+        onl()
+    else
+        os("    ld (")
+        olab(s)
+        os("),hl")
+        onl()
+    end
+end
+
+-- a variable (not a constant, not a function) named by token t
+function var_sym(word n, word t) -> word
+    word s = lookup(t)
+    if s == 0 then
+        if fail_node(n) then
+            msg("undefined variable `")
+            msg_text(t)
+            msg("`")
+        end
+        return 0
+    end
+    if sk[s] == SK_FUNC then
+        if fail_node(n) then msg("a function is not a value") end
+        return 0
+    end
+    return s
+end
+
+-- address of element e (an E_INDEX) in HL; its element type in elem_ty
+byte elem_ty
+function gen_addr(word e)
+    word base = n1[e]
+    if nk[base] ~= E_NAME then
+        unsupported(e, "indexing anything but an array variable")
+        return
+    end
+    if text_is(n1[base], "memory") then
+        gen(n2[e], 2, false)
+        elem_ty = TY_BYTE
+        return
+    end
+    word s = var_sym(base, n1[base])
+    if s == 0 then return end
+    if slen[s] == 0 then
+        if fail_node(e) then msg("not an array") end
+        return
+    end
+    elem_ty = sty[s]
+    gen(n2[e], 2, false)
+    if tsize(elem_ty) == 2 then oi("add hl,hl") end
+    os("    ld de,")
+    olab(s)
+    onl()
+    oi("add hl,de")
+end
+
+-- operands: left -> DE, right -> HL, both at (w, sg)
+function gen_pair(word l, word r, byte w, bool sg)
+    gen(l, w, sg)
+    oi("push hl")
+    gen(r, w, sg)
+    oi("pop de")
+end
+
+-- comparison l op r -> HL = 0 / 1
+function gen_compare(byte op, word l, word r)
+    byte t = join(nat(l), nat(r))
+    if t == TY_NONE then
+        if const_eval(l) then t = lit_ty(cv) else t = TY_WORD end
+        if const_eval(r) then t = join(t, lit_ty(cv)) end
+    end
+    if t == TY_BOOL then t = TY_BYTE end
+    bool sg = tsigned(t)
+    gen_pair(l, r, tsize(t), sg)
+    if sg then
+        -- signed order = unsigned order with the sign bits flipped
+        oi("ld a,d")
+        oi("xor $80")
+        oi("ld d,a")
+        oi("ld a,h")
+        oi("xor $80")
+        oi("ld h,a")
+    end
+    -- lt, ge, eq, ne: left - right; gt, le: right - left
+    if op == B_GT or op == B_LE then
+        oi("or a")
+        oi("sbc hl,de")
+    else
+        oi("ex de,hl")
+        oi("or a")
+        oi("sbc hl,de")
+    end
+    word skip = new_label()
+    oi("ld hl,0")
+    if op == B_EQ then
+        jp("jr nz,", skip)
+    elseif op == B_NE then
+        jp("jr z,", skip)
+    elseif op == B_LT or op == B_GT then
+        jp("jr nc,", skip)
+    else
+        jp("jr c,", skip)
+    end
+    oi("inc hl")
+    label(skip)
+end
+
+-- arithmetic / bitwise l op r at (w, sg) -> HL
+function gen_arith(byte op, word l, word r, byte w, bool sg)
+    if op == B_CONCAT then
+        unsupported(l, "strings (`..`)")
+        return
+    end
+    gen_pair(l, r, w, sg)
+    if op == B_ADD then
+        oi("add hl,de")
+    elseif op == B_SUB then
+        oi("ex de,hl")
+        oi("or a")
+        oi("sbc hl,de")
+    elseif op == B_MUL then
+        oi("call rt_mul16")
+    elseif op == B_DIV or op == B_MOD then
+        oi("ex de,hl")
+        if sg then oi("call rt_divs16") else oi("call rt_divu16") end
+        if op == B_MOD then oi("ex de,hl") end
+    elseif op == B_AND or op == B_OR or op == B_XOR then
+        string ins = "and "
+        if op == B_OR then ins = "or " end
+        if op == B_XOR then ins = "xor " end
+        oi("ld a,h")
+        oi(ins .. "d")
+        oi("ld h,a")
+        oi("ld a,l")
+        oi(ins .. "e")
+        oi("ld l,a")
+    elseif op == B_SHL or op == B_SHR then
+        word lp = new_label()
+        word done = new_label()
+        oi("ld a,l")
+        oi("and 31")
+        oi("ld b,a")
+        oi("ex de,hl")
+        jp("jr z,", done)
+        label(lp)
+        if op == B_SHL then
+            oi("add hl,hl")
+        else
+            if sg then oi("sra h") else oi("srl h") end
+            oi("rr l")
+        end
+        jp("djnz ", lp)
+        label(done)
+    end
+    fix(w, sg)
+end
+
+-- e -> HL at width w (1 / 2) and signedness sg
+function gen(word e, byte w, bool sg)
+    if failed then return end
+    byte k = nk[e]
+    if k == E_INT or k == E_BOOL then
+        const_eval(e)
+        load_const(cv, w, sg)
+    elseif k == E_NAME then
+        word s = var_sym(e, n1[e])
+        if s == 0 then return end
+        if sk[s] == SK_CONST then
+            load_const(const_value(s), w, sg)
+        elseif slen[s] ~= 0 then
+            if fail_node(e) then msg("an array is not a value") end
+        else
+            load_sym(s)
+        end
+    elseif k == E_INDEX then
+        gen_addr(e)
+        if failed then return end
+        if tsize(elem_ty) == 1 then
+            oi("ld a,(hl)")
+            extend_a(elem_ty)
+        else
+            oi("ld a,(hl)")
+            oi("inc hl")
+            oi("ld h,(hl)")
+            oi("ld l,a")
+        end
+    elseif k == E_UNARY then
+        byte op = nf[e]
+        if op == 1 then
+            gen(n1[e], 1, false)
+            oi("ld a,l")
+            oi("xor 1")
+            oi("ld l,a")
+        elseif op == 0 then
+            gen(n1[e], w, sg)
+            oi("ex de,hl")
+            oi("ld hl,0")
+            oi("or a")
+            oi("sbc hl,de")
+            fix(w, sg)
+        else
+            gen(n1[e], w, sg)
+            oi("ld a,h")
+            oi("cpl")
+            oi("ld h,a")
+            oi("ld a,l")
+            oi("cpl")
+            oi("ld l,a")
+            fix(w, sg)
+        end
+    elseif k == E_BINARY then
+        byte op = nf[e]
+        if op == B_LAND or op == B_LOR then
+            word done = new_label()
+            gen(n1[e], 1, false)
+            oi("ld a,l")
+            oi("or a")
+            if op == B_LAND then jp("jp z,", done) else jp("jp nz,", done) end
+            gen(n2[e], 1, false)
+            label(done)
+        elseif op >= B_EQ then
+            gen_compare(op, n1[e], n2[e])
+        else
+            gen_arith(op, n1[e], n2[e], w, sg)
+        end
+    elseif k == E_CALL then
+        gen_call(e, w, sg)
+    elseif k == E_STR then
+        unsupported(e, "string values")
+    else
+        unsupported(e, "this expression")
+    end
+end
+
+-- e evaluated for a destination of type d
+function gen_for(word e, byte d)
+    byte t = ctx_ty(d, e)
+    gen(e, tsize(t), tsigned(t))
+end
+
+-- the n-th node of a list
+function nth(word first, byte n) -> word
+    word x = first
+    while n > 0 and x ~= 0 do
+        x = nx[x]
+        n -= 1
+    end
+    return x
+end
+
+function count(word first) -> byte
+    byte n = 0
+    while first ~= 0 do
+        n += 1
+        first = nx[first]
+    end
+    return n
+end
+
+-- a call in an expression -> HL
+function gen_call(word e, byte w, bool sg)
+    word name = n1[e]
+    word alist = n2[e]
+    byte c = is_cast(name)
+    if c ~= TY_BAD then
+        if count(alist) ~= 1 then
+            if fail_node(e) then msg("a cast takes one value") end
+            return
+        end
+        byte t = nat(alist)
+        if t == TY_NONE or t == TY_BOOL then t = ctx_ty(c, alist) end
+        gen(alist, tsize(t), tsigned(t))
+        if tsize(c) == 1 then fix(1, tsigned(c)) end
+        if tsize(c) < w then fix(1, tsigned(c)) end
+        return
+    end
+    word f = lookup(name)
+    if f == 0 or sk[f] ~= SK_FUNC then
+        if text_is(name, "print") or text_is(name, "write") then
+            if fail_node(e) then
+                msg_text(name)
+                msg(" does not return a value")
+            end
+            return
+        end
+        if fail_node(e) then
+            msg("not supported by the self-hosted compiler yet: function `")
+            msg_text(name)
+            msg("`")
+        end
+        return
+    end
+    call_func(e, f, alist)
+    byte r = sty[f]
+    if r == TY_NONE then return end
+    if tsize(r) == 1 then extend_a(r) end
+end
+
+-- ---- call graph (for recursion)
+
+const MAXEDGE = 4000
+far word eto[4000]          -- callee symbol
+far word enext[4000]        -- next edge of the same caller
+far word efirst[3000]       -- first edge of a function symbol
+word nedge = 0
+far byte seen[3000]
+word seen_mark = 0
+far word seen_at[3000]
+
+-- record the calls in the subtree of node n (a function's body) for f
+function collect_calls(word f, word n)
+    while n ~= 0 do
+        byte k = nk[n]
+        if k == E_CALL then
+            word c = lookup(n1[n])
+            if c ~= 0 and sk[c] == SK_FUNC and nedge < MAXEDGE - 1 then
+                nedge += 1
+                eto[nedge] = c
+                enext[nedge] = efirst[f]
+                efirst[f] = nedge
+            end
+        end
+        -- children: every node field that holds a node
+        if k == E_INDEX or k == E_BINARY then
+            collect_calls(f, n1[n])
+            collect_calls(f, n2[n])
+        elseif k == E_FIELD or k == E_UNARY or k == E_LIST or k == S_FAR or k == S_RETURN or k == S_EXPR then
+            collect_calls(f, n1[n])
+        elseif k == E_CALL then
+            collect_calls(f, n2[n])
+        elseif k == E_METHOD then
+            collect_calls(f, n1[n])
+            collect_calls(f, n3[n])
+        elseif k == S_VAR then
+            collect_calls(f, n3[n])
+            collect_calls(f, n4[n])
+        elseif k == S_ASSIGN or k == S_WHILE or k == S_ARM then
+            collect_calls(f, n1[n])
+            collect_calls(f, n2[n])
+        elseif k == S_IF then
+            collect_calls(f, n1[n])
+            collect_calls(f, n2[n])
+        elseif k == S_FOR then
+            collect_calls(f, n2[n])
+            collect_calls(f, n3[n])
+            collect_calls(f, n4[n])
+        end
+        -- lists continue through nx; a lone child has nx = 0 or its siblings,
+        -- which are visited by the caller's loop anyway (harmless repeats)
+        n = nx[n]
+    end
+end
+
+-- can a call to `from` lead to a call of `target`?
+word stack_[3000]
+function reaches(word from, word target) -> bool
+    seen_mark += 1
+    word sp_ = 0
+    stack_[sp_] = from
+    sp_ += 1
+    while sp_ > 0 do
+        sp_ -= 1
+        word f = stack_[sp_]
+        if f == target then return true end
+        if seen_at[f] ~= seen_mark then
+            seen_at[f] = seen_mark
+            word ed = efirst[f]
+            while ed ~= 0 do
+                if sp_ < 2999 then
+                    stack_[sp_] = eto[ed]
+                    sp_ += 1
+                end
+                ed = enext[ed]
+            end
+        end
+    end
+    return false
+end
+
+-- symbol s has storage in a function's frame
+function in_frame(word s) -> bool
+    byte k = sk[s]
+    return (k == SK_PARAM or k == SK_LOCAL) and sown[s] ~= 0
+end
+
+-- frame label of function f: `fr_name` / `fr_name_end`
+function ofr(word f, bool at_end)
+    os("fr_")
+    otok(sname[f])
+    if at_end then os("_end") end
+end
+
+-- arguments into the parameter slots (through the stack, so an argument
+-- may call the same function), then the call. A call that can come back
+-- to the current function saves its frame (parameters and locals) on the
+-- stack around the call.
+function call_func(word e, word f, word alist)
+    bool save = cur_fn ~= 0 and reaches(f, cur_fn)
+    if save then
+        os("    ld hl,")
+        ofr(cur_fn, false)
+        ob('-')
+        ofr(cur_fn, true)
+        onl()
+        oi("add hl,sp")
+        oi("ld sp,hl")
+        oi("ex de,hl")
+        os("    ld hl,")
+        ofr(cur_fn, false)
+        onl()
+        os("    ld bc,")
+        ofr(cur_fn, true)
+        ob('-')
+        ofr(cur_fn, false)
+        onl()
+        oi("ld a,b")
+        oi("or c")
+        word nz = new_label()
+        jp("jr z,", nz)
+        oi("ldir")
+        label(nz)
+        call_args(e, f, alist)
+        oi("ld (sh_ret),hl")
+        oi("ld (sh_reta),a")
+        oi("ld hl,0")
+        oi("add hl,sp")
+        os("    ld de,")
+        ofr(cur_fn, false)
+        onl()
+        os("    ld bc,")
+        ofr(cur_fn, true)
+        ob('-')
+        ofr(cur_fn, false)
+        onl()
+        oi("ld a,b")
+        oi("or c")
+        word nz2 = new_label()
+        jp("jr z,", nz2)
+        oi("ldir")
+        label(nz2)
+        oi("ld sp,hl")      -- HL = the first byte after the saved frame
+        oi("ld hl,(sh_ret)")
+        oi("ld a,(sh_reta)")
+        return
+    end
+    call_args(e, f, alist)
+end
+
+function call_args(word e, word f, word alist)
+    byte np = snp[f]
+    if count(alist) ~= np then
+        if fail_node(e) then
+            msg("`")
+            msg_text(sname[f])
+            msg("` expects ")
+            msg_dec(0, np)
+            msg(" argument(s)")
+        end
+        return
+    end
+    word a = alist
+    byte i = 0
+    while a ~= 0 do
+        word p = f + 1 + i
+        gen_for(a, sty[p])
+        oi("push hl")
+        a = nx[a]
+        i += 1
+    end
+    while i > 0 do
+        i -= 1
+        oi("pop hl")
+        store_sym(f + 1 + i)
+    end
+    os("    call ")
+    olab(f)
+    onl()
+end
+
+-- ---------------------------------------------------------------- code: statements
+
+const MAXLOOP = 32
+word loop_end[32]
+byte nloop = 0
+
+-- statements of a block, in a new scope
+function cg_block(word first)
+    word mark = nsy
+    word s = first
+    while s ~= 0 and not failed do
+        cg_stmt(s)
+        s = nx[s]
+    end
+    -- locals of this block go out of scope (they keep their storage)
+    word k = nsy
+    while k > mark do
+        sdead[k] = 1
+        k -= 1
+    end
+end
+
+bool pass_declare = false
+
+-- declare a variable (global at the top level of the main program)
+function declare_var(word s, bool top)
+    word name = n2[s]
+    word init = n4[s]
+    if nf[s] ~= 0 or n1[s] == 0 then
+        -- const / var: the type comes from the value
+        if nf[s] ~= 0 then
+            if nk[init] == E_STR then
+                unsupported(s, "string constants")
+                return
+            end
+            if not const_eval(init) then
+                if fail_node(s) then msg("a constant needs a compile-time value") end
+                return
+            end
+            if top and lookup(name) ~= 0 then return end   -- declared by the first pass
+            word c = new_sym(SK_CONST, name, TY_NONE)
+            sid[c] = word(cv)
+            sv2[c] = word(cv >> 16)
+            return
+        end
+    end
+    byte ty = TY_NONE
+    if n1[s] ~= 0 then
+        ty = type_of(n1[s])
+        if ty == TY_BAD then
+            unsupported(s, "this type")
+            return
+        end
+    else
+        ty = nat(init)
+        if ty == TY_NONE then
+            if const_eval(init) then ty = lit_ty(cv) else ty = TY_WORD end
+        end
+        if ty == TY_STR then
+            unsupported(s, "string variables")
+            return
+        end
+    end
+    word v = 0
+    if top then
+        v = lookup(name)
+    end
+    if v == 0 then
+        byte kind = SK_LOCAL
+        if top then kind = SK_GLOBAL end
+        v = new_sym(kind, name, ty)
+        if kind == SK_LOCAL then
+            nlocal += 1
+            sid[v] = nlocal
+        end
+    end
+    word size = n3[s]
+    if size ~= 0 then
+        if nk[size] == E_LIST then
+            if n1[size] ~= 0 then
+                unsupported(s, "arrays of more than one dimension")
+                return
+            end
+            -- `[]`: the size of the list
+            if init == 0 or nk[init] ~= E_LIST then return end
+            slen[v] = count(n1[init])
+        else
+            if not const_eval(size) or cv < 1 or cv > 32767 then
+                if fail_node(size) then msg("an array size must be a constant 1..32767") end
+                return
+            end
+            slen[v] = word(cv)
+        end
+    end
+    if pass_declare then return end
+    if slen[v] ~= 0 then
+        if init == 0 then return end
+        if sk[v] == SK_GLOBAL then
+            sv2[v] = init       -- emitted as data
+            return
+        end
+        -- a local array: store the values each time
+        word item = n1[init]
+        word i = 0
+        while item ~= 0 do
+            gen_for(item, ty)
+            oi("push hl")
+            load_const(i, 2, false)
+            if tsize(ty) == 2 then oi("add hl,hl") end
+            os("    ld de,")
+            olab(v)
+            onl()
+            oi("add hl,de")
+            oi("pop de")
+            oi("ld (hl),e")
+            if tsize(ty) == 2 then
+                oi("inc hl")
+                oi("ld (hl),d")
+            end
+            item = nx[item]
+            i += 1
+        end
+        return
+    end
+    if init ~= 0 then
+        if nk[init] == E_LIST then
+            unsupported(init, "struct values")
+            return
+        end
+        gen_for(init, ty)
+        store_sym(v)
+    elseif sk[v] == SK_LOCAL then
+        oi("ld hl,0")
+        store_sym(v)
+    end
+end
+
+
+function assign(word s)
+    word target = n1[s]
+    word value = n2[s]
+    byte op = nf[s]
+    if nk[target] == E_NAME then
+        word v = var_sym(target, n1[target])
+        if v == 0 then return end
+        if sk[v] == SK_CONST or slen[v] ~= 0 then
+            if fail_node(s) then msg("cannot assign to this") end
+            return
+        end
+        byte t = ctx_ty(sty[v], value)
+        if op == 0 then
+            gen(value, tsize(t), tsigned(t))
+        else
+            gen_op_assign(op - 1, target, value, sty[v])
+        end
+        store_sym(v)
+        return
+    end
+    if nk[target] == E_INDEX then
+        byte ety = TY_BYTE
+        if not text_is(n1[n1[target]], "memory") then
+            word v = var_sym(n1[target], n1[n1[target]])
+            if v == 0 then return end
+            ety = sty[v]
+        end
+        if op == 0 then
+            gen_for(value, ety)
+        else
+            gen_op_assign(op - 1, target, value, ety)
+        end
+        oi("push hl")
+        gen_addr(target)
+        oi("pop de")
+        oi("ld (hl),e")
+        if tsize(ety) == 2 then
+            oi("inc hl")
+            oi("ld (hl),d")
+        end
+        return
+    end
+    unsupported(s, "assigning to this")
+end
+
+-- target op= value: the new value in HL
+function gen_op_assign(byte op, word target, word value, byte ty)
+    byte t = join(ty, nat(value))
+    if t == TY_NONE or t == TY_BOOL then t = ty end
+    gen_arith(op, target, value, tsize(t), tsigned(t))
+end
+
+-- condition false -> jump to label n
+function branch_false(word cond, word n)
+    gen(cond, 1, false)
+    oi("ld a,l")
+    oi("or a")
+    jp("jp z,", n)
+end
+
+function cg_if(word s)
+    word done = new_label()
+    word arm = n1[s]
+    while arm ~= 0 and not failed do
+        word next_arm = new_label()
+        branch_false(n1[arm], next_arm)
+        cg_block(n2[arm])
+        jp("jp ", done)
+        label(next_arm)
+        arm = nx[arm]
+    end
+    if nf[s] ~= 0 then cg_block(n2[s]) end
+    label(done)
+end
+
+function while_stmt(word s)
+    word top = new_label()
+    word done = new_label()
+    label(top)
+    branch_false(n1[s], done)
+    loop_end[nloop] = done
+    nloop += 1
+    cg_block(n2[s])
+    nloop -= 1
+    jp("jp ", top)
+    label(done)
+end
+
+-- HL = v, DE = e (both loaded): flags of the comparison v - e (signed: sign bits flipped)
+function cmp_hl_de(bool sg)
+    if sg then
+        oi("ld a,d")
+        oi("xor $80")
+        oi("ld d,a")
+        oi("ld a,h")
+        oi("xor $80")
+        oi("ld h,a")
+    end
+    oi("or a")
+    oi("sbc hl,de")
+end
+
+function for_stmt(word s)
+    word holder = n4[s]
+    word stepn = n1[holder]
+    long step = 1
+    if stepn ~= 0 then
+        if not const_eval(stepn) or cv == 0 then
+            if fail_node(stepn) then msg("the step of a `for` must be a nonzero constant") end
+            return
+        end
+        step = cv
+    end
+    byte t = join(nat(n2[s]), nat(n3[s]))
+    if t == TY_NONE then
+        t = TY_BYTE
+        if const_eval(n2[s]) then t = lit_ty(cv) end
+        if const_eval(n3[s]) then t = join(t, lit_ty(cv)) end
+    end
+    if t == TY_BOOL then t = TY_BYTE end
+    if step < 0 and not tsigned(t) and const_eval(n3[s]) and cv < 0 then t = make_ty(tsize(t), true) end
+    bool sg = tsigned(t)
+    word mark = nsy
+    -- the loop variable and the end value (a hidden local)
+    word v = new_sym(SK_LOCAL, n1[s], t)
+    nlocal += 1
+    sid[v] = nlocal
+    word ev = new_sym(SK_LOCAL, n1[s], t)
+    nlocal += 1
+    sid[ev] = nlocal
+    sdead[ev] = 1           -- not visible by name
+    gen(n2[s], tsize(t), sg)
+    store_sym(v)
+    gen(n3[s], tsize(t), sg)
+    store_sym(ev)
+    word body = new_label()
+    word done = new_label()
+    -- not even once?
+    load_sym(v)
+    oi("ex de,hl")
+    load_sym(ev)
+    oi("ex de,hl")
+    cmp_hl_de(sg)           -- v - end
+    if step > 0 then
+        word ok = new_label()
+        jp("jr z,", ok)
+        jp("jp nc,", done)  -- v > end
+        label(ok)
+    else
+        jp("jp c,", done)   -- v < end
+    end
+    label(body)
+    loop_end[nloop] = done
+    nloop += 1
+    cg_block(n2[holder])
+    nloop -= 1
+    -- the distance to the end, then the step
+    long astep = step
+    if step < 0 then astep = 0 - step end
+    if step > 0 then
+        load_sym(ev)
+        oi("ex de,hl")
+        load_sym(v)
+        oi("ex de,hl")      -- HL = end, DE = v
+    else
+        load_sym(v)
+        oi("ex de,hl")
+        load_sym(ev)
+        oi("ex de,hl")      -- HL = v, DE = end
+    end
+    oi("or a")
+    oi("sbc hl,de")         -- distance (unsigned)
+    os("    ld de,")
+    odec(word(astep))
+    onl()
+    oi("or a")
+    oi("sbc hl,de")         -- distance - step
+    jp("jp c,", done)
+    load_sym(v)
+    os("    ld de,")
+    odec(word(step))
+    onl()
+    oi("add hl,de")
+    store_sym(v)
+    jp("jp ", body)
+    label(done)
+    word k = nsy
+    while k > mark do
+        sdead[k] = 1
+        k -= 1
+    end
+end
+
+-- print / write
+function print_stmt(word e, bool newline)
+    word a = n2[e]
+    bool first = true
+    while a ~= 0 and not failed do
+        if newline and not first then oi("call rt_space") end
+        first = false
+        byte t = nat(a)
+        if nk[a] == E_STR then
+            word l = str_label(n1[a])
+            os("    ld hl,s_")
+            odec(l)
+            onl()
+            oi("call rt_print_str")
+        elseif t == TY_BOOL then
+            gen(a, 1, false)
+            oi("ld a,l")
+            oi("call rt_print_bool")
+        elseif t == TY_STR then
+            unsupported(a, "string values")
+        else
+            if t == TY_NONE then
+                if const_eval(a) then t = lit_ty(cv) else t = TY_WORD end
+            end
+            gen(a, tsize(t), tsigned(t))
+            if tsigned(t) then oi("call rt_print_s16") else oi("call rt_print_u16") end
+        end
+        a = nx[a]
+    end
+    if newline then oi("call rt_newline") end
+end
+
+function call_stmt(word e)
+    if nk[e] == E_METHOD then
+        unsupported(e, "methods")
+        return
+    end
+    word name = n1[e]
+    if text_is(name, "print") then
+        print_stmt(e, true)
+        return
+    end
+    if text_is(name, "write") then
+        print_stmt(e, false)
+        return
+    end
+    word f = lookup(name)
+    if f ~= 0 and sk[f] == SK_FUNC then
+        call_func(e, f, n2[e])
+        return
+    end
+    if fail_node(e) then
+        msg("not supported by the self-hosted compiler yet: function `")
+        msg_text(name)
+        msg("`")
+    end
+end
+
+function cg_stmt(word s)
+    byte k = nk[s]
+    if k == S_VAR then
+        declare_var(s, false)
+    elseif k == S_ASSIGN then
+        assign(s)
+    elseif k == S_IF then
+        cg_if(s)
+    elseif k == S_WHILE then
+        while_stmt(s)
+    elseif k == S_FOR then
+        for_stmt(s)
+    elseif k == S_BREAK then
+        if nloop == 0 then
+            if fail_node(s) then msg("`break` outside a loop") end
+            return
+        end
+        jp("jp ", loop_end[nloop - 1])
+    elseif k == S_RETURN then
+        if cur_fn == 0 then
+            oi("jp __main_end")
+            return
+        end
+        byte r = sty[cur_fn]
+        if n1[s] ~= 0 then
+            if r == TY_NONE then
+                if fail_node(s) then msg("this function returns no value") end
+                return
+            end
+            gen_for(n1[s], r)
+            if tsize(r) == 1 then oi("ld a,l") end
+        end
+        oi("ret")
+    elseif k == S_EXPR then
+        call_stmt(n1[s])
+    elseif k == S_ASM then
+        -- the body, verbatim (each line ends with a newline)
+        word t = n1[s]
+        word i = 0
+        word o = toff[t]
+        while i < tlen[t] do
+            ob(tpool[o + i])
+            i += 1
+        end
+    elseif k == S_FAR then
+        unsupported(s, "far arrays")
+    elseif k == S_ASSET then
+        unsupported(s, "assets")
+    else
+        unsupported(s, "this statement")
+    end
+end
+
+-- ---------------------------------------------------------------- program
+
+-- first pass: functions, globals and constants (usable before their place)
+function declare_all()
+    pass_declare = true
+    word it = prog_first
+    while it ~= 0 and not failed do
+        byte k = nk[it]
+        if k == I_FUNC then
+            word f = new_sym(SK_FUNC, n1[it], TY_NONE)
+            sv2[f] = it
+            if n3[it] ~= 0 then
+                byte r = type_of(n3[it])
+                if r == TY_BAD then
+                    unsupported(it, "this return type")
+                    return
+                end
+                sty[f] = r
+            end
+            word p = n2[it]
+            byte np = 0
+            while p ~= 0 do
+                byte pt = type_of(n2[p])
+                if pt == TY_BAD then
+                    unsupported(p, "this parameter type")
+                    return
+                end
+                word ps = new_sym(SK_PARAM, n1[p], pt)
+                sown[ps] = f
+                sdead[ps] = 1
+                np += 1
+                p = nx[p]
+            end
+            snp[f] = np
+        elseif k == S_VAR then
+            declare_var(it, true)
+        elseif k == I_STRUCT then
+            unsupported(it, "structs and classes")
+        elseif k == I_INTERRUPT then
+            unsupported(it, "interrupts")
+        end
+        it = nx[it]
+    end
+    -- the call graph
+    word f = 1
+    while f <= nsy do
+        if sk[f] == SK_FUNC then
+            word np = snp[f]
+            word i = 1
+            while i <= np do
+                sdead[f + i] = 0
+                i += 1
+            end
+            cur_fn = f
+            collect_calls(f, n4[sv2[f]])
+            cur_fn = 0
+            i = 1
+            while i <= np do
+                sdead[f + i] = 1
+                i += 1
+            end
+        end
+        f += 1
+    end
+    pass_declare = false
+end
+
+function gen_function(word f)
+    word node_ = sv2[f]
+    cur_fn = f
+    word np = snp[f]
+    word i = 1
+    while i <= np do
+        sdead[f + i] = 0
+        i += 1
+    end
+    os("; function ")
+    otok(sname[f])
+    onl()
+    olab(f)
+    ob(':')
+    onl()
+    cg_block(n4[node_])
+    oi("ret")
+    onl()
+    i = 1
+    while i <= np do
+        sdead[f + i] = 1
+        i += 1
+    end
+    cur_fn = 0
+end
+
+-- the data of one symbol
+function data_sym(word s)
+    byte k = sk[s]
+    if k ~= SK_GLOBAL and k ~= SK_PARAM and k ~= SK_LOCAL then return end
+    olab(s)
+    word n = slen[s]
+    if n == 0 then n = 1 end
+    word init = 0
+    if k == SK_GLOBAL and slen[s] ~= 0 then init = sv2[s] end
+    if init == 0 then
+        os(": ds ")
+        odec(n * tsize(sty[s]))
+        onl()
+        return
+    end
+    -- initialised global array
+    if tsize(sty[s]) == 2 then os(": dw ") else os(": db ") end
+    word item = n1[init]
+    word i = 0
+    while i < n do
+        if i > 0 then ob(',') end
+        long v = 0
+        if item ~= 0 then
+            if not const_eval(item) then
+                if fail_node(item) then msg("an array initializer must be constant") end
+                return
+            end
+            v = cv
+            item = nx[item]
+        end
+        if tsize(sty[s]) == 2 then odec(word(v)) else odec(word(v) & 255) end
+        i += 1
+    end
+    onl()
+end
+
+function generate()
+    declare_all()
+    if failed then return end
+    os("; Generated by codegen.lz80n (self-hosted LZ80N compiler)\n")
+    oi("OPT --zxnext")
+    oi("DEVICE ZXSPECTRUMNEXT")
+    oi("ORG $8000")
+    onl()
+    ocopy("rt_start.asm")
+    oi("ei")
+    os("\n; ---- main program ----\n")
+    word it = prog_first
+    while it ~= 0 and not failed do
+        byte k = nk[it]
+        if k == S_VAR then
+            declare_var(it, true)
+        elseif k ~= I_FUNC then
+            cg_stmt(it)
+        end
+        it = nx[it]
+    end
+    oi("jp __main_end")
+    onl()
+    word f = 1
+    while f <= nsy and not failed do
+        if sk[f] == SK_FUNC then gen_function(f) end
+        f += 1
+    end
+    ocopy("rt_lib.asm")         -- starts with __main_end
+    os("\n; ---- interrupt service routine ----\n")
+    os("__isr:\n    push af\n    push bc\n    push de\n    push hl\n")
+    os("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n")
+    os("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n")
+    ocopy("rt_font.asm")
+    os("\n; ---- data ----\n")
+    word i = 0
+    while i < nstrs do
+        os("s_")
+        odec(i)
+        os(": db ")
+        word t = strs[i]
+        word j = 0
+        while j < tlen[t] do
+            odec(tpool[toff[t] + j])
+            ob(',')
+            j += 1
+        end
+        os("0\n")
+        i += 1
+    end
+    oi("ds 0")
+    os("sh_ret: dw 0\nsh_reta: db 0\n")
+    -- globals and the main program's locals
+    word s = 1
+    while s <= nsy and not failed do
+        if not in_frame(s) then data_sym(s) end
+        s += 1
+    end
+    -- one block per function: its parameters and locals (saved as a whole
+    -- around recursive calls)
+    word fn_ = 1
+    while fn_ <= nsy and not failed do
+        if sk[fn_] == SK_FUNC then
+            ofr(fn_, false)
+            os(":\n")
+            s = 1
+            while s <= nsy do
+                if in_frame(s) and sown[s] == fn_ then data_sym(s) end
+                s += 1
+            end
+            ofr(fn_, true)
+            os(":\n")
+        end
+        fn_ += 1
+    end
+    os("\n__program_end:\n")
+    oi("ASSERT __program_end <= $FD00, \"main program and data too large\"")
+    onl()
+    oi("SAVENEX OPEN \"t.nex\", __start, $FDFD")
+    oi("SAVENEX CORE 3,0,0")
+    oi("SAVENEX CFG 0")
+    oi("SAVENEX AUTO")
+    oi("SAVENEX CLOSE")
+end
+
+-- ---------------------------------------------------------------- main
+
+if load_tokens() then
+    if not failed then
+        ti = 1
+        program()
+    end
+    if not failed then
+        outh = file_open("out.asm", FILE_WRITE)
+        generate()
+        flush()
+        file_close(outh)
+    end
+    if failed then
+        file_delete("out.asm")
+        outh = file_open("codegen.err", FILE_WRITE)
+        olen = 0
+        os("error ")
+        odec(err_l)
+        ob(':')
+        odec(err_c)
+        ob(' ')
+        word i = 0
+        while i < elen do
+            ob(emsg[i])
+            i += 1
+        end
+        onl()
+        flush()
+        file_close(outh)
+        print("error", err_l, err_c)
+    else
+        print(nsy, "symbols", nlabel, "labels")
+    end
+end
