@@ -4,8 +4,9 @@
 
 * Follows LZ80N 1.3.0 (sprite collision detection, faster lines and
   ellipses).
-* `sprite_collision()` in completion, hover help and highlighting;
-  `overlaps(other)` in the hover help of `sprite[n]`.
+* `sprite_collision()` in completion, hover help and highlighting.
+* `sprite[n].` completes and explains `overlaps(other)`, and the fields
+  `palette`, `mirror_y`, `rotate` and `id`; `y` is shown as `word`.
 
 ## 1.2.1
 
