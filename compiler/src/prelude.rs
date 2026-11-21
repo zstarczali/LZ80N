@@ -1743,6 +1743,23 @@ function file_delete(string name) -> bool
     return not file_failed()
 end
 
+-- does the file exist?
+function file_exists(string name) -> bool
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then return false end
+    file_close(h)
+    return true
+end
+
+-- run a dot command: file_exec("nexload game.nex") (does not come back when
+-- it starts another program); false (and file_status) when it fails
+function file_exec(string cmd) -> bool
+    file_cname(cmd)
+    file_fn = 0x8F
+    file_sys()
+    return not file_failed()
+end
+
 -- next byte of a file read byte by byte; FILE_EOF at the end. The buffer
 -- serves one file: reading another one with file_getc starts it again
 -- (mixing file_getc and file_read on the same file skips bytes).
@@ -1818,7 +1835,7 @@ pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
         "file",
         &[
             "file_open", "file_close", "file_read", "file_write", "file_seek", "file_pos", "file_size",
-            "file_delete", "file_getc", "file_status", "FILE_READ", "FILE_WRITE", "FILE_APPEND",
+            "file_delete", "file_getc", "file_exists", "file_exec", "file_status", "FILE_READ", "FILE_WRITE", "FILE_APPEND",
             "FILE_ERROR", "FILE_EOF",
         ],
     ),

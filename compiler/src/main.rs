@@ -148,6 +148,83 @@ fn library_name_errors(prog: &ast::Program) -> Vec<diag::Diag> {
     out
 }
 
+/// The sources of the self-hosted compiler (selfhost/), built into lz80nc.
+pub const SELFHOST_SOURCES: &[(&str, &str)] = &[
+    ("lexer.lz80n", include_str!("../../selfhost/lexer.lz80n")),
+    ("parser_core.lz80n", include_str!("../../selfhost/parser_core.lz80n")),
+    ("parser.lz80n", include_str!("../../selfhost/parser.lz80n")),
+    ("codegen.lz80n", include_str!("../../selfhost/codegen.lz80n")),
+    ("asm.lz80n", include_str!("../../selfhost/asm.lz80n")),
+];
+
+/// The files the self-hosted compiler reads from the SD card besides the
+/// program: the runtime texts, the file module, and `expand.on` (the lexer
+/// expands includes and modules).
+pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
+    let startup = runtime::STARTUP.trim_end();
+    let startup = startup.strip_suffix("ei").expect("startup ends with ei");
+    let mut font = String::from("rt_font:\n");
+    for glyph in font::bytes().chunks(8) {
+        let row: Vec<String> = glyph.iter().map(|b| format!("${b:02X}")).collect();
+        font.push_str(&format!("    db {}\n", row.join(",")));
+    }
+    vec![
+        ("rt_start.asm".into(), startup.as_bytes().to_vec()),
+        ("rt_lib.asm".into(), runtime::RUNTIME.as_bytes().to_vec()),
+        ("rt_font.asm".into(), font.into_bytes()),
+        ("rt_long.asm".into(), runtime::long().into_bytes()),
+        ("rt_banked.asm".into(), runtime::BANKED.as_bytes().to_vec()),
+        ("lib_file.lz80n".into(), prelude::FILE.as_bytes().to_vec()),
+        ("expand.on".into(), b"1".to_vec()),
+    ]
+}
+
+/// A program built for the SD card: (file name, NEX, symbols).
+pub type Built = (String, Vec<u8>, std::collections::HashMap<String, i64>);
+
+/// Write everything the self-hosted compiler needs on the Next into `dir`:
+/// the support files, the sources, `chain.on` (each stage starts the next)
+/// and lexer.nex, codegen.nex, asm.nex built from the sources.
+pub fn export_selfhost(dir: &Path) -> Result<Vec<Built>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let write = |name: &str, data: &[u8]| {
+        std::fs::write(dir.join(name), data).map_err(|e| format!("{}: {e}", dir.join(name).display()))
+    };
+    for (name, data) in selfhost_support_files() {
+        write(&name, &data)?;
+    }
+    for (name, src) in SELFHOST_SOURCES {
+        write(name, src.as_bytes())?;
+    }
+    write("chain.on", b"1")?;
+    let mut built = vec![];
+    for stage in ["lexer", "codegen", "asm"] {
+        let file = format!("{stage}.lz80n");
+        let src = SELFHOST_SOURCES.iter().find(|(n, _)| *n == file).unwrap().1;
+        let nex_name = format!("{stage}.nex");
+        let asm = compile_main(src, Some(&dir.join(&file)), &nex_name, true, dir, false).map_err(|errs| {
+            errs.iter().map(|d| format!("{file}:{d}")).collect::<Vec<_>>().join("\n")
+        })?;
+        let out = asm::assemble(&asm, dir).map_err(|e| format!("{file}: {}", e[0]))?;
+        let nex = out.nex.ok_or("no SAVENEX")?.1;
+        write(&nex_name, &nex)?;
+        built.push((nex_name, nex, out.symbols));
+    }
+    write(
+        "README.txt",
+        b"LZ80N self-hosted compiler (needs a 2 MB ZX Spectrum Next)\r\n\r\n\
+Copy this folder to the SD card, then in NextBASIC:\r\n\
+  .cd /lz80n                (the folder you copied)\r\n\
+  put your program into in.lz80n (e.g. COPY \"prog.lz80n\" TO \"in.lz80n\")\r\n\
+  .nexload lexer.nex\r\n\r\n\
+lexer.nex -> tokens.bin, then starts codegen.nex -> out.asm, then asm.nex ->\r\n\
+out.nex. Create a file named run.on to start out.nex at the end. Errors:\r\n\
+on the screen, and in codegen.err / asm.err. Delete chain.on to run the\r\n\
+stages one by one. Supported language: see selfhost/README.md.\r\n",
+    )?;
+    Ok(built)
+}
+
 /// `--sjasmplus auto`: $SJASMPLUS, next to lz80nc, tools/sjasmplus, the PATH.
 fn find_sjasmplus(explicit: PathBuf) -> PathBuf {
     if explicit.as_os_str() != "auto" {
@@ -209,6 +286,7 @@ fn assemble_builtin(asm: &str, asm_path: &Path, nex: &Path, base_dir: &Path, sym
 }
 
 const USAGE: &str = "usage: lz80nc <input.lz80n> [-o out.nex] [-S] [-O0] [--bank-all] [--sym] [--sjasmplus PATH|auto]
+       lz80nc --export-selfhost DIR
        lz80nc --help | --version";
 
 const HELP: &str = "lz80nc — the LZ80N compiler: a Lua-like language for the ZX Spectrum Next
@@ -226,6 +304,9 @@ options:
   --bank-all        every function in its own 8K code page (to try code banking;
                     normally only when the program does not fit in the 31K area)
   --sym             also write a symbol file (.sym, sjasmplus format)
+  --export-selfhost DIR
+                    write the self-hosted compiler (lexer.nex, codegen.nex,
+                    asm.nex, runtime files, sources) into DIR, for the Next
   --sjasmplus PATH  assemble with an external SjASMPlus instead of the built-in
                     assembler (writes a .lst listing too); `auto` = $SJASMPLUS,
                     then the one next to lz80nc, then tools/sjasmplus, then the PATH
@@ -262,6 +343,25 @@ fn main() -> ExitCode {
                 } else {
                     sjasm = Some(PathBuf::from(v));
                 }
+            }
+            "--export-selfhost" => {
+                let Some(dir) = args.next() else {
+                    eprintln!("`--export-selfhost` needs a directory\n{USAGE}");
+                    return ExitCode::from(2);
+                };
+                return match export_selfhost(Path::new(&dir)) {
+                    Ok(built) => {
+                        for (name, nex, _) in &built {
+                            println!("wrote {}/{name} ({} bytes)", dir, nex.len());
+                        }
+                        println!("the self-hosted compiler is in {dir}: see README.txt there");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        ExitCode::FAILURE
+                    }
+                };
             }
             "-S" => asm_only = true,
             "-O0" => optimize = false,

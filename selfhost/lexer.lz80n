@@ -696,4 +696,8 @@ end
 if not failed then out_head(T_EOF, lno, cno) end
 flush()
 file_close(outh)
-print(ntokens, "tokens")
+print("lexer:", ntokens, "tokens")
+-- the next stage (lexer -> codegen -> asm)
+if expand and file_exists("chain.on") then
+    if not file_exec("nexload codegen.nex") then print("cannot start codegen.nex, error", file_status) end
+end
