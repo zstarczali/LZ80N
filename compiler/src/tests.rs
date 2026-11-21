@@ -4259,6 +4259,10 @@ fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
         ("rt_start.asm".into(), startup.as_bytes().to_vec()),
         ("rt_lib.asm".into(), crate::runtime::RUNTIME.as_bytes().to_vec()),
         ("rt_font.asm".into(), font.into_bytes()),
+        ("rt_long.asm".into(), crate::runtime::long().into_bytes()),
+        ("rt_banked.asm".into(), crate::runtime::BANKED.as_bytes().to_vec()),
+        ("lib_file.lz80n".into(), crate::prelude::FILE.as_bytes().to_vec()),
+        ("expand.on".into(), b"1".to_vec()),
     ]
 }
 
@@ -4277,13 +4281,19 @@ impl SelfHost {
 
     /// The assembly the self-hosted compiler makes for `src`, or its error.
     fn compile(&self, src: &str) -> Result<String, String> {
+        self.compile_files(&[("in.lz80n", src.as_bytes())])
+    }
+
+    /// Like compile, with more source files on the SD card (includes).
+    fn compile_files(&self, sources: &[(&str, &[u8])]) -> Result<String, String> {
         let mut files = std::collections::HashMap::new();
-        files.insert("in.lz80n".to_string(), src.as_bytes().to_vec());
-        let files = run_stage(&self.lex.0, &self.lex.1, files);
-        let mut files = files;
+        for (n, d) in sources {
+            files.insert(n.to_string(), d.to_vec());
+        }
         for (n, d) in selfhost_runtime_files() {
             files.insert(n, d);
         }
+        let files = run_stage(&self.lex.0, &self.lex.1, files);
         let files = run_stage(&self.cg.0, &self.cg.1, files);
         if let Some(e) = files.get("codegen.err") {
             return Err(String::from_utf8_lossy(e).trim_end().to_string());
@@ -4297,6 +4307,7 @@ fn run_asm(asm: &str) -> String {
     let out = crate::asm::assemble(asm, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
     let syms = out.symbols16();
     let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::default());
     let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
     let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
     let mut s = String::new();
@@ -4469,3 +4480,205 @@ print(r)
         assert_eq!(got, want, "program {i}:\n{src}");
     }
 }
+
+/// Strings, long, far arrays, addr(), the file module, includes and code
+/// banking through the self-hosted compiler.
+#[test]
+fn selfhost_codegen_strings_long_far_files() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+string a = "Hello"
+string b = a .. ", " .. "Next" .. "!"
+print(b, len(b), asc(b, 1), asc(b, 99))
+string c = chr(65) .. chr(66) .. 7 .. true .. -3
+print(c, str(1234) .. "x", c == "AB7true-3", c ~= b, "abc" < "abd", "b" > "abc", "ab" <= "ab", "" < "a")
+string arr[] = {"zero", "one", "two"}
+arr[1] = arr[1] .. "!"
+print(arr[0], arr[1], arr[2], len(arr[2]))
+function shout(string s, byte n) -> byte
+    s = s .. "?"
+    return len(s) + n
+end
+string m = "hm"
+print(shout(m, 1), m)
+string w = ""
+for i = 0, 9 do w = w .. i end
+print(w)
+"#,
+        r#"
+long x = 100000
+long y = -70000
+print(x + y, x - y, x * 3, y / 7, y % 7, -x, x / 3 * 3, x > y, y < 0, x == 100000)
+long big = 0x7FFFFFFF
+print(big, big + 1, x << 4, y >> 3, x & 0xFFFF, x | 1, x ~ 255)
+word w = 65535
+long z = w + 1
+print(z, long(w) * long(w), word(z + 5), byte(x), sword(y))
+function sq(long v) -> long
+    return v * v
+end
+print(sq(46340), sq(-3))
+long acc = 0
+for i = 1, 1000 do acc += i * i end
+print(acc)
+"#,
+        r#"
+far byte big[20000]
+far word ws[5000]
+for i = 0, 19999, 997 do big[i] = byte(i % 251) end
+ws[4999] = 12345
+ws[0] = ws[4999] + 1
+word s = 0
+for i = 0, 19999, 997 do s += big[i] end
+print(s, ws[0], ws[4999], big[1])
+byte buf[4]
+buf[2] = 9
+print(addr(buf) + 2 == addr(buf[2]), memory[addr(buf) + 2])
+"#,
+        r#"
+byte b[8]
+byte h = file_open("t.txt", FILE_WRITE)
+for i = 0, 7 do b[i] = 'a' + i end
+print(file_write(h, addr(b), 8))
+file_close(h)
+h = file_open("t.txt", FILE_READ)
+print(file_size(h))
+word c = file_getc(h)
+string got = ""
+while c ~= FILE_EOF do
+    got = got .. chr(byte(c))
+    c = file_getc(h)
+end
+file_close(h)
+print(got, file_delete("t.txt"), file_open("t.txt", FILE_READ) == FILE_ERROR)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, _) = run_sd(&format!("sh_cg2_{i}"), src, &[]);
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let got = run_asm(&asm);
+        assert_eq!(got, want, "program {i}:\n{src}");
+    }
+
+    // include (each file once)
+    let main = "include \"lib.lz80n\"\ninclude \"lib.lz80n\"\nprint(twice(21), K)\n";
+    let lib = "const K = 5\nfunction twice(byte x) -> word\n    return x * 2\nend\n";
+    let asm = sh.compile_files(&[("in.lz80n", main.as_bytes()), ("lib.lz80n", lib.as_bytes())]).unwrap();
+    assert_eq!(run_asm(&asm), "42 5\n");
+
+    // code banking: more code than the resident area holds
+    let mut big = String::new();
+    for f in 0..50 {
+        big.push_str(&format!("function f{f}(word x) -> word\n    word r = x\n"));
+        for k in 0..10 {
+            big.push_str(&format!("    r = r * 3 + {k} - (r >> 2) + (r & {f})\n"));
+        }
+        big.push_str("    return r\nend\n");
+    }
+    big.push_str("word t = 0\n");
+    for f in 0..50 {
+        big.push_str(&format!("t = t + f{f}({f})\n"));
+    }
+    big.push_str("print(t)\n");
+    let want = run("sh_cg2_big", &big).unwrap();
+    let asm = sh.compile(&big).unwrap_or_else(|e| panic!("big: {e}"));
+    assert!(asm.contains("MMU 2 e"), "no banked code");
+    assert_eq!(run_asm(&asm), want);
+}
+
+/// Run a NEX made from `asm` with SD card `files`; the files afterwards.
+fn run_asm_files(asm: &str, files: std::collections::HashMap<String, Vec<u8>>) -> std::collections::HashMap<String, Vec<u8>> {
+    let out = crate::asm::assemble(asm, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
+    let syms = out.symbols16();
+    run_stage(&out.nex.unwrap().1, &syms, files)
+}
+
+/// The self-hosted compiler compiles the self-hosted lexer; that lexer
+/// makes the same tokens as the lexer compiled by lz80nc.
+#[test]
+fn selfhost_compiles_lexer() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let sh = SelfHost::new();
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let asm = sh.compile(&lexer_src).unwrap_or_else(|e| panic!("self-hosted compiler: {e}"));
+    for input in ["examples/hello.lz80n", "examples/shooter.lz80n", "selfhost/lexer.lz80n"] {
+        let src = std::fs::read(root.join(input)).unwrap();
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), src.clone());
+        let want = run_stage(&sh.lex.0, &sh.lex.1, files.clone()).remove("tokens.bin").unwrap();
+        let got = run_asm_files(&asm, files).remove("tokens.bin").expect("no tokens.bin");
+        assert_eq!(got.len(), want.len(), "{input}: token stream length");
+        assert!(got == want, "{input}: token streams differ");
+    }
+}
+
+/// The self-hosted compiler compiles the self-hosted parser and assembler;
+/// they give the same results as their lz80nc-compiled versions.
+#[test]
+fn selfhost_compiles_parser_and_assembler() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let sh = SelfHost::new();
+    let rd = |p: &str| std::fs::read(root.join(p)).unwrap();
+    // parser
+    let asm = sh
+        .compile_files(&[("in.lz80n", &rd("selfhost/parser.lz80n")), ("parser_core.lz80n", &rd("selfhost/parser_core.lz80n"))])
+        .unwrap_or_else(|e| panic!("self-hosted compiler (parser): {e}"));
+    let (par_nex, par_syms) = build_in(&root.join("selfhost"), &String::from_utf8(rd("selfhost/parser.lz80n")).unwrap());
+    for input in ["examples/hello.lz80n", "examples/shooter.lz80n"] {
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), rd(input));
+        let toks = run_stage(&sh.lex.0, &sh.lex.1, files);
+        let want = run_stage(&par_nex, &par_syms, toks.clone()).remove("ast.txt").unwrap();
+        let got = run_asm_files(&asm, toks).remove("ast.txt").expect("no ast.txt");
+        assert!(got == want, "{input}: syntax trees differ");
+    }
+    // assembler
+    let asm_src = String::from_utf8(rd("selfhost/asm.lz80n")).unwrap();
+    let asm = sh.compile(&asm_src).unwrap_or_else(|e| panic!("self-hosted compiler (asm): {e}"));
+    let dir = root.join("examples");
+    let path = dir.join("hello.lz80n");
+    let prog = crate::compile_main(&std::fs::read_to_string(&path).unwrap(), Some(&path), "t.nex", true, &dir, false).unwrap();
+    let want = crate::asm::assemble(&prog, &dir).unwrap().nex.unwrap().1;
+    let mut files = std::collections::HashMap::new();
+    files.insert("in.asm".to_string(), prog.into_bytes());
+    let got = run_asm_files(&asm, files);
+    assert!(got.get("asm.err").is_none(), "{}", String::from_utf8_lossy(&got["asm.err"]));
+    assert!(got["t.nex"] == want, "hello: NEX differs");
+}
+
+/// Bootstrap: the code generator compiled by lz80nc (stage 1) compiles its
+/// own source (stage 2). Stage 2 must make the same assembly as stage 1,
+/// for test programs and for its own source (a fixed point).
+#[test]
+fn selfhost_bootstrap() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let rd = |p: &str| std::fs::read(root.join(p)).unwrap();
+    let mut sh = SelfHost::new();
+    let sources: Vec<(&str, Vec<u8>)> = vec![("in.lz80n", rd("selfhost/codegen.lz80n")), ("parser_core.lz80n", rd("selfhost/parser_core.lz80n"))];
+    let as_refs = |v: &Vec<(&'static str, Vec<u8>)>| v.iter().map(|(n, d)| (*n, d.clone())).collect::<Vec<_>>();
+    let srcs = as_refs(&sources);
+    let refs: Vec<(&str, &[u8])> = srcs.iter().map(|(n, d)| (*n, d.as_slice())).collect();
+    let t = std::time::Instant::now();
+    let asm2 = sh.compile_files(&refs).unwrap_or_else(|e| panic!("stage 1 compiling codegen.lz80n: {e}"));
+    eprintln!("stage 1 -> stage 2: {} lines of assembly, {:.1} s", asm2.lines().count(), t.elapsed().as_secs_f64());
+    let out = crate::asm::assemble(&asm2, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembling stage 2: {}", e[0]));
+    let stage1 = std::mem::replace(&mut sh.cg, (out.nex.clone().unwrap().1, out.symbols16()));
+    // test programs: same assembly from both stages
+    let progs = [
+        "print(\"Hi\", 42)",
+        "function f(byte n) -> word\n    if n < 2 then return 1 end\n    return n * f(n - 1)\nend\nstring s = \"x\" .. f(5)\nlong l = 100000 * 3\nprint(s, l)\n",
+    ];
+    for p in progs {
+        let a2 = sh.compile(p).unwrap();
+        let sh1 = SelfHost { lex: sh.lex.clone(), cg: stage1.clone() };
+        let a1 = sh1.compile(p).unwrap();
+        assert!(a1 == a2, "stage 1 and stage 2 differ for:\n{p}");
+    }
+    // the fixed point
+    let t = std::time::Instant::now();
+    let asm3 = sh.compile_files(&refs).unwrap_or_else(|e| panic!("stage 2 compiling codegen.lz80n: {e}"));
+    eprintln!("stage 2 -> stage 3: {:.1} s", t.elapsed().as_secs_f64());
+    assert!(asm3 == asm2, "stage 2 compiles itself differently from stage 1");
+}
+
