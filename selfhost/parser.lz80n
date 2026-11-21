@@ -74,8 +74,8 @@ end
 function out_quoted(word t)
     out_byte('"')
     word i = 0
-    word o = toff[t]
-    while i < tlen[t] do
+    word o = toff_(t)
+    while i < tlen_(t) do
         byte c = tpool[o + i]
         if c < 32 or c > 126 or c == '"' or c == '\\' then
             out_byte('\\')
@@ -98,8 +98,8 @@ function out_name(word t)
         return
     end
     word i = 0
-    word o = toff[t]
-    while i < tlen[t] do
+    word o = toff_(t)
+    while i < tlen_(t) do
         out_byte(tpool[o + i])
         i += 1
     end
@@ -108,8 +108,8 @@ end
 -- a signed literal: token value, negated
 function out_value(word t, byte neg)
     out_byte(' ')
-    if neg ~= 0 and (tvl[t] ~= 0 or tvh[t] ~= 0) then out_byte('-') end
-    out_dec(tvh[t], tvl[t])
+    if neg ~= 0 and (tval_lo(t) ~= 0 or tval_hi(t) ~= 0) then out_byte('-') end
+    out_dec(tval_hi(t), tval_lo(t))
 end
 
 -- ` expr` or ` _`

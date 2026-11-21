@@ -170,7 +170,10 @@ function line_cost() -> byte
         return n
     end
     if lis("ds ") then return 64 end
-    if lis("rst") or lis("push") or lis("pop") or lis("ex ") or lis("exx") or lis("inc") or lis("dec") or lis("ret") or lis("rla") or lis("rra") or lis("rlca") or lis("rrca") or lis("cpl") or lis("scf") or lis("ccf") or lis("di") or lis("ei") or lis("halt") or lis("nop") then return 1 end
+    if lis("rst") or lis("push") or lis("pop") or lis("ex ") or lis("exx") or lis("inc") or
+            lis("dec") or lis("ret") or lis("rla") or lis("rra") or lis("rlca") or lis("rrca") or
+            lis("cpl") or lis("scf") or lis("ccf") or lis("di") or lis("ei") or lis("halt") or
+            lis("nop") then return 1 end
     return 4
 end
 
@@ -196,8 +199,8 @@ end
 
 function otok(word t)
     word i = 0
-    word o = toff[t]
-    while i < tlen[t] do
+    word o = toff_(t)
+    while i < tlen_(t) do
         ob(tpool[o + i])
         i += 1
     end
@@ -321,8 +324,10 @@ const B_AS_NP = 4328
 const B_AS_RPP = 4392
 const B_AS_PRESC = 4456
 const B_PASSET = 4520
-far word tabw[11448]
-far byte tabb[4776]
+const W_DIMS = 11448        -- dimension records: 3 inner sizes each (record 1 ..)
+const B_FD_DIM = 4776       -- fields: dimension record
+far word tabw[12054]
+far byte tabb[6776]
 
 const MAXSTRUCT = 200
 byte nstructs = 0
@@ -338,7 +343,7 @@ function struct_by_name(word t) -> byte
     if tk[t] ~= T_IDENT then return 255 end
     byte k = 0
     while k < nstructs do
-        if toff[tabw[W_ST_NAME + k]] == toff[t] then return k end
+        if toff_(tabw[W_ST_NAME + k]) == toff_(t) then return k end
         k += 1
     end
     return 255
@@ -349,7 +354,7 @@ function field_find(byte k, word name) -> word
     word f = tabw[W_ST_FF + k]
     word n = 0
     while n < tabw[W_ST_NF + k] do
-        if toff[tabw[W_FD_NAME + (f + n)]] == toff[name] then return f + n end
+        if toff_(tabw[W_FD_NAME + (f + n)]) == toff_(name) then return f + n end
         n += 1
     end
     return 0
@@ -409,7 +414,8 @@ far word sown[8000]         -- params / locals: the function symbol (0 = main)
 far word sid[8000]          -- locals: number; constants: value (low word)
 far word sv2[8000]          -- constants: value (high word); functions: node;
                             -- global arrays: initializer list
-far word slen[8000]         -- arrays: element count (0 = scalar)
+far word slen[8000]         -- arrays: element count (0 = scalar), the first dimension
+far byte sdim[8000]         -- arrays of more dimensions: the record of the others
 far byte sdead[8000]        -- out of scope
 far byte snp[8000]          -- functions: number of parameters
 far byte spage[8000]        -- far arrays: first 8K page (0 = not far)
@@ -424,16 +430,16 @@ word cur_fn = 0             -- function being compiled (0 = main program)
 
 -- identifiers are interned (parser_core): equal names, equal offsets
 function name_hash(word t) -> word
-    return toff[t] & 1023
+    return toff_(t) & 1023
 end
 
 -- a visible local or parameter first, then a global, constant or function
 function lookup(word t) -> word
-    word o = toff[t]
+    word o = toff_(t)
     word s = shead[o & 1023]
     word other = 0
     while s ~= 0 do
-        if sdead[s] == 0 and toff[sname[s]] == o then
+        if sdead[s] == 0 and toff_(sname[s]) == o then
             byte k = sk[s]
             if k == SK_LOCAL or k == SK_PARAM then return s end
             if other == 0 and not (k == SK_FUNC and sstruct[s] ~= 0) then other = s end
@@ -446,9 +452,9 @@ end
 -- the method `name` of struct k or of its parents, 0 if there is none
 function method_find(byte k, word name) -> word
     while k ~= 255 do
-        word s = shead[toff[name] & 1023]
+        word s = shead[toff_(name) & 1023]
         while s ~= 0 do
-            if sk[s] == SK_FUNC and sstruct[s] == k + 1 and toff[sname[s]] == toff[name] then return s end
+            if sk[s] == SK_FUNC and sstruct[s] == k + 1 and toff_(sname[s]) == toff_(name) then return s end
             s = snext[s]
         end
         k = tabb[B_ST_PARENT + k]
@@ -479,6 +485,7 @@ function new_sym(byte kind, word name, byte ty) -> word
     sown[s] = cur_fn
     sdead[s] = 0
     slen[s] = 0
+    sdim[s] = 0
     sid[s] = 0
     sv2[s] = 0
     spage[s] = 0
@@ -606,7 +613,7 @@ long cv                     -- result of const_eval
 
 function lit_val(word n) -> long
     word t = n1[n]
-    long v = long(tvh[t]) << 16 | long(tvl[t])
+    long v = long(tval_hi(t)) << 16 | long(tval_lo(t))
     if nf[n] ~= 0 then v = 0 - v end
     return v
 end
@@ -624,7 +631,7 @@ function const_eval(word e) -> bool
     end
     if k == E_NAME then
         word s = lookup(n1[e])
-        if s ~= 0 and sk[s] == SK_CONST then
+        if s ~= 0 and sk[s] == SK_CONST and sty[s] ~= TY_STR then
             cv = const_value(s)
             return true
         end
@@ -647,6 +654,17 @@ function const_eval(word e) -> bool
             byte im = asset_arg(a, AK_IMG)
             if im == 255 then return false end
             if text_is(n1[e], "image_width") then cv = tabw[W_AS_W + im] else cv = tabw[W_AS_H + im] end
+            return true
+        end
+        if text_is(n1[e], "clamp") then
+            if a == 0 or nx[a] == 0 or nx[nx[a]] == 0 or nx[nx[nx[a]]] ~= 0 then return false end
+            if not const_eval(a) then return false end
+            long x = cv
+            if not const_eval(nx[a]) then return false end
+            if x < cv then x = cv end
+            if not const_eval(nx[nx[a]]) then return false end
+            if x > cv then x = cv end
+            cv = x
             return true
         end
         bool is_abs = text_is(n1[e], "abs")
@@ -715,6 +733,7 @@ function nat(word e) -> byte
     if k == E_NAME then
         if is_self(n1[e]) then return TY_STRUCT + sstruct[cur_fn] - 1 end
         word s = lookup(n1[e])
+        if s ~= 0 and sk[s] == SK_CONST and sty[s] == TY_STR then return TY_STR end
         if s == 0 or sk[s] == SK_CONST or sk[s] == SK_ASSET then return TY_NONE end
         return sty[s]
     end
@@ -746,8 +765,15 @@ function nat(word e) -> byte
         word name = n1[e]
         byte c = is_cast(name)
         if c ~= TY_BAD then return c end
-        if (text_is(name, "abs") or text_is(name, "min") or text_is(name, "max")) and const_eval(e) then return TY_NONE end
-        if text_is(name, "chr") or text_is(name, "str") then return TY_STR end
+        if (text_is(name, "abs") or text_is(name, "min") or text_is(name, "max") or text_is(name, "clamp")) and const_eval(e) then return TY_NONE end
+        if text_is(name, "chr") or text_is(name, "str") or text_is(name, "sub") or text_is(name, "upper") or text_is(name, "lower") then return TY_STR end
+        if text_is(name, "find") or text_is(name, "sqrt") then return TY_BYTE end
+        if text_is(name, "val") then return TY_SWORD end
+        if text_is(name, "clamp") then
+            word ca = n2[e]
+            if ca == 0 or nx[ca] == 0 or nx[nx[ca]] == 0 then return TY_NONE end
+            return join(join(nat(ca), nat(nx[ca])), nat(nx[nx[ca]]))
+        end
         if text_is(name, "len") or text_is(name, "asc") then return TY_BYTE end
         if text_is(name, "addr") or text_is(name, "image_width") or text_is(name, "image_height") then return TY_WORD end
         if text_is(name, "sample_playing") then return TY_BOOL end
@@ -935,18 +961,18 @@ end
 function text_isx(word t, string s)-> bool
     byte n = len(s)
     if tk[t] ~= T_IDENT then return false end
-    word o = toff[t]
+    word o = toff_(t)
     word j = 0
     byte i = 0
     while i < n do
         byte c = asc(s, i)
         if c ~= '|' then
-            if j >= tlen[t] or tpool[o + j] ~= c then return false end
+            if j >= tlen_(t) or tpool[o + j] ~= c then return false end
             j += 1
         end
         i += 1
     end
-    return j == tlen[t]
+    return j == tlen_(t)
 end
 
 -- memory[] 1, port[] 2, nextreg[] 3, else 0
@@ -1012,11 +1038,244 @@ end
 
 
 -- A far element is mapped into MMU slot 1 last (after the index).
--- what gen_place would give, without code: pt_ty, pt_len (array: count)
+-- ---- arrays of more dimensions
+-- `m[4][8]`: slen = 4 and a record of the inner sizes {8, 0, 0}. A part of
+-- an array is a "view": record * 4 + the index of its next inner size, 0
+-- when there is none (the elements are single values).
+
+const MAXDIMS = 200
+byte ndims = 0
+word dd_n = 0               -- decl_dims: the first size
+word dd_sub[3]              --   the inner sizes (0: none)
+long dd_inner = 1           --   their product
+
+function dim_at(word v, byte k) -> word
+    if v == 0 or k >= 3 then return 0 end
+    return tabw[W_DIMS + (v / 4) * 3 + k]
+end
+
+-- elements of one step of a view (the product of its inner sizes)
+function view_elems(word v) -> long
+    if v == 0 then return 1 end
+    long n = 1
+    byte k = byte(v % 4)
+    while k < 3 and dim_at(v, k) ~= 0 do
+        n *= dim_at(v, k)
+        k += 1
+    end
+    return n
+end
+
+-- the view after one index
+function view_next(word v) -> word
+    if v == 0 then return 0 end
+    byte k = byte(v % 4)
+    if k + 1 < 3 and dim_at(v, k + 1) ~= 0 then return v + 1 end
+    return 0
+end
+
+-- the sizes of a declaration (n3 = size, init = the initializer)
+function decl_dims(word at, word size, word init) -> bool
+    dd_sub[0] = 0
+    dd_sub[1] = 0
+    dd_sub[2] = 0
+    dd_inner = 1
+    word first = size
+    if nk[size] == E_LIST and n1[size] ~= 0 then
+        first = n1[size]
+        word d = nx[first]
+        byte k = 0
+        while d ~= 0 do
+            if k >= 3 then
+                if fail_node(at) then msg("arrays have at most 4 dimensions") end
+                return false
+            end
+            if nk[d] == E_LIST then
+                if fail_node(d) then msg("only the first size can be `[]`") end
+                return false
+            end
+            if not const_eval(d) or cv < 1 or cv > 65535 then
+                if fail_node(d) then msg("an array size must be a constant 1..65535") end
+                return false
+            end
+            dd_sub[k] = word(cv)
+            dd_inner *= cv
+            k += 1
+            d = nx[d]
+        end
+    end
+    if nk[first] == E_LIST then
+        -- `[]`: from the initializer list
+        if init == 0 or nk[init] ~= E_LIST then
+            if fail_node(at) then msg("`[]` needs an initializer list to take its size from") end
+            return false
+        end
+        long items = count(n1[init])
+        bool rows = false
+        word it = n1[init]
+        while it ~= 0 do
+            if nk[it] == E_LIST then rows = true end
+            it = nx[it]
+        end
+        if not (rows and dd_sub[0] ~= 0) then items = (items + dd_inner - 1) / dd_inner end
+        dd_n = word(items)
+    else
+        if not const_eval(first) or cv < 1 or cv > 65535 then
+            if fail_node(first) then msg("an array size must be a constant 1..65535") end
+            return false
+        end
+        dd_n = word(cv)
+    end
+    if long(dd_n) * dd_inner > 65535 then
+        if fail_node(at) then msg("array too large") end
+        return false
+    end
+    return true
+end
+
+-- a record for dd_sub (0 when there are no inner sizes)
+function dims_record() -> byte
+    if dd_sub[0] == 0 then return 0 end
+    if ndims >= MAXDIMS - 1 then
+        if fail_at(0, 0) then msg("too many arrays of more dimensions") end
+        return 0
+    end
+    ndims += 1
+    for k = 0, 2 do tabw[W_DIMS + word(ndims) * 3 + k] = dd_sub[k] end
+    return ndims
+end
+
+-- all the elements of symbol s
+function sym_total(word s) -> word
+    if slen[s] == 0 then return 0 end
+    if sdim[s] == 0 then return slen[s] end
+    return word(long(slen[s]) * view_elems(word(sdim[s]) * 4))
+end
+
+function fd_total(word x) -> word
+    word n = tabw[W_FD_LEN + x]
+    if n == 0 or tabb[B_FD_DIM + x] == 0 then return n end
+    return word(long(n) * view_elems(word(tabb[B_FD_DIM + x]) * 4))
+end
+
+-- an initializer list in element order (nested lists are rows, short rows
+-- are padded with 0 = the default value): flat_[0 .. nflat)
+const MAXFLAT = 4096
+far word flat_[4096]
+word nflat = 0
+word fl_dims[4]
+byte fl_nd = 0
+
+function flat_add(word item) -> bool
+    if nflat >= MAXFLAT then
+        if fail_node(item) then msg("not supported by the self-hosted compiler yet: initializer lists of more than 4096 values") end
+        return false
+    end
+    flat_[nflat] = item
+    nflat += 1
+    return true
+end
+
+function flat_rows(word items, byte d, bool st) -> bool
+    bool nested = false
+    if not (st and d + 1 == fl_nd) then
+        word it = items
+        while it ~= 0 do
+            if nk[it] == E_LIST then nested = true end
+            it = nx[it]
+        end
+    end
+    word it = items
+    if not nested then
+        while it ~= 0 do
+            if not flat_add(it) then return false end
+            it = nx[it]
+        end
+        return true
+    end
+    if d + 1 >= fl_nd then
+        if fail_node(items) then msg("too many levels of `{...}` for this array") end
+        return false
+    end
+    long row = 1
+    byte k = d + 1
+    while k < fl_nd do
+        row *= fl_dims[k]
+        k += 1
+    end
+    while it ~= 0 do
+        if nk[it] ~= E_LIST then
+            if fail_node(it) then msg("write every row as a `{...}` list") end
+            return false
+        end
+        word start = nflat
+        if not flat_rows(n1[it], d + 1, st) then return false end
+        if long(nflat - start) > row then
+            if fail_node(it) then msg("too many values for a row") end
+            return false
+        end
+        while long(nflat - start) < row do
+            if not flat_add(0) then return false end
+        end
+        it = nx[it]
+    end
+    return true
+end
+
+-- the initializer of array symbol v, flattened
+function flatten(word v, word init) -> bool
+    nflat = 0
+    fl_nd = 1
+    fl_dims[0] = slen[v]
+    byte k = 0
+    while k < 3 and dim_at(word(sdim[v]) * 4, k) ~= 0 do
+        fl_dims[fl_nd] = dim_at(word(sdim[v]) * 4, k)
+        fl_nd += 1
+        k += 1
+    end
+    if not flat_rows(n1[init], 0, is_struct(sty[v])) then return false end
+    if nflat > sym_total(v) then
+        if fail_node(init) then msg("too many values for this array") end
+        return false
+    end
+    return true
+end
+
+-- HL = byte offset of element e (an index chain) in its far array
+function gen_far_off(word e)
+    word base = n1[e]
+    place_type(base)
+    long stride = long(tstore(pt_ty)) * view_elems(pt_dv)
+    if nk[base] == E_INDEX then
+        gen_far_off(base)
+        oi("push hl")
+        gen(n2[e], 2, false)
+        scale_n(word(stride))
+        oi("pop de")
+        oi("add hl,de")
+        return
+    end
+    gen(n2[e], 2, false)
+    scale_n(word(stride))
+end
+
+-- the far array an index chain is into (0: none)
+function far_root(word e) -> word
+    while nk[e] == E_INDEX do e = n1[e] end
+    if nk[e] ~= E_NAME or is_self(n1[e]) then return 0 end
+    word s = lookup(n1[e])
+    if s ~= 0 and spage[s] ~= 0 and sk[s] ~= SK_CONST then return s end
+    return 0
+end
+
+-- what gen_place would give, without code: pt_ty, pt_len (array: count),
+-- pt_dv (its view)
 byte pt_ty
 word pt_len
+word pt_dv = 0
 function place_type(word e) -> bool
     byte k = nk[e]
+    pt_dv = 0
     if k == E_NAME then
         if is_self(n1[e]) then
             pt_ty = TY_STRUCT + sstruct[cur_fn] - 1
@@ -1027,6 +1286,7 @@ function place_type(word e) -> bool
         if s == 0 or sk[s] == SK_CONST or sk[s] == SK_FUNC or sk[s] == SK_ASSET then return false end
         pt_ty = sty[s]
         pt_len = slen[s]
+        pt_dv = word(sdim[s]) * 4
         return true
     end
     if k == E_INDEX then
@@ -1036,7 +1296,8 @@ function place_type(word e) -> bool
             return true
         end
         if not place_type(n1[e]) or pt_len == 0 then return false end
-        pt_len = 0
+        pt_len = dim_at(pt_dv, byte(pt_dv % 4))
+        pt_dv = view_next(pt_dv)
         return true
     end
     if k == E_FIELD then
@@ -1045,6 +1306,7 @@ function place_type(word e) -> bool
         if f == 0 then return false end
         pt_ty = tabb[B_FD_TY + f]
         pt_len = tabw[W_FD_LEN + f]
+        pt_dv = word(tabb[B_FD_DIM + f]) * 4
         return true
     end
     if k == E_CALL or k == E_METHOD then
@@ -1059,8 +1321,13 @@ function place_type(word e) -> bool
 end
 
 -- HL = element index * size of t
+-- HL = element index * size of t
 function scale(byte t)
-    word sz = tstore(t)
+    scale_n(tstore(t))
+end
+
+-- HL = HL * sz
+function scale_n(word sz)
     if sz == 1 then return end
     if sz == 2 then
         oi("add hl,hl")
@@ -1080,9 +1347,11 @@ end
 -- into MMU slot 1 last.
 byte pl_ty
 word pl_len
+word pl_dv = 0
 function gen_place(word e)
     if failed then return end
     byte k = nk[e]
+    pl_dv = 0
     if k == E_NAME then
         if is_self(n1[e]) then
             o_ins_lab("ld hl,(", cur_fn + 1, ")")
@@ -1098,6 +1367,7 @@ function gen_place(word e)
         end
         pl_ty = sty[s]
         pl_len = slen[s]
+        pl_dv = word(sdim[s]) * 4
         if is_ref_param(s) then o_ins_lab("ld hl,(", s, ")") else o_ins_lab("ld hl,", s, "") end
         return
     end
@@ -1114,33 +1384,30 @@ function gen_place(word e)
             return
         end
         word base = n1[e]
-        if nk[base] == E_NAME and not is_self(n1[base]) then
-            word s = lookup(n1[base])
-            if s ~= 0 and spage[s] ~= 0 then
-                gen(n2[e], 2, false)
-                scale(sty[s])
-                os("    ld a,")
-                odec(spage[s])
-                onl()
-                oi("call rt_far_map")
-                pl_ty = sty[s]
-                pl_len = 0
-                return
-            end
-        end
         if not place_type(base) or pt_len == 0 then
             if fail_node(e) then msg("not an array") end
             return
         end
-        byte et = pt_ty
-        gen(n2[e], 2, false)
-        scale(et)
-        oi("push hl")
-        gen_place(base)
-        oi("pop de")
-        oi("add hl,de")
-        pl_ty = et
-        pl_len = 0
+        long stride = long(tstore(pt_ty)) * view_elems(pt_dv)
+        word fs = far_root(e)
+        if fs ~= 0 then
+            gen_far_off(e)
+            os("    ld a,")
+            odec(spage[fs])
+            onl()
+            oi("call rt_far_map")
+        else
+            gen(n2[e], 2, false)
+            scale_n(word(stride))
+            oi("push hl")
+            gen_place(base)
+            oi("pop de")
+            oi("add hl,de")
+        end
+        place_type(e)
+        pl_ty = pt_ty
+        pl_len = pt_len
+        pl_dv = pt_dv
         return
     end
     if k == E_FIELD then
@@ -1167,6 +1434,7 @@ function gen_place(word e)
         end
         pl_ty = tabb[B_FD_TY + f]
         pl_len = tabw[W_FD_LEN + f]
+        pl_dv = word(tabb[B_FD_DIM + f]) * 4
         return
     end
     if k == E_CALL or k == E_METHOD then
@@ -1394,9 +1662,9 @@ function gen(word e, byte w, bool sg)
     elseif k == E_NAME then
         word s = var_sym(e, n1[e])
         if s == 0 then return end
-        if sk[s] == SK_CONST then
+        if sk[s] == SK_CONST and sty[s] ~= TY_STR then
             load_const(const_value(s), w, sg)
-        elseif slen[s] ~= 0 or sty[s] == TY_STR or is_struct(sty[s]) then
+        elseif sk[s] == SK_CONST or slen[s] ~= 0 or sty[s] == TY_STR or is_struct(sty[s]) then
             if fail_node(e) then msg("not a number") end
         else
             load_sym(s)
@@ -1468,7 +1736,7 @@ function gen(word e, byte w, bool sg)
             gen_arith(op, n1[e], n2[e], w, sg)
         end
     elseif k == E_CALL then
-        if (text_is(n1[e], "abs") or text_is(n1[e], "min") or text_is(n1[e], "max")) and const_eval(e) then
+        if (text_is(n1[e], "abs") or text_is(n1[e], "min") or text_is(n1[e], "max") or text_is(n1[e], "clamp")) and const_eval(e) then
             load_const(cv, w, sg)
             return
         end
@@ -1491,11 +1759,20 @@ function gen32(word e)
         load_const(cv, 4, true)
         return
     end
+    if k == E_CALL and const_eval(e) then
+        -- abs / min / max / clamp / image sizes of constants
+        load_const(cv, 4, true)
+        return
+    end
     if k == E_NAME then
         word s = var_sym(e, n1[e])
         if s == 0 then return end
         if sk[s] == SK_CONST then
-            load_const(const_value(s), 4, true)
+            if sty[s] == TY_STR then
+                if fail_node(e) then msg("not a number") end
+            else
+                load_const(const_value(s), 4, true)
+            end
             return
         end
     end
@@ -1578,6 +1855,15 @@ function gen_str(word e)
         onl()
         return
     end
+    if k == E_NAME then
+        word sc = lookup(n1[e])
+        if sc ~= 0 and sk[sc] == SK_CONST and sty[sc] == TY_STR then
+            os("    ld hl,ps_")
+            odec(pstr_label(sid[sc]))
+            onl()
+            return
+        end
+    end
     if k == E_NAME or k == E_INDEX or k == E_FIELD then
         gen_place(e)
         if failed then return end
@@ -1609,6 +1895,35 @@ function gen_str(word e)
             o_ins_lab("ld (", t, "+1),a")
             oi("ld a,1")
             o_ins_lab("ld (", t, "),a")
+            o_ins_lab("ld hl,", t, "")
+            return
+        end
+        if text_is(name, "sub") then
+            -- sub(s, from, count): B = from, C = count, DE = the result
+            if not want_args(e, 3) then return end
+            t = temp_str()
+            gen(nx[nx[n2[e]]], 1, false)
+            oi("push hl")
+            gen(nx[n2[e]], 1, false)
+            oi("push hl")
+            gen_str(n2[e])
+            oi("pop de")
+            oi("ld b,e")
+            oi("pop de")
+            oi("ld c,e")
+            o_ins_lab("ld de,", t, "")
+            oi("call rt_ssub")
+            o_ins_lab("ld hl,", t, "")
+            return
+        end
+        if text_is(name, "upper") or text_is(name, "lower") then
+            if not want_args(e, 1) then return end
+            t = temp_str()
+            gen_str(n2[e])
+            o_ins_lab("ld de,", t, "")
+            oi("call rt_scopy")
+            o_ins_lab("ld hl,", t, "")
+            if text_is(name, "upper") then oi("call rt_supper") else oi("call rt_slower") end
             o_ins_lab("ld hl,", t, "")
             return
         end
@@ -1727,7 +2042,7 @@ function gen_call(word e, byte w, bool sg)
         if w == 4 then extend32(false) end
         return
     end
-    if text_is(name, "chr") or text_is(name, "str") then
+    if text_is(name, "chr") or text_is(name, "str") or text_is(name, "sub") or text_is(name, "upper") or text_is(name, "lower") then
         if fail_node(e) then msg("a string is not a number") end
         return
     end
@@ -1748,6 +2063,28 @@ function gen_call(word e, byte w, bool sg)
     if w == 4 and tsize(r) < 4 then extend32(tsigned(r)) end
 end
 
+-- DE = a, HL = b -> HL = min(a, b) / max(a, b)
+function o_minmax(bool is_min, bool sg)
+    oi("push hl")
+    oi("push de")
+    if sg then
+        oi("ld a,h")
+        oi("xor $80")
+        oi("ld h,a")
+        oi("ld a,d")
+        oi("xor $80")
+        oi("ld d,a")
+    end
+    oi("or a")
+    oi("sbc hl,de")         -- C: b < a
+    oi("pop de")
+    oi("pop hl")
+    word keep = new_label()
+    if is_min then jp("jr c,", keep) else jp("jr nc,", keep) end
+    oi("ex de,hl")
+    label(keep)
+end
+
 -- built-in functions with a value: true if e is one (its value in HL / DE:HL)
 function builtin_expr(word e, byte w) -> bool
     word name = n1[e]
@@ -1761,6 +2098,63 @@ function builtin_expr(word e, byte w) -> bool
         end
         load_const(cv, 2, false)
         if w == 4 then extend32(false) end
+        return true
+    end
+    if text_is(name, "find") then
+        if not want_args(e, 2) then return true end
+        gen_str(a)
+        byte bk = nk[nx[a]]
+        if bk ~= E_STR and bk ~= E_NAME and bk ~= E_INDEX and bk ~= E_FIELD then
+            -- the second string may reuse the first one's temporary
+            word ft = temp_str()
+            o_ins_lab("ld de,", ft, "")
+            oi("call rt_scopy")
+            o_ins_lab("ld hl,", ft, "")
+        end
+        oi("push hl")
+        gen_str(nx[a])
+        oi("ex de,hl")
+        oi("pop hl")
+        oi("call rt_sfind")
+        extend_a(TY_BYTE)
+        if w == 4 then extend32(false) end
+        return true
+    end
+    if text_is(name, "val") then
+        if not want_args(e, 1) then return true end
+        gen_str(a)
+        oi("call rt_sval")
+        if w == 4 then extend32(true) end
+        return true
+    end
+    if text_is(name, "sqrt") then
+        if not want_args(e, 1) then return true end
+        gen(a, 2, false)
+        oi("call rt_isqrt16")
+        oi("ld a,d")
+        extend_a(TY_BYTE)
+        if w == 4 then extend32(false) end
+        return true
+    end
+    if text_is(name, "clamp") then
+        -- min(max(x, lo), hi)
+        if not want_args(e, 3) then return true end
+        byte ct = nat(e)
+        if ct == TY_NONE then
+            ct = join(join(ctx_ty(TY_NONE, a), ctx_ty(TY_NONE, nx[a])), ctx_ty(TY_NONE, nx[nx[a]]))
+        end
+        if ct == TY_LONG then
+            unsupported(e, "clamp of long values")
+            return true
+        end
+        bool csg = tsigned(ct)
+        gen_pair(a, nx[a], tsize(ct), csg)
+        o_minmax(false, csg)
+        oi("push hl")
+        gen(nx[nx[a]], tsize(ct), csg)
+        oi("pop de")
+        o_minmax(true, csg)
+        if w == 4 then extend32(csg) end
         return true
     end
     if text_is(name, "note_period") then
@@ -1865,24 +2259,7 @@ function builtin_expr(word e, byte w) -> bool
         end
         bool sg = tsigned(t)
         gen_pair(a, nx[a], tsize(t), sg)     -- DE = a, HL = b
-        oi("push hl")
-        oi("push de")
-        if sg then
-            oi("ld a,h")
-            oi("xor $80")
-            oi("ld h,a")
-            oi("ld a,d")
-            oi("xor $80")
-            oi("ld d,a")
-        end
-        oi("or a")
-        oi("sbc hl,de")         -- C: b < a
-        oi("pop de")
-        oi("pop hl")
-        word keep = new_label()
-        if is_min then jp("jr c,", keep) else jp("jr nc,", keep) end
-        oi("ex de,hl")
-        label(keep)
+        o_minmax(is_min, sg)
         rt = t
     else
         return false
@@ -2223,6 +2600,10 @@ function fill_fields(word e, byte k, word d, word items)
         end
         word x = tabw[W_ST_FF + k] + n
         if tabw[W_FD_LEN + x] ~= 0 then
+            if tabb[B_FD_DIM + x] ~= 0 then
+                unsupported(it, "lists for fields of more dimensions")
+                return
+            end
             if nk[it] ~= E_LIST then
                 if fail_node(it) then
                     msg("field `")
@@ -2412,7 +2793,7 @@ end
 function declare_struct_var(word v, word init)
     byte ty = sty[v]
     byte k = ty - TY_STRUCT
-    word n = slen[v]
+    word n = sym_total(v)
     word size = tabw[W_ST_SIZE + k]
     if has_defaults(k) then
         o_ins_lab("ld de,", v, "")
@@ -2443,17 +2824,15 @@ function declare_struct_var(word v, word init)
         if fail_node(init) then msg("an array of structs takes a `{...}` list") end
         return
     end
-    word item = n1[init]
+    if not flatten(v, init) then return end
     word i = 0
-    while item ~= 0 and not failed do
-        if i >= n then
-            if fail_node(item) then msg("too many values for this array") end
-            return
+    while i < nflat and not failed do
+        word item = flat_[i]
+        if item ~= 0 then
+            o_ins_lab("ld hl,", v, "")
+            add_off(i * size)
+            struct_into_hl(ty, item)
         end
-        o_ins_lab("ld hl,", v, "")
-        add_off(i * size)
-        struct_into_hl(ty, item)
-        item = nx[item]
         i += 1
     end
 end
@@ -2465,7 +2844,7 @@ function out_image(byte k)
     while n < tabw[W_ST_NF + k] do
         word x = f + n
         byte t = tabb[B_FD_TY + x]
-        word cnt = tabw[W_FD_LEN + x]
+        word cnt = fd_total(x)
         if cnt == 0 then cnt = 1 end
         if is_struct(t) then
             word j = 0
@@ -2541,6 +2920,7 @@ function declare_struct(word it)
             tabw[W_FD_NAME + nfields] = tabw[W_FD_NAME + a]
             tabb[B_FD_TY + nfields] = tabb[B_FD_TY + a]
             tabw[W_FD_LEN + nfields] = tabw[W_FD_LEN + a]
+            tabb[B_FD_DIM + nfields] = tabb[B_FD_DIM + a]
             tabw[W_FD_OFF + nfields] = tabw[W_FD_OFF + a]
             tabb[B_FD_HASDEF + nfields] = tabb[B_FD_HASDEF + a]
             tabw[W_FD_DEFL + nfields] = tabw[W_FD_DEFL + a]
@@ -2566,17 +2946,14 @@ function declare_struct(word it)
             return
         end
         word cnt = 0
+        byte fdim = 0
+        long total = 0
         word size = n3[fdn]
         if size ~= 0 then
-            if nk[size] == E_LIST then
-                unsupported(fdn, "array fields of more than one dimension")
-                return
-            end
-            if not const_eval(size) or cv < 1 or cv > 65535 then
-                if fail_node(size) then msg("an array size must be a constant 1..65535") end
-                return
-            end
-            cnt = word(cv)
+            if not decl_dims(fdn, size, 0) then return end
+            cnt = dd_n
+            fdim = dims_record()
+            total = long(dd_n) * dd_inner
         end
         if nfields >= MAXFIELD - 1 then
             if fail_node(it) then msg("too many fields") end
@@ -2586,6 +2963,7 @@ function declare_struct(word it)
         tabw[W_FD_NAME + nfields] = n1[fdn]
         tabb[B_FD_TY + nfields] = t
         tabw[W_FD_LEN + nfields] = cnt
+        tabb[B_FD_DIM + nfields] = fdim
         tabw[W_FD_OFF + nfields] = word(off)
         tabb[B_FD_HASDEF + nfields] = 0
         tabw[W_FD_DEFL + nfields] = 0
@@ -2604,7 +2982,7 @@ function declare_struct(word it)
             tabw[W_FD_DEFH + nfields] = word(cv >> 16)
         end
         tabw[W_ST_NF + k] += 1
-        long c = long(cnt)
+        long c = total
         if c == 0 then c = 1 end
         off += c * tstore(t)
         if off > 65535 then
@@ -2736,14 +3114,14 @@ function declare_asset(word it)
         return
     end
     word pt = n2[it]
-    if tlen[pt] > 64 then
+    if tlen_(pt) > 64 then
         if fail_node(it) then msg("the path of an asset can be at most 64 characters") end
         return
     end
     apath = ""
     word i = 0
-    while i < tlen[pt] do
-        apath = apath .. chr(tpool[toff[pt] + i])
+    while i < tlen_(pt) do
+        apath = apath .. chr(tpool[toff_(pt) + i])
         i += 1
     end
     byte a = nassets
@@ -3005,9 +3383,9 @@ function collect_calls(word f, word n)
                 if st ~= 255 and tabw[W_ST_INIT + st] ~= 0 then add_edge(f, tabw[W_ST_INIT + st]) end
             end
         elseif k == E_METHOD then
-            word m = shead[toff[n2[n]] & 1023]
+            word m = shead[toff_(n2[n]) & 1023]
             while m ~= 0 do
-                if sk[m] == SK_FUNC and sstruct[m] ~= 0 and toff[sname[m]] == toff[n2[n]] then add_edge(f, m) end
+                if sk[m] == SK_FUNC and sstruct[m] ~= 0 and toff_(sname[m]) == toff_(n2[n]) then add_edge(f, m) end
                 m = snext[m]
             end
         end
@@ -3239,7 +3617,9 @@ function declare_var(word s, bool top, bool far_)
     if nf[s] ~= 0 then
         -- const: the value at compile time
         if nk[init] == E_STR then
-            unsupported(s, "string constants")
+            if top and lookup(name) ~= 0 then return end
+            word sc = new_sym(SK_CONST, name, TY_STR)
+            sid[sc] = n1[init]          -- the text token
             return
         end
         if not const_eval(init) then
@@ -3275,24 +3655,12 @@ function declare_var(word s, bool top, bool far_)
         end
         word size = n3[s]
         if size ~= 0 then
-            if nk[size] == E_LIST then
-                if n1[size] ~= 0 then
-                    unsupported(s, "arrays of more than one dimension")
-                    return
-                end
-                -- `[]`: the size of the list
-                if init == 0 or nk[init] ~= E_LIST then return end
-                slen[v] = count(n1[init])
-            else
-                if not const_eval(size) or cv < 1 or cv > 65535 then
-                    if fail_node(size) then msg("an array size must be a constant 1..65535") end
-                    return
-                end
-                slen[v] = word(cv)
-            end
+            if not decl_dims(s, size, init) then return end
+            slen[v] = dd_n
+            sdim[v] = dims_record()
         end
         if far_ then
-            long bytes = long(slen[v]) * tstore(ty)
+            long bytes = long(sym_total(v)) * tstore(ty)
             byte pages = byte((bytes + 8191) / 8192)
             bool defs = is_struct(ty) and has_defaults(ty - TY_STRUCT)
             if init ~= 0 or ty == TY_STR or bytes > 65536 or defs then
@@ -3316,11 +3684,12 @@ function declare_var(word s, bool top, bool far_)
             return
         end
         -- a local array or a string array: store the values
-        word item = n1[init]
+        if not flatten(v, init) then return end
         word i = 0
-        while item ~= 0 and not failed do
+        while i < nflat and not failed do
+            word item = flat_[i]
             if ty == TY_STR then
-                gen_str(item)
+                if item == 0 then oi("ld hl,ps_empty") else gen_str(item) end
                 oi("push hl")
                 load_const(i, 2, false)
                 oi("ld de,65")
@@ -3331,7 +3700,7 @@ function declare_var(word s, bool top, bool far_)
                 oi("pop hl")
                 oi("call rt_scopy")
             else
-                gen_for(item, ty)
+                if item == 0 then load_const(0, tsize(ty), false) else gen_for(item, ty) end
                 push_val(ty)
                 load_const(i, 2, false)
                 if tsize(ty) == 2 then oi("add hl,hl") end
@@ -3343,7 +3712,6 @@ function declare_var(word s, bool top, bool far_)
                 oi("add hl,de")
                 store_at_hl(ty)
             end
-            item = nx[item]
             i += 1
         end
         return
@@ -3718,8 +4086,8 @@ function cg_stmt(word s)
         -- the body, verbatim (each line ends with a newline)
         word t = n1[s]
         word i = 0
-        word o = toff[t]
-        while i < tlen[t] do
+        word o = toff_(t)
+        while i < tlen_(t) do
             ob(tpool[o + i])
             i += 1
         end
@@ -3823,7 +4191,7 @@ function global_data() -> word
     word s = 1
     while s <= nsy do
         if sk[s] == SK_GLOBAL and spage[s] == 0 then
-            word n = slen[s]
+            word n = sym_total(s)
             if n == 0 then n = 1 end
             total += n * tstore(sty[s])
         end
@@ -3869,26 +4237,20 @@ function data_reserve() -> long
             if t == TY_BAD then t = TY_WORD end
             long cnt = 1
             word size = n3[n]
-            if size ~= 0 then
-                if nk[size] == E_LIST then
-                    if n4[n] ~= 0 and nk[n4[n]] == E_LIST then cnt = count(n1[n4[n]]) end
-                elseif const_eval(size) then
-                    cnt = cv
-                end
-            end
+            if size ~= 0 and decl_dims(n, size, n4[n]) then cnt = long(dd_n) * dd_inner end
             total += cnt * tstore(t)
         elseif k == S_FOR then
             total += 4
         elseif k == E_BINARY and nf[n] == B_CONCAT then
             total += 65
-        elseif k == E_CALL and (text_is(n1[n], "chr") or text_is(n1[n], "str")) then
+        elseif k == E_CALL and (text_is(n1[n], "chr") or text_is(n1[n], "str") or text_is(n1[n], "sub") or text_is(n1[n], "upper") or text_is(n1[n], "lower") or text_is(n1[n], "find")) then
             total += 65
         elseif k == E_CALL and struct_by_name(n1[n]) ~= 255 then
             total += tabw[W_ST_SIZE + (struct_by_name(n1[n]))] + 2
         elseif k == E_LIST then
             total += 2
         elseif k == E_STR then
-            total += tlen[n1[n]] + 2
+            total += tlen_(n1[n]) + 2
         end
         n += 1
     end
@@ -3971,7 +4333,7 @@ function data_sym(word s)
     if k ~= SK_GLOBAL and k ~= SK_PARAM and k ~= SK_LOCAL then return end
     if spage[s] ~= 0 then return end
     olab(s)
-    word n = slen[s]
+    word n = sym_total(s)
     if n == 0 then n = 1 end
     word init = 0
     if k == SK_GLOBAL and slen[s] ~= 0 and sty[s] ~= TY_STR and not is_struct(sty[s]) then init = sv2[s] end
@@ -3991,18 +4353,19 @@ function data_sym(word s)
     else
         os(": db ")
     end
-    word item = n1[init]
+    if not flatten(s, init) then return end
     word i = 0
     while i < n do
         if i > 0 then ob(',') end
         long v = 0
+        word item = 0
+        if i < nflat then item = flat_[i] end
         if item ~= 0 then
             if not const_eval(item) then
                 if fail_node(item) then msg("an array initializer must be constant") end
                 return
             end
             v = cv
-            item = nx[item]
         end
         if esz == 4 then
             if v < 0 then
@@ -4026,9 +4389,9 @@ end
 
 function out_literal(word t)
     word j = 0
-    while j < tlen[t] do
+    while j < tlen_(t) do
         if j > 0 then ob(',') end
-        odec(tpool[toff[t] + j])
+        odec(tpool[toff_(t) + j])
         j += 1
     end
 end
@@ -4172,7 +4535,7 @@ function generate()
         odec(i)
         os(": db ")
         out_literal(strs[i])
-        if tlen[strs[i]] > 0 then ob(',') end
+        if tlen_(strs[i]) > 0 then ob(',') end
         os("0\n")
         i += 1
     end
@@ -4181,13 +4544,13 @@ function generate()
         os("ps_")
         odec(i)
         os(": db ")
-        odec(tlen[pstrs[i]])
-        if tlen[pstrs[i]] > 0 then ob(',') end
+        odec(tlen_(pstrs[i]))
+        if tlen_(pstrs[i]) > 0 then ob(',') end
         out_literal(pstrs[i])
         onl()
         i += 1
     end
-    os("sh_ret: ds 4\nsh_reta: db 0\n")
+    os("sh_ret: ds 4\nsh_reta: db 0\nps_empty: db 0\n")
     -- the default images of the structs, the return buffers
     byte sk2 = 0
     while sk2 < nstructs do

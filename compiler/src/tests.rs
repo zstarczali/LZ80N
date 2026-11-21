@@ -5372,3 +5372,73 @@ sample_stop()
     let _ = std::fs::remove_file(ex.join("assets/test_tmp.spr"));
 }
 
+
+/// Arrays of more dimensions (globals, locals, far, struct fields,
+/// initializer rows), string constants and the string / number built-ins
+/// compiled by the self-hosted compiler: the same output as with lz80nc.
+#[test]
+fn selfhost_codegen_arrays_strings() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+byte m[3][4] = {{1, 2, 3}, {4, 5, 6, 7}, {8}}
+word w[2][2][3]
+sword flat[][3] = {1, 2, 3, 4, 5, 6, 7}
+for y = 0, 2 do
+    for x = 0, 3 do write(m[y][x], " ") end
+end
+print("")
+for a = 0, 1 do
+    for b = 0, 1 do
+        for c = 0, 2 do w[a][b][c] = word(a) * 100 + word(b) * 10 + word(c) end
+    end
+end
+print(w[1][0][2], w[0][1][1], w[1][1][2], flat[2][0], flat[1][2])
+m[2][3] += 40
+print(m[2][3], addr(m[1][0]) - addr(m))
+far word big[100][50]
+big[99][49] = 1234
+big[3][7] = 37
+print(big[99][49], big[3][7], big[3][8])
+function local_grid() -> word
+    byte g[2][3] = {{9, 8, 7}, {6, 5}}
+    g[1][2] = 4
+    return word(g[0][0]) * 100 + word(g[1][1]) * 10 + g[1][2]
+end
+print(local_grid())
+struct Board
+    byte cells[3][3]
+    byte turn
+end
+Board bd
+bd.cells[1][2] = 5
+bd.cells[2][2] = 9
+bd.turn = 1
+print(bd.cells[1][2] + bd.cells[2][2], bd.turn)
+Board boards[2]
+boards[1].cells[0][1] = 3
+print(boards[1].cells[0][1], boards[0].cells[0][1])
+string names[2][2] = {{"a", "b"}, {"c"}}
+print(names[0][1], names[1][0], len(names[1][1]))
+"#,
+        r#"
+const TITLE = "LZ80N"
+const N = 3
+string parts[] = {TITLE, "next"}
+print(TITLE, len(TITLE), parts[0] .. "/" .. parts[1])
+string s = "Hello, World"
+print(upper(s), lower(s), sub(s, 7, 5), sub(s, 10, 9), len(sub(s, 20, 3)))
+print(find(s, "World"), find(s, "xyz"), find(upper(s), lower("LD")), find(s, sub("o, W", 0, 2)))
+print(val("-45"), val("7up"), val(""), val(sub("x123", 1, 3)) + 1)
+print(clamp(5, 1, 3), clamp(-5, -2, 9), clamp(200, 10, 100), clamp(word(70), 1, 50))
+print(sqrt(0), sqrt(16), sqrt(1000), sqrt(65535))
+string t = upper("abc") .. sub(TITLE, 2, N)
+print(t)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let want = run(&format!("sh_ar_{i}"), src).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        assert_eq!(run_asm(&asm), want, "program {i}\n{src}");
+    }
+}

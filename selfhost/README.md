@@ -36,7 +36,10 @@ on the examples, the standard modules, both self-hosted sources and 35 edge
 and error cases, and compares `ast.txt` with the Rust tree printed the same
 way.
 
-Limits: 32000 tokens, 32000 tree nodes, 60000 bytes of names/strings/asm.
+Limits: 48000 tokens, 32000 tree nodes, 60000 bytes of names/strings/asm
+(with number values: 4 bytes each). Per token: kind, line, column (at most
+255: longer lines report 255), text offset and length; the word-sized ones
+as two byte arrays, as a `far` array holds at most 64K bytes.
 Speed (28 MHz): about 90 lines per second; `shooter.lz80n` (471 lines) takes
 5.3 s. Most of the time goes into `far` array accesses (each one maps a page)
 and the token file round trip; to be tuned once code generation exists.
@@ -122,10 +125,14 @@ The self-hosted sources must not contain the words that pull in a module
 compiled into them; where they need such a word they write it with a `|`
 (`"p|lot"`) and drop the bar at run time.
 
-Not yet: `fixed`, `fixed16`, multi-dimensional arrays, music assets
-(`.pt3`), interrupts, string constants, the other built-in functions (`dma_*`, `sin`, `upper` ...)
-and the sound module, outlining of very large main programs, and diagnostics of type errors (programs are
-expected to be correct: check them with lz80nc first).
+Also: arrays of up to 4 dimensions (`m[y][x]`, nested or flat initializer
+lists, `far` and struct fields too), string constants, `sub find val upper
+lower clamp sqrt` (integer).
+
+Not yet: `fixed`, `fixed16` (and so `sin cos atan2 round`), music assets
+(`.pt3`) and `music_*`, interrupts, outlining of very large main programs,
+and diagnostics of type errors (programs are expected to be correct: check
+them with lz80nc first).
 
 ## Tests
 
@@ -146,11 +153,12 @@ expected to be correct: check them with lz80nc first).
   patterns, sprites and Layer 2 pages as with lz80nc;
 * `SELFHOST=1 cargo test --release`: every `expect(...)` program of the test
   suite is also compiled by the self-hosted compiler when it supports it
-  (40 of 62 now);
+  (50 of 62 now);
 * `selfhost_codegen_examples` (ignored, a report): which examples the
-  self-hosted compiler compiles: now 13 of the 24 (classes, hello, hires,
-  images, inherit, layer2, modules, move, palette, samples, sprites, tables,
-  text);
+  self-hosted compiler compiles: now 17 of the 24 (all but bignum, math,
+  music, raster, recursion, shapes and shooter);
+* `selfhost_codegen_arrays_strings`: arrays of more dimensions, string
+  constants and the string / number built-ins;
 * `selfhost_export_and_chain`: the exported SD card, every stage started by
   the one before, with and without assets (lexer, codegen, assets, asm).
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the

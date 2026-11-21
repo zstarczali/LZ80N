@@ -562,7 +562,10 @@ function token()
         return
     end
     -- two-character operators consume their second character
-    if k == T_PLUSEQ or k == T_MINUSEQ or k == T_ARROW or k == T_STAREQ or k == T_SLASHEQ or k == T_PERCENTEQ or k == T_SHLEQ or k == T_SHREQ or k == T_LE or k == T_SHL or k == T_GE or k == T_SHR or k == T_AMPEQ or k == T_PIPEEQ or k == T_EQEQ or k == T_NOTEQ or k == T_DOTDOT then
+    if k == T_PLUSEQ or k == T_MINUSEQ or k == T_ARROW or k == T_STAREQ or k == T_SLASHEQ or
+            k == T_PERCENTEQ or k == T_SHLEQ or k == T_SHREQ or k == T_LE or k == T_SHL or k == T_GE or
+            k == T_SHR or k == T_AMPEQ or k == T_PIPEEQ or k == T_EQEQ or k == T_NOTEQ or
+            k == T_DOTDOT then
         bump()
     end
     out_head(k, l, c)
