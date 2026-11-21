@@ -3535,3 +3535,129 @@ print(total, s2, big[2999])
     );
     assert_eq!(out, format!("3000 {}\n3000 {} {}\n", sum as u16, sum as u16, data[2999]));
 }
+
+/// The Rust lexer's tokens in the record format of selfhost/lexer.lz80n.
+fn token_records(src: &str) -> Vec<u8> {
+    use crate::lexer::Tok::*;
+    let mut out = vec![];
+    let head = |out: &mut Vec<u8>, kind: u8, line: u32, col: u32| {
+        out.push(kind);
+        out.extend((line as u16).to_le_bytes());
+        out.extend((col as u16).to_le_bytes());
+    };
+    let text = |out: &mut Vec<u8>, s: &[u8]| {
+        out.extend((s.len() as u16).to_le_bytes());
+        out.extend(s);
+    };
+    let (toks, err) = crate::lexer::lex_partial(src);
+    for t in &toks {
+        let kind: u8 = match &t.tok {
+            Ident(_) => 0, Int(_) => 1, DotDot => 2, Fixed(_) => 3, Str(_) => 4, AsmBody(_) => 5,
+            And => 6, Or => 7, Not => 8, If => 9, Then => 10, Elseif => 11, Else => 12, End => 13,
+            While => 14, Do => 15, For => 16, Function => 17, Return => 18, Break => 19, Const => 20,
+            Var => 21, True => 22, False => 23, Asm => 24, Struct => 25, Class => 26, Asset => 27,
+            Interrupt => 28, Far => 29, Include => 30,
+            Plus => 31, Minus => 32, Star => 33, Slash => 34, Percent => 35, Amp => 36, Pipe => 37,
+            Tilde => 38, Shl => 39, Shr => 40, EqEq => 41, NotEq => 42, Lt => 43, Le => 44, Gt => 45,
+            Ge => 46, Assign => 47, PlusEq => 48, MinusEq => 49, StarEq => 50, AmpEq => 51,
+            PipeEq => 52, SlashEq => 53, PercentEq => 54, ShlEq => 55, ShrEq => 56,
+            LParen => 57, RParen => 58, LBracket => 59, RBracket => 60, LBrace => 61, RBrace => 62,
+            Comma => 63, Dot => 64, Arrow => 65, Eof => 66,
+        };
+        head(&mut out, kind, t.pos.line, t.pos.col);
+        match &t.tok {
+            Ident(s) | AsmBody(s) => text(&mut out, s.as_bytes()),
+            Str(s) => text(&mut out, &s.chars().map(|c| c as u32 as u8).collect::<Vec<_>>()),
+            Int(v) | Fixed(v) => out.extend((*v as u32).to_le_bytes()),
+            _ => {}
+        }
+    }
+    if let Some(e) = err {
+        head(&mut out, 255, e.pos.line, e.pos.col);
+        let m = e.msg.as_bytes();
+        text(&mut out, &m[..m.len().min(64)]);
+    }
+    out
+}
+
+/// Run selfhost/lexer.lz80n in the emulator on `src`; its tokens.bin.
+fn selfhost_lex(nex: &[u8], syms: &HashMap<String, u16>, src: &str) -> Vec<u8> {
+    let mut cpu = load_nex(nex).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::with_files(&[("in.lz80n", src.as_bytes())]));
+    let end = syms["__main_end"];
+    let mut n = 0u64;
+    while cpu.pc != end {
+        cpu.tick().unwrap();
+        n += 1;
+        assert!(n < 2_000_000_000, "self-hosted lexer did not finish");
+    }
+    cpu.esx.unwrap().files.remove("tokens.bin").expect("no tokens.bin")
+}
+
+#[test]
+fn selfhost_lexer_matches_rust() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_lexer", &lexer_src).unwrap();
+    let mut inputs: Vec<(String, String)> = vec![];
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|e| e == "lz80n") {
+            inputs.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap()));
+        }
+    }
+    inputs.push(("selfhost/lexer.lz80n".into(), lexer_src.clone()));
+    for (name, m) in [
+        ("FILE", crate::prelude::FILE),
+        ("SOUND", crate::prelude::SOUND),
+        ("LAYER2", crate::prelude::LAYER2),
+        ("SPRITES", crate::prelude::SPRITES),
+        ("PALETTE", crate::prelude::PALETTE),
+        ("COPPER", crate::prelude::COPPER),
+    ] {
+        inputs.push((format!("prelude {name}"), m.to_string()));
+    }
+    for (i, s) in [
+        "x = 0x1F + $ff - 0b101 + 1_000 + 4294967295 'a' '\\n' '\\0'",
+        "a <<= 1 b >>= 2 c != d ~= e -> f .. g . h <= >= << >> == = += -= *= /= %= &= |=",
+        "f = 1.5 + 0.1 + 32767.99 + 3.14159265358979 + 0.5",
+        "s = \"tab\\t nl\\n q\\\" bs\\\\ z\\0\"",
+        "--[[ block\n comment ]] x --[[ unterminated",
+        "x = 1 @",
+        "y = 4294967296",
+        "z = 0x",
+        "w = 12ab",
+        "s = \"open",
+        "s = \"bad \\q\"",
+        "c = 'ab'",
+        "f = 32768.5",
+        "asm x\nend",
+        "asm\n  ld a,1  \n  nop ; end\n end ; done\nx",
+        "asm\n  nop\n",
+        "if a then b elseif c else d end while x do end for i = 1, 2 do break end",
+        "! x",
+        "",
+        "   \n\t  -- only a comment",
+    ]
+    .iter()
+    .enumerate()
+    {
+        inputs.push((format!("case {i}: {s:?}"), s.to_string()));
+    }
+    for (name, src) in &inputs {
+        let want = token_records(src);
+        let got = selfhost_lex(&nex, &syms, src);
+        if got != want {
+            let i = (0..want.len().min(got.len())).find(|&i| got[i] != want[i]).unwrap_or(want.len().min(got.len()));
+            panic!(
+                "{name}: token streams differ at byte {i} (lengths {} / {})\n rust: {:?}\n self: {:?}",
+                want.len(),
+                got.len(),
+                &want[i.saturating_sub(8)..(i + 24).min(want.len())],
+                &got[i.saturating_sub(8)..(i + 24).min(got.len())]
+            );
+        }
+    }
+}
+
+
