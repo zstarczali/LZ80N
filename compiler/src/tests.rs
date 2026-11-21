@@ -3661,3 +3661,405 @@ fn selfhost_lexer_matches_rust() {
 }
 
 
+
+/// The canonical text form of a syntax tree (the output of selfhost/parser.lz80n).
+mod ast_text {
+    use crate::ast::*;
+
+    fn quoted(out: &mut String, bytes: &[u8]) {
+        out.push('"');
+        for &c in bytes {
+            if !(32..=126).contains(&c) || c == b'"' || c == b'\\' {
+                out.push_str(&format!("\\x{c:02X}"));
+            } else {
+                out.push(c as char);
+            }
+        }
+        out.push('"');
+    }
+
+    fn open(out: &mut String, kind: &str, pos: crate::diag::Pos) {
+        out.push_str(&format!("({kind} {}:{}", pos.line, pos.col));
+    }
+
+    fn ty(t: &TypeRef) -> String {
+        match t {
+            TypeRef::Prim(p) => p.name().to_string(),
+            TypeRef::Named(n) => n.clone(),
+        }
+    }
+
+    fn bin(op: BinOp) -> &'static str {
+        use BinOp::*;
+        match op {
+            Add => "add", Sub => "sub", Mul => "mul", Div => "div", Mod => "mod", Concat => "concat",
+            And => "and", Or => "or", Xor => "xor", Shl => "shl", Shr => "shr", Eq => "eq", Ne => "ne",
+            Lt => "lt", Le => "le", Gt => "gt", Ge => "ge", LAnd => "land", LOr => "lor",
+        }
+    }
+
+    fn opt(out: &mut String, e: &Option<Expr>) {
+        match e {
+            Some(e) => {
+                out.push(' ');
+                expr(out, e);
+            }
+            None => out.push_str(" _"),
+        }
+    }
+
+    fn exprs(out: &mut String, list: &[Expr]) {
+        for e in list {
+            out.push(' ');
+            expr(out, e);
+        }
+    }
+
+    pub fn expr(out: &mut String, e: &Expr) {
+        match &e.kind {
+            ExprKind::Int(v) => {
+                open(out, "int", e.pos);
+                out.push_str(&format!(" {v}"));
+            }
+            ExprKind::Fixed(v) => {
+                open(out, "fixed", e.pos);
+                out.push_str(&format!(" {v}"));
+            }
+            ExprKind::Bool(b) => {
+                open(out, "bool", e.pos);
+                out.push_str(if *b { " true" } else { " false" });
+            }
+            ExprKind::Str(s) => {
+                open(out, "str", e.pos);
+                out.push(' ');
+                quoted(out, &s.chars().map(|c| c as u32 as u8).collect::<Vec<_>>());
+            }
+            ExprKind::Name(n) => {
+                open(out, "name", e.pos);
+                out.push_str(&format!(" {n}"));
+            }
+            ExprKind::Index(b, i) => {
+                open(out, "index", e.pos);
+                out.push(' ');
+                expr(out, b);
+                out.push(' ');
+                expr(out, i);
+            }
+            ExprKind::Field(b, n) => {
+                open(out, "field", e.pos);
+                out.push(' ');
+                expr(out, b);
+                out.push_str(&format!(" {n}"));
+            }
+            ExprKind::Call(n, args) => {
+                open(out, "call", e.pos);
+                out.push_str(&format!(" {n}"));
+                exprs(out, args);
+            }
+            ExprKind::MethodCall(o, n, args) => {
+                open(out, "method", e.pos);
+                out.push(' ');
+                expr(out, o);
+                out.push_str(&format!(" {n}"));
+                exprs(out, args);
+            }
+            ExprKind::Unary(op, x) => {
+                open(out, "un", e.pos);
+                out.push_str(match op {
+                    UnOp::Neg => " neg",
+                    UnOp::Not => " not",
+                    UnOp::BitNot => " bitnot",
+                });
+                out.push(' ');
+                expr(out, x);
+            }
+            ExprKind::Binary(op, l, r) => {
+                open(out, "bin", e.pos);
+                out.push_str(&format!(" {}", bin(*op)));
+                out.push(' ');
+                expr(out, l);
+                out.push(' ');
+                expr(out, r);
+            }
+            ExprKind::List(items) => {
+                open(out, "list", e.pos);
+                exprs(out, items);
+            }
+        }
+        out.push(')');
+    }
+
+    fn body(out: &mut String, list: &[Stmt]) {
+        out.push_str(" (body");
+        for s in list {
+            out.push(' ');
+            stmt(out, s);
+        }
+        out.push(')');
+    }
+
+    pub fn stmt(out: &mut String, s: &Stmt) {
+        match &s.kind {
+            StmtKind::Far(inner) => {
+                open(out, "far", s.pos);
+                out.push(' ');
+                stmt(out, inner);
+            }
+            StmtKind::VarDecl { ty: t, name, array, init, is_const } => {
+                open(out, "var", s.pos);
+                out.push_str(&format!(" {}", t.as_ref().map(ty).unwrap_or("_".into())));
+                out.push_str(&format!(" {name}"));
+                opt(out, array);
+                opt(out, init);
+                out.push_str(if *is_const { " const" } else { " -" });
+            }
+            StmtKind::Assign { target, op, value } => {
+                open(out, "assign", s.pos);
+                out.push_str(&format!(" {}", op.map(bin).unwrap_or("=")));
+                out.push(' ');
+                expr(out, target);
+                out.push(' ');
+                expr(out, value);
+            }
+            StmtKind::If { arms, otherwise } => {
+                open(out, "if", s.pos);
+                for (c, b) in arms {
+                    out.push_str(" (arm ");
+                    expr(out, c);
+                    body(out, b);
+                    out.push(')');
+                }
+                if let Some(o) = otherwise {
+                    out.push_str(" (else");
+                    for s in o {
+                        out.push(' ');
+                        stmt(out, s);
+                    }
+                    out.push(')');
+                }
+            }
+            StmtKind::While { cond, body: b } => {
+                open(out, "while", s.pos);
+                out.push(' ');
+                expr(out, cond);
+                body(out, b);
+            }
+            StmtKind::For { var, start, end, step, body: b } => {
+                open(out, "for", s.pos);
+                out.push_str(&format!(" {var} "));
+                expr(out, start);
+                out.push(' ');
+                expr(out, end);
+                opt(out, step);
+                body(out, b);
+            }
+            StmtKind::Return(e) => {
+                open(out, "return", s.pos);
+                opt(out, e);
+            }
+            StmtKind::Break => open(out, "break", s.pos),
+            StmtKind::Expr(e) => {
+                open(out, "expr", s.pos);
+                out.push(' ');
+                expr(out, e);
+            }
+            StmtKind::Asm(b) => {
+                open(out, "asm", s.pos);
+                out.push(' ');
+                quoted(out, b.as_bytes());
+            }
+            StmtKind::Asset { name, path, image } => {
+                open(out, "asset", s.pos);
+                out.push_str(&format!(" {name} "));
+                quoted(out, &path.chars().map(|c| c as u32 as u8).collect::<Vec<_>>());
+                out.push_str(if *image { " image" } else { " file" });
+            }
+        }
+        out.push(')');
+    }
+
+    fn func(out: &mut String, f: &Func) {
+        open(out, "func", f.pos);
+        out.push_str(&format!(" {} (params", f.name));
+        for (n, t) in &f.params {
+            out.push_str(&format!(" (p {n} {})", ty(t)));
+        }
+        out.push(')');
+        let ret = match (&f.ret, f.ret_str, &f.ret_named) {
+            (Some(t), _, _) => t.name().to_string(),
+            (None, true, _) => "string".into(),
+            (None, false, Some(n)) => n.clone(),
+            _ => "_".into(),
+        };
+        out.push_str(&format!(" {ret}"));
+        body(out, &f.body);
+        out.push(')');
+    }
+
+    pub fn program(p: &Program) -> String {
+        let mut out = String::new();
+        for item in &p.items {
+            match item {
+                Item::Func(f) => func(&mut out, f),
+                Item::Interrupt(line, b, pos) => {
+                    open(&mut out, "interrupt", *pos);
+                    match line {
+                        Some(e) => {
+                            out.push(' ');
+                            expr(&mut out, e);
+                        }
+                        None => out.push_str(" frame"),
+                    }
+                    body(&mut out, b);
+                    out.push(')');
+                }
+                Item::Struct(sd) => {
+                    open(&mut out, "struct", sd.pos);
+                    out.push_str(&format!(" {} {} (fields", sd.name, sd.parent.as_deref().unwrap_or("_")));
+                    for f in &sd.fields {
+                        out.push(' ');
+                        open(&mut out, "f", f.pos);
+                        out.push_str(&format!(" {} {}", f.name, ty(&f.ty)));
+                        opt(&mut out, &f.array);
+                        opt(&mut out, &f.init);
+                        out.push(')');
+                    }
+                    out.push_str(") (methods");
+                    for m in &sd.methods {
+                        out.push(' ');
+                        func(&mut out, m);
+                    }
+                    out.push_str("))");
+                }
+                Item::Stmt(s) => stmt(&mut out, s),
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Lex + parse with the Rust front end; the tree or `error L:C message`.
+    pub fn of_source(src: &str) -> String {
+        let r = crate::lexer::lex(src).and_then(crate::parser::parse);
+        match r {
+            Ok(p) => program(&p),
+            Err(d) => format!("error {}:{} {}\n", d.pos.line, d.pos.col, d.msg),
+        }
+    }
+}
+
+/// Run a self-hosted stage (a NEX) on the virtual SD card `files`; the files afterwards.
+fn run_stage(
+    nex: &[u8],
+    syms: &HashMap<String, u16>,
+    files: std::collections::HashMap<String, Vec<u8>>,
+) -> std::collections::HashMap<String, Vec<u8>> {
+    let mut cpu = load_nex(nex).unwrap();
+    let mut fs = crate::emu::EsxFs::default();
+    fs.files = files;
+    cpu.esx = Some(fs);
+    let end = syms["__main_end"];
+    let mut n = 0u64;
+    while cpu.pc != end {
+        if let Err(e) = cpu.tick() {
+            panic!("self-hosted stage crashed: {e}");
+        }
+        n += 1;
+        assert!(n < 4_000_000_000, "self-hosted stage did not finish");
+    }
+    cpu.esx.unwrap().files
+}
+
+#[test]
+fn selfhost_parser_matches_rust() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let parser_src = std::fs::read_to_string(root.join("selfhost/parser.lz80n")).unwrap();
+    let (lex_nex, lex_syms) = build("selfhost_lexer2", &lexer_src).unwrap();
+    let (par_nex, par_syms) = build("selfhost_parser", &parser_src).unwrap();
+    let mut inputs: Vec<(String, String)> = vec![];
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|e| e == "lz80n") {
+            inputs.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap()));
+        }
+    }
+    inputs.push(("selfhost/lexer.lz80n".into(), lexer_src.clone()));
+    inputs.push(("selfhost/parser.lz80n".into(), parser_src.clone()));
+    for (name, m) in [
+        ("FILE", crate::prelude::FILE),
+        ("SOUND", crate::prelude::SOUND),
+        ("LAYER2", crate::prelude::LAYER2),
+        ("SPRITES", crate::prelude::SPRITES),
+        ("PALETTE", crate::prelude::PALETTE),
+        ("COPPER", crate::prelude::COPPER),
+    ] {
+        inputs.push((format!("prelude {name}"), m.to_string()));
+    }
+    for (i, s) in [
+        "x = -5 y = --5 z = -1.5 w = -(3) v = - - 2.25",
+        "a = 1 + 2 * 3 - 4 / 5 % 6 .. \"s\" << 1 >> 2 & 3 ~ 4 | 5 == 6 ~= 7 < 8 <= 9 > 10 >= 11 and not b or c",
+        "x += 1 x -= 1 x *= 2 x /= 2 x %= 3 x &= 4 x |= 5 x <<= 1 x >>= 1 a[i].f.g[2] = h(1, 2).m(3)",
+        "if a then b() elseif c then d() elseif e then else f() end if x then end",
+        "for i = 1, 10, 2 do break end for j = a, b do return end while x do return 5 end",
+        "byte a[] = {1, 2, 3} word m[2][3] = {{1,2,3},{4,5,6}} far byte big[1000] const K = 4 var v = K",
+        "Vec2 p = {1, 2} string s = \"x\\ty\" bool b",
+        "struct P\n byte x = 1\n word t[4]\nend\nclass B extends P\n function m(byte a, P o) -> word return a end\n function n() end\nend",
+        "function f(byte a, word b) -> string return \"\" end function g() -> Vec2 end function h() end",
+        "interrupt raster(96) nextreg[0x4A] = 1 end interrupt frame ticks += 1 end",
+        "asset s = \"a.png\" asset i = image(\"b.png\")",
+        "asm\n ld a,1\nend",
+        "x = 4294967295 y = 0x80000000",
+        "x = ",
+        "byte a[] = 5",
+        "byte b = {1}",
+        "byte c[]",
+        "byte d[2][]",
+        "1 = x",
+        "f",
+        "f(1)(2)",
+        "far byte q",
+        "if x then",
+        "function f() function g() end end",
+        "interrupt timer end",
+        "asset a = 5",
+        "asset a = image(5)",
+        "struct S 5 end",
+        "x = {}",
+        "x = (1",
+        "x = 1.5.y",
+        "return",
+        "x = 99999999999",
+        "f(1, )",
+        "a.b.5",
+    ]
+    .iter()
+    .enumerate()
+    {
+        inputs.push((format!("case {i}: {s:?}"), s.to_string()));
+    }
+    for (name, src) in &inputs {
+        let want = ast_text::of_source(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), src.as_bytes().to_vec());
+        let files = run_stage(&lex_nex, &lex_syms, files);
+        let files = run_stage(&par_nex, &par_syms, files);
+        let got = String::from_utf8_lossy(files.get("ast.txt").expect("no ast.txt")).to_string();
+        if got != want {
+            let (mut wl, mut gl) = (want.lines(), got.lines());
+            let mut line = 1;
+            loop {
+                match (wl.next(), gl.next()) {
+                    (Some(a), Some(b)) if a == b => line += 1,
+                    (a, b) => {
+                        let cut = |s: Option<&str>| s.map(|s| s.chars().take(600).collect::<String>()).unwrap_or_default();
+                        let (a, b) = (cut(a), cut(b));
+                        let i = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+                        panic!("{name}: line {line} differs at column {i}\n rust: {}\n self: {}", &a[i.saturating_sub(60).min(a.len())..], &b[i.saturating_sub(60).min(b.len())..]);
+                    }
+                }
+            }
+        }
+    }
+}
+
