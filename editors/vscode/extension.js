@@ -465,10 +465,12 @@ function enclosingClass(doc, line) {
 }
 
 const SPRITE_MEMBERS = [
-  ['x', 'field', 'word'], ['y', 'field', 'byte'], ['pattern', 'field', 'byte'], ['mirror_x', 'field', 'bool'],
-  ['scale', 'field', 'byte  (0..3: x1, x2, x4, x8)'], ['visible', 'field', 'bool'],
+  ['x', 'field', 'word'], ['y', 'field', 'word'], ['pattern', 'field', 'byte'], ['palette', 'field', 'byte  (offset 0..15)'],
+  ['mirror_x', 'field', 'bool'], ['mirror_y', 'field', 'bool'], ['rotate', 'field', 'bool'],
+  ['scale', 'field', 'byte  (0..3: x1, x2, x4, x8)'], ['visible', 'field', 'bool'], ['id', 'field', 'byte  (read only)'],
   ['position', 'method', '(x, y) — move and update'], ['show', 'method', '(pattern) — set the pattern and show it'],
   ['hide', 'method', '() — hide it'], ['update', 'method', '() — send all fields to the hardware'],
+  ['overlaps', 'method', '(other) -> bool — do the squares (16 << scale) of two visible sprites overlap?'],
 ];
 
 /** Resolve `a.b.c` before the cursor to a class/struct symbol. */

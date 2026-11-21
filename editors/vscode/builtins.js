@@ -56,7 +56,7 @@ const FUNCTIONS = {
   // 16 sprites
   sprite_load: ['sprite_load(first, asset)', 'Upload the sprite patterns of a PNG asset, starting at pattern slot `first`.', 16],
   sprites_visible: ['sprites_visible(on, over_border)', 'Turn the sprite layer on/off, optionally over the border.', 16],
-  sprite_collision: ['sprite_collision() -> bool', 'Hardware collision flag: two sprites' non-transparent pixels overlapped since the last call (port `$303B`, cleared by the read).', 16],
+  sprite_collision: ['sprite_collision() -> bool', 'Hardware collision flag: the non-transparent pixels of two sprites overlapped since the last call (port `$303B`, cleared by the read). Find the pair with `sprite[a].overlaps(sprite[b])`.', 16],
   // 17 sound
   beep: ['beep(ch, note, frames)', 'Play a note for a number of frames, in the background.', 17],
   tone: ['tone(ch, period)', 'Square wave; frequency = 109375 / period Hz (period 1–4095).', 17],
