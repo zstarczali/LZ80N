@@ -5442,3 +5442,146 @@ print(t)
         assert_eq!(run_asm(&asm), want, "program {i}\n{src}");
     }
 }
+
+/// `fixed` / `fixed16` arithmetic, conversions, constants, arrays, fields
+/// and the math built-ins compiled by the self-hosted compiler: the same
+/// output as with lz80nc.
+#[test]
+fn selfhost_codegen_fixed() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+const G = 0.25
+const BIG = 300.5
+fixed v = 1.5
+fixed g = G
+word n = 3
+v += g * 2
+print(v, v * n, v / 2, -v, v * 1.5, v / 0.75, v % 1, v >> 1, v << 2)
+print(fixed(n) + 0.5, sword(-1.25), byte(v), round(2.5), round(-2.5), round(v))
+print(v > 1, v < g, v == 2, abs(-v), min(v, g), max(v, 3), clamp(v, 0, 1.75))
+fixed arr[] = {0.5, 1, -2.25}
+print(arr[0] + arr[1] + arr[2])
+struct Body
+    fixed x
+    fixed vy
+    byte tag = 3
+end
+Body b
+b.x = 1.5
+b.vy = -0.5
+for i = 1, 4 do
+    b.vy += G
+    b.x += b.vy
+end
+print(b.x, b.vy)
+function half(fixed f) -> fixed
+    return f / 2
+end
+print(half(5), half(v) * half(v))
+string s = "v=" .. v .. " g=" .. g
+print(s)
+print(sin(0), sin(64), cos(0), sin(32), cos(128), atan2(1, 1), atan2(-1.0, -1.0), atan2(0, 5))
+print(sqrt(2.0), sqrt(16.0), sqrt(-1.0), sqrt(100))
+"#,
+        r#"
+fixed16 sum = 0
+for k = 1, 1000 do sum += 0.001 end
+print(sum)
+fixed16 a = 1000.25
+fixed16 b = -3.5
+print(a + b, a - b, a * b, a / b, a * 3, a / 4, -a, a > b, a == 1000.25)
+fixed f = 2.75
+print(fixed16(f) + a, fixed(b), long(a), sword(b), fixed16(7), fixed16(20000) / 2)
+long l = 5
+print(fixed16(l) * 1.5, BIG16, a >> 2, b << 1)
+const BIG16 = 12345.5
+fixed16 t[] = {1.5, -2, 30000.125}
+print(t[0] + t[1] + t[2], min(a, b), max(a, b), abs(b))
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let want = run(&format!("sh_fx_{i}"), src).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        assert_eq!(run_asm(&asm), want, "program {i}\n{src}");
+    }
+}
+
+/// Interrupt handlers (frame, raster lines, the frame line itself, 32-bit
+/// code in a handler) compiled by the self-hosted compiler: the same output
+/// and raster state as with lz80nc.
+#[test]
+fn selfhost_codegen_interrupts() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+byte hits = 0
+byte ticks = 0
+interrupt raster(0)
+    nextreg[0x4A] = 0xE0
+end
+interrupt raster(100)
+    nextreg[0x4A] = 0x1C
+    hits += 1
+end
+interrupt frame
+    ticks += 1
+end
+word f0 = frames()
+pause(10)
+print(frames() - f0, hits >= 9 and hits <= 11, ticks >= 9 and ticks <= 11)
+"#,
+        "byte n = 0\ninterrupt frame\n    n += 1\nend\npause(5)\nprint(n, frames())",
+        r#"
+long total = 0
+word calls = 0
+function bump(word k)
+    calls += k
+end
+interrupt raster(192)
+    total += 100000
+    bump(2)
+end
+interrupt raster(250)
+    nextreg[0x4A] = 3
+end
+long x = 7
+pause(4)
+x = x * 1000 + 5
+print(x, total >= 300000, calls >= 6)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_irq_{i}"), src, |_| {}).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let (got, scpu) = run_asm_cpu(&asm);
+        assert_eq!(got, want, "program {i}\n{src}");
+        assert_eq!(rcpu.nextreg[0x22] & 0b110, scpu.nextreg[0x22] & 0b110, "program {i}: line interrupt");
+        for line in [50usize, 150, 200, 260] {
+            assert_eq!(rcpu.line_state[line].0[0x4A], scpu.line_state[line].0[0x4A], "program {i}: line {line}");
+        }
+    }
+}
+
+/// A main program too large for the resident area: the self-hosted
+/// compiler moves its statements into code pages (chunks called in order).
+#[test]
+fn selfhost_codegen_large_main() {
+    let sh = SelfHost::new();
+    let mut src = String::from("word x = 1\nword y = 0\n");
+    for b in 0..80 {
+        src.push_str("if x ~= 12345 then\n");
+        for k in 0..20 {
+            src.push_str(&format!("    x = x * 3 + {}\n    y = y ~ x\n", b * 20 + k));
+        }
+        src.push_str("end\n");
+        if b % 10 == 0 {
+            src.push_str("print(x, y)\n");
+        }
+    }
+    src.push_str("print(x, y)\n");
+    let want = run("sh_big", &src).unwrap();
+    let asm = sh.compile(&src).unwrap_or_else(|e| panic!("self-hosted compiler: {e}"));
+    assert!(asm.contains("__mc_0_bank:"), "the main program should be in code pages");
+    assert_eq!(run_asm(&asm), want);
+}

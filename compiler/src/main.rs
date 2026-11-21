@@ -179,6 +179,7 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
         ("rt_images.asm".into(), runtime::IMAGES.as_bytes().to_vec()),
         ("rt_samples.asm".into(), runtime::SAMPLES.as_bytes().to_vec()),
         ("rt_notes.asm".into(), codegen::notes_asm().into_bytes()),
+        ("rt_trig.asm".into(), codegen::trig_asm().into_bytes()),
         ("lib_file.lz80n".into(), prelude::FILE.as_bytes().to_vec()),
         ("lib_layer2.lz80n".into(), prelude::LAYER2.as_bytes().to_vec()),
         ("lib_palette.lz80n".into(), prelude::PALETTE.as_bytes().to_vec()),

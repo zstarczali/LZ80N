@@ -254,18 +254,20 @@ const TY_SBYTE = 3
 const TY_WORD = 4
 const TY_SWORD = 5
 const TY_LONG = 6
+const TY_FIXED = 7          -- 8.8 fixed point (2 bytes)
+const TY_FIXED16 = 8        -- 16.16 fixed point (4 bytes)
 const TY_STR = 9
 const TY_STRUCT = 16        -- struct number k: TY_STRUCT + k
 const TY_BAD = 255
 
 function tsize(byte t) -> byte
-    if t == TY_LONG then return 4 end
-    if t >= TY_WORD and t <= TY_SWORD then return 2 end
+    if t == TY_LONG or t == TY_FIXED16 then return 4 end
+    if (t >= TY_WORD and t <= TY_SWORD) or t == TY_FIXED then return 2 end
     return 1
 end
 
 function tsigned(byte t) -> bool
-    return t == TY_SBYTE or t == TY_SWORD or t == TY_LONG
+    return t == TY_SBYTE or t == TY_SWORD or t == TY_LONG or t == TY_FIXED or t == TY_FIXED16
 end
 
 -- bytes of storage
@@ -290,6 +292,9 @@ function join(byte a, byte b) -> byte
     if b == TY_NONE then return a end
     if a == TY_STR or b == TY_STR then return TY_STR end
     if a == TY_BOOL and b == TY_BOOL then return TY_BOOL end
+    if a == TY_FIXED16 or b == TY_FIXED16 then return TY_FIXED16 end
+    if (a == TY_FIXED and b == TY_LONG) or (a == TY_LONG and b == TY_FIXED) then return TY_FIXED16 end
+    if a == TY_FIXED or b == TY_FIXED then return TY_FIXED end
     byte sz = tsize(a)
     if tsize(b) > sz then sz = tsize(b) end
     return make_ty(sz, tsigned(a) or tsigned(b))
@@ -381,6 +386,8 @@ function type_of(word t) -> byte
     if text_is(t, "word") then return TY_WORD end
     if text_is(t, "sword") then return TY_SWORD end
     if text_is(t, "long") then return TY_LONG end
+    if text_is(t, "fixed") then return TY_FIXED end
+    if text_is(t, "fixed16") then return TY_FIXED16 end
     if text_is(t, "string") then return TY_STR end
     byte k = struct_by_name(t)
     if k ~= 255 then return TY_STRUCT + k end
@@ -415,7 +422,8 @@ far word sid[8000]          -- locals: number; constants: value (low word)
 far word sv2[8000]          -- constants: value (high word); functions: node;
                             -- global arrays: initializer list
 far word slen[8000]         -- arrays: element count (0 = scalar), the first dimension
-far byte sdim[8000]         -- arrays of more dimensions: the record of the others
+far byte sdim[8000]         -- arrays of more dimensions: the record of the others;
+                            -- functions: 1 = `interrupt frame`, 2 = `interrupt raster(slen)`
 far byte sdead[8000]        -- out of scope
 far byte snp[8000]          -- functions: number of parameters
 far byte spage[8000]        -- far arrays: first 8K page (0 = not far)
@@ -496,7 +504,7 @@ function new_sym(byte kind, word name, byte ty) -> word
         snext[s] = shead[h]
         shead[h] = s
     end
-    if ty == TY_LONG then uses_long = true end
+    if ty == TY_LONG or ty == TY_FIXED16 then uses_long = true end
     return s
 end
 
@@ -518,6 +526,15 @@ end
 
 -- the name part of function f's labels: `name`, or `Struct_name` for a method
 function o_fnname(word f)
+    if sk[f] == SK_FUNC and sdim[f] ~= 0 then
+        if sdim[f] == 1 then
+            os("irq_frame")
+        else
+            os("irq_raster_")
+            odec(slen[f])
+        end
+        return
+    end
     if sstruct[f] ~= 0 then
         otok(tabw[W_ST_NAME + (sstruct[f] - 1)])
         ob('_')
@@ -532,6 +549,15 @@ function olab(word s)
         os("g_")
         otok(sname[s])
     elseif k == SK_FUNC then
+        if sdim[s] == 1 then
+            os("i_frame")
+            return
+        end
+        if sdim[s] == 2 then
+            os("i_raster_")
+            odec(slen[s])
+            return
+        end
         if sstruct[s] ~= 0 then os("m_") else os("f_") end
         o_fnname(s)
     elseif k == SK_PARAM then
@@ -631,7 +657,7 @@ function const_eval(word e) -> bool
     end
     if k == E_NAME then
         word s = lookup(n1[e])
-        if s ~= 0 and sk[s] == SK_CONST and sty[s] ~= TY_STR then
+        if s ~= 0 and sk[s] == SK_CONST and sty[s] ~= TY_STR and sty[s] ~= TY_FIXED then
             cv = const_value(s)
             return true
         end
@@ -716,6 +742,400 @@ function const_eval(word e) -> bool
     return false
 end
 
+-- ---------------------------------------------------------------- fixed point
+-- `fixed` = 8.8 in HL, `fixed16` = 16.16 in DE:HL. Fixed literals and
+-- constants are raw 16.16 (rounded to 8.8 for `fixed`); integer constants
+-- adapt (x 256 / x 65536). The rules are those of compiler/src/codegen.rs.
+
+-- 16.16 -> 8.8, rounding half away from zero
+function round8(long v) -> long
+    if v >= 0 then return (v + 128) >> 8 end
+    return 0 - ((128 - v) >> 8)
+end
+
+-- the raw 16.16 value of a fixed literal (or a fixed constant) e, in fv
+long fv = 0
+function fixed_lit(word e) -> bool
+    if nk[e] == E_FIXED then
+        fv = lit_val(e)
+        return true
+    end
+    if nk[e] == E_NAME then
+        word s = lookup(n1[e])
+        if s ~= 0 and sk[s] == SK_CONST and sty[s] == TY_FIXED then
+            fv = const_value(s)
+            return true
+        end
+    end
+    return false
+end
+
+function is_fconst(word e) -> bool
+    if nk[e] ~= E_NAME then return false end
+    word s = lookup(n1[e])
+    return s ~= 0 and sk[s] == SK_CONST and sty[s] == TY_FIXED
+end
+
+-- the natural type of a fixed literal: `fixed` if it fits 8.8
+function fixed_kind(long raw) -> byte
+    long r = round8(raw)
+    if r >= -32768 and r <= 32767 then return TY_FIXED end
+    return TY_FIXED16
+end
+
+-- a constant expression as raw 8.8 (integer constants x 256): cv
+function fixed_const(word e) -> bool
+    if const_eval(e) then
+        cv = cv * 256
+        return true
+    end
+    if fixed_lit(e) then
+        cv = round8(fv)
+        return true
+    end
+    byte k = nk[e]
+    if k == E_UNARY and nf[e] == 0 then
+        if not fixed_const(n1[e]) then return false end
+        cv = 0 - cv
+        return true
+    end
+    if k == E_BINARY then
+        byte op = nf[e]
+        if op ~= B_ADD and op ~= B_SUB and op ~= B_MUL and op ~= B_DIV then return false end
+        if not fixed_const(n1[e]) then return false end
+        long a = cv
+        if not fixed_const(n2[e]) then return false end
+        long b = cv
+        if op == B_ADD then
+            cv = a + b
+        elseif op == B_SUB then
+            cv = a - b
+        elseif op == B_MUL then
+            cv = a * b / 256
+        else
+            if b == 0 then return false end
+            cv = a * 256 / b
+        end
+        return true
+    end
+    return false
+end
+
+-- a constant expression as raw 16.16 (integer constants x 65536): cv
+function fixed16_const(word e) -> bool
+    if const_eval(e) then
+        cv = cv * 65536
+        return true
+    end
+    if fixed_lit(e) then
+        cv = fv
+        return true
+    end
+    byte k = nk[e]
+    if k == E_UNARY and nf[e] == 0 then
+        if not fixed16_const(n1[e]) then return false end
+        cv = 0 - cv
+        return true
+    end
+    if k == E_BINARY then
+        byte op = nf[e]
+        if op ~= B_ADD and op ~= B_SUB and op ~= B_MUL and op ~= B_DIV then return false end
+        -- (products and quotients of two fixed16 constants would need
+        -- 64 bits: only by an integer constant here)
+        if op == B_MUL or op == B_DIV then
+            if not const_eval(n2[e]) then
+                if op == B_DIV or not const_eval(n1[e]) then return false end
+                long i = cv
+                if not fixed16_const(n2[e]) then return false end
+                cv = cv * i
+                return true
+            end
+            long d = cv
+            if not fixed16_const(n1[e]) then return false end
+            if op == B_MUL then
+                cv = cv * d
+            else
+                if d == 0 then return false end
+                cv = cv / d
+            end
+            return true
+        end
+        if not fixed16_const(n1[e]) then return false end
+        long a = cv
+        if not fixed16_const(n2[e]) then return false end
+        if op == B_ADD then cv = a + cv else cv = a - cv end
+        return true
+    end
+    return false
+end
+
+function is_fixedish(word e) -> bool
+    byte t = nat(e)
+    return t == TY_FIXED or t == TY_FIXED16
+end
+
+-- e computed as type t (HL / DE:HL)
+function gen_t(word e, byte t)
+    if t == TY_FIXED then
+        gen_fx(e)
+    elseif t == TY_FIXED16 then
+        gen_fx16(e)
+    else
+        gen(e, tsize(t), tsigned(t))
+    end
+end
+
+-- DE = l, HL = r, as type t
+function gen_pair_t(word l, word r, byte t)
+    if t == TY_FIXED then
+        gen_fx(l)
+        oi("push hl")
+        gen_fx(r)
+        oi("pop de")
+        return
+    end
+    gen_pair(l, r, tsize(t), tsigned(t))
+end
+
+-- X = DE:HL = l (as lt), Y = DE':HL' = r (as rt)
+function gen_pair32_t(word l, word r, byte lt, byte rt)
+    uses_long = true
+    gen_t(l, lt)
+    oi("push de")
+    oi("push hl")
+    gen_t(r, rt)
+    oi("exx")
+    oi("pop hl")
+    oi("pop de")
+end
+
+-- a fixed value in HL
+function gen_fx(word e)
+    if failed then return end
+    if fixed_const(e) then
+        load_const(cv & 0xFFFF, 2, false)
+        return
+    end
+    byte k = nk[e]
+    if k == E_UNARY and nf[e] == 0 then
+        gen_fx(n1[e])
+        oi("call rt_neghl")
+        return
+    end
+    if k == E_BINARY and nf[e] < B_EQ then
+        fx_binary(nf[e], n1[e], n2[e])
+        return
+    end
+    gen(e, 2, true)         -- a variable, element, field or call
+end
+
+function fx_binary(byte op, word l, word r)
+    if op == B_ADD or op == B_SUB or op == B_MOD then
+        gen_fx(l)
+        oi("push hl")
+        gen_fx(r)
+        oi("pop de")
+        arith_tail(op, 2, true)
+        return
+    end
+    if op == B_SHL or op == B_SHR then
+        gen_fx(l)
+        oi("push hl")
+        gen(r, 2, false)
+        oi("pop de")
+        arith_tail(op, 2, true)
+        return
+    end
+    if op ~= B_MUL and op ~= B_DIV then
+        unsupported(l, "bitwise operators on `fixed` values")
+        return
+    end
+    bool lf = nat(l) == TY_FIXED
+    bool rf = nat(r) == TY_FIXED
+    if lf and rf then
+        gen_fx(r)
+        oi("push hl")
+        gen_fx(l)
+        oi("pop de")
+        if op == B_MUL then oi("call rt_fmul") else oi("call rt_fdiv") end
+        return
+    end
+    -- fixed * integer, integer * fixed, fixed / integer: 16-bit arithmetic
+    word f = l
+    word i = r
+    if not lf then
+        f = r
+        i = l
+    end
+    if const_eval(i) then
+        long v = cv
+        if op == B_MUL and v > 0 and v & (v - 1) == 0 then
+            gen_fx(f)
+            while v > 1 do
+                oi("add hl,hl")
+                v = v >> 1
+            end
+            return
+        end
+        gen_fx(f)
+        os("    ld de,")
+        odec(word(v))
+        onl()
+    else
+        byte it = nat(i)
+        if it == TY_NONE or tsize(it) == 1 then it = TY_SWORD end
+        gen(i, tsize(it), tsigned(it))
+        oi("push hl")
+        gen_fx(f)
+        oi("pop de")
+    end
+    if op == B_MUL then oi("call rt_mul16") else oi("call rt_divs16") end
+end
+
+-- a fixed16 value in DE:HL
+function gen_fx16(word e)
+    if failed then return end
+    uses_long = true
+    if fixed16_const(e) then
+        load_const(cv, 4, true)
+        return
+    end
+    byte k = nk[e]
+    if k == E_UNARY and nf[e] == 0 then
+        gen_fx16(n1[e])
+        oi("call rt_neg32")
+        return
+    end
+    if k == E_BINARY and nf[e] < B_EQ then
+        fx16_binary(nf[e], n1[e], n2[e])
+        return
+    end
+    gen32(e)                -- loads; a `fixed` value is widened
+end
+
+function fx16_binary(byte op, word l, word r)
+    if op == B_SHL or op == B_SHR then
+        gen_fx16(l)
+        oi("push de")
+        oi("push hl")
+        gen(r, 2, false)
+        oi("ld b,l")
+        oi("pop hl")
+        oi("pop de")
+        if op == B_SHL then oi("call rt_shl32") else oi("call rt_sar32") end
+        return
+    end
+    if op == B_AND or op == B_OR or op == B_XOR then
+        unsupported(l, "bitwise operators on `fixed16` values")
+        return
+    end
+    if op == B_MUL or op == B_DIV or op == B_MOD then
+        bool lf = is_fixedish(l) or (not const_eval(l) and fixed16_const(l))
+        bool rf = is_fixedish(r) or (not const_eval(r) and fixed16_const(r))
+        if lf and rf then
+            gen_pair32_t(l, r, TY_FIXED16, TY_FIXED16)
+            if op == B_MUL then
+                oi("call rt_fmul32")
+            elseif op == B_DIV then
+                oi("call rt_fdiv32")
+            else
+                oi("call rt_mods32")
+            end
+            return
+        end
+        word f = l
+        word i = r
+        if not lf then
+            f = r
+            i = l
+        end
+        gen_pair32_t(f, i, TY_FIXED16, TY_LONG)
+        if op == B_MUL then oi("call rt_mul32") else oi("call rt_divs32") end
+        return
+    end
+    gen_pair32_t(l, r, TY_FIXED16, TY_FIXED16)
+    if op == B_ADD then oi("call rt_add32") else oi("call rt_sub32") end
+end
+
+-- HL (fixed) -> HL (sword): floor
+function o_fx_floor()
+    oi("ld l,h")
+    oi("ld a,h")
+    oi("rla")
+    oi("sbc a,a")
+    oi("ld h,a")
+end
+
+-- HL (fixed) -> DE:HL (fixed16)
+function o_fx_widen()
+    oi("ld a,h")
+    oi("rla")
+    oi("sbc a,a")
+    oi("ld d,a")
+    oi("ld e,h")
+    oi("ld h,l")
+    oi("ld l,0")
+end
+
+-- a cast to or from a fixed point type: true if done
+function fx_cast(word a, byte c, byte w) -> bool
+    byte from = nat(a)
+    if c == TY_FIXED then
+        if fixed_const(a) then
+            load_const(cv & 0xFFFF, 2, false)
+        elseif from == TY_FIXED then
+            gen_fx(a)
+        elseif from == TY_FIXED16 then
+            gen_fx16(a)
+            oi("ld l,h")
+            oi("ld h,e")
+        elseif from == TY_LONG then
+            gen32(a)
+            oi("ld h,l")
+            oi("ld l,0")
+        else
+            gen(a, tsize(from), tsigned(from))
+            oi("ld h,l")
+            oi("ld l,0")
+        end
+        if w == 4 then o_fx_widen() end
+        return true
+    end
+    if c == TY_FIXED16 then
+        uses_long = true
+        if fixed16_const(a) then
+            load_const(cv, 4, true)
+        elseif from == TY_FIXED or from == TY_FIXED16 then
+            gen_fx16(a)
+        else
+            gen32(a)
+            oi("ex de,hl")
+            oi("ld hl,0")
+        end
+        return true
+    end
+    if from == TY_FIXED then
+        gen_fx(a)
+        o_fx_floor()
+        if tsize(c) == 1 then fix(1, tsigned(c)) end
+        if tsize(c) == 4 or w == 4 then extend32(tsigned(c) or tsize(c) == 4) end
+        return true
+    end
+    if from == TY_FIXED16 then
+        uses_long = true
+        gen_fx16(a)
+        oi("ex de,hl")
+        if tsize(c) == 4 then
+            extend32(true)
+            return true
+        end
+        if tsize(c) == 1 then fix(1, tsigned(c)) end
+        if w == 4 then extend32(tsigned(c)) end
+        return true
+    end
+    return false
+end
+
 -- ---------------------------------------------------------------- types of expressions
 
 function is_cast(word t) -> byte
@@ -728,12 +1148,14 @@ end
 function nat(word e) -> byte
     byte k = nk[e]
     if k == E_INT then return TY_NONE end
+    if k == E_FIXED then return fixed_kind(lit_val(e)) end
     if k == E_BOOL then return TY_BOOL end
     if k == E_STR then return TY_STR end
     if k == E_NAME then
         if is_self(n1[e]) then return TY_STRUCT + sstruct[cur_fn] - 1 end
         word s = lookup(n1[e])
         if s ~= 0 and sk[s] == SK_CONST and sty[s] == TY_STR then return TY_STR end
+        if s ~= 0 and sk[s] == SK_CONST and sty[s] == TY_FIXED then return fixed_kind(const_value(s)) end
         if s == 0 or sk[s] == SK_CONST or sk[s] == SK_ASSET then return TY_NONE end
         return sty[s]
     end
@@ -767,8 +1189,13 @@ function nat(word e) -> byte
         if c ~= TY_BAD then return c end
         if (text_is(name, "abs") or text_is(name, "min") or text_is(name, "max") or text_is(name, "clamp")) and const_eval(e) then return TY_NONE end
         if text_is(name, "chr") or text_is(name, "str") or text_is(name, "sub") or text_is(name, "upper") or text_is(name, "lower") then return TY_STR end
-        if text_is(name, "find") or text_is(name, "sqrt") then return TY_BYTE end
-        if text_is(name, "val") then return TY_SWORD end
+        if text_is(name, "find") or text_is(name, "atan2") then return TY_BYTE end
+        if text_is(name, "sqrt") then
+            if n2[e] ~= 0 and nat(n2[e]) == TY_FIXED then return TY_FIXED end
+            return TY_BYTE
+        end
+        if text_is(name, "sin") or text_is(name, "cos") then return TY_FIXED end
+        if text_is(name, "val") or text_is(name, "round") then return TY_SWORD end
         if text_is(name, "clamp") then
             word ca = n2[e]
             if ca == 0 or nx[ca] == 0 or nx[nx[ca]] == 0 then return TY_NONE end
@@ -1536,14 +1963,14 @@ function gen_compare(byte op, word l, word r)
         if const_eval(r) then t = join(t, lit_ty(cv)) end
     end
     if t == TY_BOOL then t = TY_BYTE end
-    if t == TY_LONG then
-        gen_pair32(l, r)
+    if t == TY_LONG or t == TY_FIXED16 then
+        gen_pair32_t(l, r, t, t)
         oi("call rt_cmp32")
         bool_from_flags(op)
         return
     end
     bool sg = tsigned(t)
-    gen_pair(l, r, tsize(t), sg)
+    gen_pair_t(l, r, t)
     if sg then
         -- signed order = unsigned order with the sign bits flipped
         oi("ld a,d")
@@ -1570,6 +1997,11 @@ function gen_arith(byte op, word l, word r, byte w, bool sg)
         return
     end
     gen_pair(l, r, w, sg)
+    arith_tail(op, w, sg)
+end
+
+-- DE = left, HL = right -> HL = left op right
+function arith_tail(byte op, byte w, bool sg)
     if op == B_ADD then
         oi("add hl,de")
     elseif op == B_SUB then
@@ -1656,6 +2088,12 @@ function gen(word e, byte w, bool sg)
         return
     end
     byte k = nk[e]
+    if k == E_BINARY or k == E_UNARY or k == E_FIXED or is_fconst(e) then
+        if nat(e) == TY_FIXED then
+            gen_fx(e)
+            return
+        end
+    end
     if k == E_INT or k == E_BOOL then
         const_eval(e)
         load_const(cv, w, sg)
@@ -1764,6 +2202,17 @@ function gen32(word e)
         load_const(cv, 4, true)
         return
     end
+    if t == TY_FIXED or t == TY_FIXED16 then
+        if k == E_BINARY or k == E_UNARY or k == E_FIXED or is_fconst(e) then
+            gen_fx16(e)
+            return
+        end
+        if t == TY_FIXED then
+            gen_fx(e)
+            o_fx_widen()
+            return
+        end
+    end
     if k == E_NAME then
         word s = var_sym(e, n1[e])
         if s == 0 then return end
@@ -1776,7 +2225,7 @@ function gen32(word e)
             return
         end
     end
-    if t == TY_LONG then
+    if t == TY_LONG or t == TY_FIXED16 then
         if k == E_NAME then
             load_sym(lookup(n1[e]))
         elseif k == E_INDEX or k == E_FIELD then
@@ -1817,8 +2266,7 @@ function gen_for(word e, byte d)
         gen_str(e)
         return
     end
-    byte t = ctx_ty(d, e)
-    gen(e, tsize(t), tsigned(t))
+    gen_t(e, ctx_ty(d, e))
 end
 
 function count(word first) -> byte
@@ -1975,6 +2423,26 @@ function str_add(word t, word e)
         oi("call rt_fmt_off")
         return
     end
+    if ty == TY_FIXED then
+        gen_fx(e)
+        o_ins_lab("ld de,", t, "")
+        oi("call rt_fmt_on")
+        oi("call rt_print_fixed")
+        oi("call rt_fmt_off")
+        return
+    end
+    if ty == TY_FIXED16 then
+        gen_fx16(e)
+        oi("push de")
+        oi("push hl")
+        o_ins_lab("ld de,", t, "")
+        oi("call rt_fmt_on")
+        oi("pop hl")
+        oi("pop de")
+        oi("call rt_print_fixed16")
+        oi("call rt_fmt_off")
+        return
+    end
     if ty == TY_NONE then
         if const_eval(e) then ty = lit_ty(cv) else ty = TY_WORD end
     end
@@ -2005,6 +2473,7 @@ function gen_call(word e, byte w, bool sg)
             if fail_node(e) then msg("a cast takes one value") end
             return
         end
+        if fx_cast(alist, c, w) then return end
         byte t = nat(alist)
         if t == TY_NONE or t == TY_BOOL then t = ctx_ty(c, alist) end
         gen(alist, tsize(t), tsigned(t))
@@ -2127,6 +2596,65 @@ function builtin_expr(word e, byte w) -> bool
         if w == 4 then extend32(true) end
         return true
     end
+    if text_is(name, "sqrt") and nat(a) == TY_FIXED then
+        -- sqrt(x) * 256 = sqrt(raw * 256): 24-bit integer square root
+        if not want_args(e, 1) then return true end
+        gen_fx(a)
+        word pos_ = new_label()
+        oi("bit 7,h")
+        jp("jr z,", pos_)
+        oi("ld hl,0")
+        label(pos_)
+        oi("ld a,h")
+        oi("ld h,l")
+        oi("ld l,0")
+        oi("call rt_isqrt24")
+        oi("ex de,hl")
+        if w == 4 then o_fx_widen() end
+        return true
+    end
+    if text_is(name, "sin") or text_is(name, "cos") then
+        -- angle: byte, 256 units per turn
+        if not want_args(e, 1) then return true end
+        uses_trig = true
+        gen(a, 1, false)
+        oi("ld a,l")
+        if text_is(name, "cos") then oi("add a,64") end
+        oi("ld l,a")
+        oi("ld h,0")
+        oi("add hl,hl")
+        oi("ld de,rt_sin_tab")
+        oi("add hl,de")
+        oi("ld a,(hl)")
+        oi("inc hl")
+        oi("ld h,(hl)")
+        oi("ld l,a")
+        if w == 4 then o_fx_widen() end
+        return true
+    end
+    if text_is(name, "atan2") then
+        if not want_args(e, 2) then return true end
+        uses_trig = true
+        byte aty = TY_SWORD
+        if join(nat(a), nat(nx[a])) == TY_FIXED then aty = TY_FIXED end
+        gen_t(nx[a], aty)
+        oi("push hl")
+        gen_t(a, aty)
+        oi("pop de")
+        oi("call rt_atan2")
+        extend_a(TY_BYTE)
+        if w == 4 then extend32(false) end
+        return true
+    end
+    if text_is(name, "round") then
+        if not want_args(e, 1) then return true end
+        gen_fx(a)
+        oi("ld de,128")
+        oi("add hl,de")
+        o_fx_floor()
+        if w == 4 then extend32(true) end
+        return true
+    end
     if text_is(name, "sqrt") then
         if not want_args(e, 1) then return true end
         gen(a, 2, false)
@@ -2143,15 +2671,15 @@ function builtin_expr(word e, byte w) -> bool
         if ct == TY_NONE then
             ct = join(join(ctx_ty(TY_NONE, a), ctx_ty(TY_NONE, nx[a])), ctx_ty(TY_NONE, nx[nx[a]]))
         end
-        if ct == TY_LONG then
+        if ct == TY_LONG or ct == TY_FIXED16 then
             unsupported(e, "clamp of long values")
             return true
         end
         bool csg = tsigned(ct)
-        gen_pair(a, nx[a], tsize(ct), csg)
+        gen_pair_t(a, nx[a], ct)
         o_minmax(false, csg)
         oi("push hl")
-        gen(nx[nx[a]], tsize(ct), csg)
+        gen_t(nx[nx[a]], ct)
         oi("pop de")
         o_minmax(true, csg)
         if w == 4 then extend32(csg) end
@@ -2225,7 +2753,7 @@ function builtin_expr(word e, byte w) -> bool
         if not want_args(e, 1) then return true end
         byte t = nat(a)
         if t == TY_NONE then t = ctx_ty(TY_NONE, a) end
-        gen(a, tsize(t), tsigned(t))
+        gen_t(a, t)
         if tsigned(t) then
             word pos_ = new_label()
             if tsize(t) == 4 then
@@ -2252,13 +2780,13 @@ function builtin_expr(word e, byte w) -> bool
             t = ctx_ty(TY_NONE, a)
             t = join(t, ctx_ty(TY_NONE, nx[a]))
         end
-        if t == TY_LONG then
-            gen_pair32(a, nx[a])
+        if t == TY_LONG or t == TY_FIXED16 then
+            gen_pair32_t(a, nx[a], t, t)
             if is_min then oi("call rt_min32") else oi("call rt_max32") end
             return true
         end
         bool sg = tsigned(t)
-        gen_pair(a, nx[a], tsize(t), sg)     -- DE = a, HL = b
+        gen_pair_t(a, nx[a], t)     -- DE = a, HL = b
         o_minmax(is_min, sg)
         rt = t
     else
@@ -2973,7 +3501,15 @@ function declare_struct(word it)
                 if fail_node(n4[fdn]) then msg("only number fields can have a default") end
                 return
             end
-            if not const_eval(n4[fdn]) then
+            bool okd = false
+            if t == TY_FIXED then
+                okd = fixed_const(n4[fdn])
+            elseif t == TY_FIXED16 then
+                okd = fixed16_const(n4[fdn])
+            else
+                okd = const_eval(n4[fdn])
+            end
+            if not okd then
                 if fail_node(n4[fdn]) then msg("field defaults must be compile-time constants") end
                 return
             end
@@ -3051,6 +3587,7 @@ byte nassets = 0
 word far_arr_pages = 0      -- pages of far arrays (cleared at startup)
 bool uses_samples = false
 bool uses_notes = false
+bool uses_trig = false
 string apath = ""
 
 function asset_err(word it, string m)
@@ -3276,6 +3813,76 @@ function asset_data()
     end
 end
 
+-- the initialised far arrays: their bytes in their pages
+word fd_cnt = 0             -- bytes written into the current page
+byte fd_page = 0
+byte fd_col = 0
+function fd_byte(byte b)
+    if fd_cnt == 8192 or fd_cnt == 0 then
+        if fd_cnt == 8192 then fd_page += 1 end
+        if fd_col ~= 0 then onl() end
+        os("    MMU 1 e, ")
+        odec(fd_page)
+        os("\n    ORG $2000\n")
+        fd_cnt = 0
+        fd_col = 0
+    end
+    if fd_col == 0 then os("    db ") else ob(',') end
+    odec(b)
+    fd_col += 1
+    if fd_col == 16 then
+        onl()
+        fd_col = 0
+    end
+    fd_cnt += 1
+end
+
+function far_data_out()
+    word s = 1
+    while s <= nsy and not failed do
+        if sk[s] == SK_GLOBAL and spage[s] ~= 0 and sv2[s] ~= 0 then
+            if not flatten(s, sv2[s]) then return end
+            os("; far ")
+            otok(sname[s])
+            onl()
+            fd_page = spage[s]
+            fd_cnt = 0
+            fd_col = 0
+            byte t = sty[s]
+            word n = sym_total(s)
+            word i = 0
+            while i < n and not failed do
+                long v = 0
+                word item = 0
+                if i < nflat then item = flat_[i] end
+                if item ~= 0 then
+                    bool okc = false
+                    if t == TY_FIXED then
+                        okc = fixed_const(item)
+                    elseif t == TY_FIXED16 then
+                        okc = fixed16_const(item)
+                    else
+                        okc = const_eval(item)
+                    end
+                    if not okc then
+                        if fail_node(item) then msg("an array initializer must be constant") end
+                        return
+                    end
+                    v = cv
+                end
+                byte b = 0
+                while b < tsize(t) do
+                    fd_byte(byte(v >> (b * 8)))
+                    b += 1
+                end
+                i += 1
+            end
+            if fd_col ~= 0 then onl() end
+        end
+        s += 1
+    end
+end
+
 -- the 8K pages of the pictures and samples
 function asset_pages_out()
     byte a = 0
@@ -3348,6 +3955,102 @@ function asset_list() -> bool
     to_file(0)
     file_close(h)
     return true
+end
+
+-- the body of function f (an `interrupt` keeps it in n2)
+function fn_body(word f) -> word
+    if sdim[f] ~= 0 then return n2[sv2[f]] end
+    return n4[sv2[f]]
+end
+
+-- `interrupt frame` / `interrupt raster(n)`: a function without a name
+function declare_interrupt(word it)
+    byte kind = 1
+    word rline = 0
+    if nf[it] ~= 0 then
+        if not const_eval(n1[it]) then
+            if fail_node(n1[it]) then msg("raster line must be a constant") end
+            return
+        end
+        if cv < 0 or cv > 311 then
+            if fail_node(n1[it]) then msg("raster line must be 0..311") end
+            return
+        end
+        kind = 2
+        rline = word(cv)
+    end
+    word f = 1
+    while f <= nsy do
+        if sk[f] == SK_FUNC and sdim[f] == kind and (kind == 1 or slen[f] == rline) then
+            if fail_node(it) then msg("this interrupt is defined twice") end
+            return
+        end
+        f += 1
+    end
+    word s = new_sym(SK_FUNC, 0, TY_NONE)
+    if s == 0 then return end
+    sv2[s] = it
+    sdim[s] = kind
+    slen[s] = rline
+    snp[s] = 0
+end
+
+-- the raster handlers, sorted by line, and the ISR entries (their lines
+-- plus line 192, where the frame tick runs)
+word irq_line[64]
+word irq_fn[64]
+byte nlines = 0
+word ent_line[65]
+word ent_fn[65]
+byte nentries = 0
+function irq_lines()
+    nlines = 0
+    word f = 1
+    while f <= nsy do
+        if sk[f] == SK_FUNC and sdim[f] == 2 and nlines < 64 then
+            -- insertion by line
+            byte j = nlines
+            while j > 0 and irq_line[j - 1] > slen[f] do
+                irq_line[j] = irq_line[j - 1]
+                irq_fn[j] = irq_fn[j - 1]
+                j -= 1
+            end
+            irq_line[j] = slen[f]
+            irq_fn[j] = f
+            nlines += 1
+        end
+        f += 1
+    end
+    nentries = 0
+    if nlines == 0 then return end
+    bool frame_done = false
+    byte i = 0
+    while i < nlines do
+        if not frame_done and irq_line[i] > 192 then
+            ent_line[nentries] = 192
+            ent_fn[nentries] = 0
+            nentries += 1
+            frame_done = true
+        end
+        if irq_line[i] == 192 then frame_done = true end
+        ent_line[nentries] = irq_line[i]
+        ent_fn[nentries] = irq_fn[i]
+        nentries += 1
+        i += 1
+    end
+    if not frame_done then
+        ent_line[nentries] = 192
+        ent_fn[nentries] = 0
+        nentries += 1
+    end
+end
+
+-- the frame tick: the counter, the sound driver, samples, `interrupt frame`
+function isr_tick(word drv, word frame_h)
+    os("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n")
+    if drv ~= 0 then o_ins_lab("call ", drv, "") end
+    if uses_samples then oi("call rt_smp_tick") end
+    if frame_h ~= 0 then o_ins_lab("call ", frame_h, "") end
 end
 
 -- ---- call graph (for recursion)
@@ -3466,12 +4169,14 @@ end
 -- may call the same function), then the call. A call that can come back
 -- to the current function saves its frame (parameters and locals) on the
 -- stack around the call.
+bool uses_recursion = false
 function call_func(word e, word f, word alist)
     bool save = cur_fn ~= 0 and reaches(f, cur_fn)
     if not save then
         call_args(e, f, alist)
         return
     end
+    uses_recursion = true
     os("    ld hl,")
     ofr(cur_fn, false)
     ob('-')
@@ -3622,6 +4327,14 @@ function declare_var(word s, bool top, bool far_)
             sid[sc] = n1[init]          -- the text token
             return
         end
+        byte it_ = nat(init)
+        if (it_ == TY_FIXED or it_ == TY_FIXED16) and fixed16_const(init) then
+            if top and lookup(name) ~= 0 then return end
+            word fc = new_sym(SK_CONST, name, TY_FIXED)     -- raw 16.16
+            sid[fc] = word(cv)
+            sv2[fc] = word(cv >> 16)
+            return
+        end
         if not const_eval(init) then
             if fail_node(s) then msg("a constant needs a compile-time value") end
             return
@@ -3663,13 +4376,23 @@ function declare_var(word s, bool top, bool far_)
             long bytes = long(sym_total(v)) * tstore(ty)
             byte pages = byte((bytes + 8191) / 8192)
             bool defs = is_struct(ty) and has_defaults(ty - TY_STRUCT)
-            if init ~= 0 or ty == TY_STR or bytes > 65536 or defs then
+            if (init ~= 0 and is_struct(ty)) or ty == TY_STR or bytes > 65536 or defs then
                 unsupported(s, "this far array")
                 return
             end
             spage[v] = next_page
+            if init ~= 0 then
+                -- its values are stored in the pages (not cleared at startup)
+                sv2[v] = init
+                byte pi = 0
+                while pi < pages do
+                    tabb[B_PASSET + next_page + pi] = 1
+                    pi += 1
+                end
+            else
+                far_arr_pages += pages
+            end
             next_page += pages
-            far_arr_pages += pages
         end
     end
     if pass_declare then return end
@@ -3765,7 +4488,7 @@ function assign(word s)
         if sty[v] ~= TY_STR and not is_struct(sty[v]) then
             byte t = ctx_ty(sty[v], value)
             if op == 0 then
-                gen(value, tsize(t), tsigned(t))
+                gen_t(value, t)
             else
                 gen_op_assign(op - 1, target, value, sty[v])
             end
@@ -3827,6 +4550,14 @@ end
 function gen_op_assign(byte op, word target, word value, byte ty)
     byte t = join(ty, nat(value))
     if t == TY_NONE or t == TY_BOOL then t = ty end
+    if t == TY_FIXED then
+        fx_binary(op, target, value)
+        return
+    end
+    if t == TY_FIXED16 then
+        fx16_binary(op, target, value)
+        return
+    end
     gen_arith(op, target, value, tsize(t), tsigned(t))
 end
 
@@ -3990,6 +4721,12 @@ function print_stmt(word e, bool newline)
             gen(a, 1, false)
             oi("ld a,l")
             oi("call rt_print_bool")
+        elseif t == TY_FIXED then
+            gen_fx(a)
+            oi("call rt_print_fixed")
+        elseif t == TY_FIXED16 then
+            gen_fx16(a)
+            oi("call rt_print_fixed16")
         else
             if t == TY_NONE then
                 if const_eval(a) then t = lit_ty(cv) else t = TY_WORD end
@@ -4141,7 +4878,7 @@ function declare_all()
         elseif k == S_FAR then
             declare_var(n1[it], true, true)
         elseif k == I_INTERRUPT then
-            unsupported(it, "interrupts")
+            declare_interrupt(it)
         elseif k == S_ASSET then
             declare_asset(it)
         end
@@ -4167,7 +4904,7 @@ function declare_all()
         if sk[f] == SK_FUNC then
             set_params(f, 0)
             cur_fn = f
-            collect_calls(f, n4[sv2[f]])
+            collect_calls(f, fn_body(f))
             cur_fn = 0
             set_params(f, 1)
         end
@@ -4263,6 +5000,108 @@ function data_reserve() -> long
     return total
 end
 
+-- ---- a main program too large to be resident: its statements in chunks
+-- of code pages, called in order from a resident list of calls
+
+const MAXMST = 2000
+far word mst_pl[2000]       -- main.tmp offset of statement i (low, high word)
+far word mst_ph[2000]
+far word mst_cost[2000]     -- its estimated size
+
+function mst_pos(word i) -> long
+    return long(mst_ph[i]) << 16 | long(mst_pl[i])
+end
+word nmst = 0
+
+-- copy n bytes of a file from offset `at`
+function ocopy_range(string name, long at, long n)
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then
+        if fail_at(0, 0) then
+            msg("cannot open ")
+            msg(name)
+        end
+        return
+    end
+    file_seek(h, at)
+    while n > 0 do
+        word c = file_getc(h)
+        if c == FILE_EOF then break end
+        ob(byte(c))
+        n -= 1
+    end
+    file_close(h)
+end
+
+-- room for est bytes in a code page: cur_page (a new one when needed)
+function code_page_for(long est)
+    if cur_page == 0 or page_used + est > PAGE_CAP then
+        cur_page = next_page
+        next_page += 1
+        page_used = 0
+        to_file(bankh)
+        os("; code page ")
+        odec(cur_page)
+        os("\n    MMU 2 e, ")
+        odec(cur_page)
+        os("\n    ORG $4000\n")
+        to_file(outh)
+    end
+    page_used += est
+end
+
+function main_chunks(long mend)
+    word i = 0
+    word chunk = 0
+    word stubs_from = 0
+    while i < nmst and not failed do
+        -- statements i .. j-1 into one chunk
+        long est = mst_cost[i] + 16
+        if est > PAGE_CAP then
+            if fail_at(0, 0) then msg("not supported by the self-hosted compiler yet: a statement of the main program larger than an 8K code page (move code into functions)") end
+            return
+        end
+        word j = i + 1
+        while j < nmst and est + mst_cost[j] <= PAGE_CAP do
+            est += mst_cost[j]
+            j += 1
+        end
+        long e = mend
+        if j < nmst then e = mst_pos(j) end
+        code_page_for(est)
+        os("    call __mc_")
+        odec(chunk)
+        onl()
+        resident_used += 3
+        to_file(bankh)
+        os("__mc_")
+        odec(chunk)
+        os("_bank:\n")
+        ocopy_range("main.tmp", mst_pos(i), e - mst_pos(i))
+        oi("ret")
+        to_file(outh)
+        mc_page[chunk] = cur_page
+        chunk += 1
+        i = j
+    end
+    oi("jp __main_end")
+    -- the stubs
+    word c = 0
+    while c < chunk do
+        os("__mc_")
+        odec(c)
+        os(":\n    ld hl,__mc_")
+        odec(c)
+        os("_bank\n    ld a,")
+        odec(mc_page[c])
+        os("\n    jp rt_bcall\n")
+        resident_used += 8
+        c += 1
+    end
+    onl()
+end
+far byte mc_page[2000]
+
 -- the code of one function: into fn.tmp, then resident or into a code page
 function gen_function(word f)
     word node_ = sv2[f]
@@ -4272,7 +5111,7 @@ function gen_function(word f)
     cur_fn = f
     set_params(f, 0)
     long cost0 = cost_out
-    cg_block(n4[node_])
+    cg_block(fn_body(f))
     oi("ret")
     set_params(f, 1)
     cur_fn = 0
@@ -4280,9 +5119,10 @@ function gen_function(word f)
     to_file(outh)
     file_close(tmp)
     if failed then return end
-    bool bank = resident_used + est > RESIDENT_LIMIT
+    -- interrupt handlers stay resident
+    bool bank = resident_used + est > RESIDENT_LIMIT and sdim[f] == 0
     os("; function ")
-    otok(sname[f])
+    o_fnname(f)
     onl()
     if not bank then
         resident_used += est
@@ -4297,19 +5137,7 @@ function gen_function(word f)
         if fail_node(node_) then msg("function too large for one 8K code page") end
         return
     end
-    if cur_page == 0 or page_used + est > PAGE_CAP then
-        cur_page = next_page
-        next_page += 1
-        page_used = 0
-        to_file(bankh)
-        os("; code page ")
-        odec(cur_page)
-        os("\n    MMU 2 e, ")
-        odec(cur_page)
-        os("\n    ORG $4000\n")
-        to_file(outh)
-    end
-    page_used += est
+    code_page_for(est)
     sbank[f] = cur_page
     resident_used += 8
     olab(f)
@@ -4361,7 +5189,15 @@ function data_sym(word s)
         word item = 0
         if i < nflat then item = flat_[i] end
         if item ~= 0 then
-            if not const_eval(item) then
+            bool okc = false
+            if sty[s] == TY_FIXED then
+                okc = fixed_const(item)
+            elseif sty[s] == TY_FIXED16 then
+                okc = fixed16_const(item)
+            else
+                okc = const_eval(item)
+            end
+            if not okc then
                 if fail_node(item) then msg("an array initializer must be constant") end
                 return
             end
@@ -4445,35 +5281,71 @@ function generate()
     oi("ORG $8000")
     onl()
     ocopy("rt_start.asm")
+    irq_lines()
+    if nlines > 0 then
+        os("    ; raster interrupts: ULA interrupt off, line interrupt at ")
+        odec(irq_line[0])
+        os("\n    nextreg $23,")
+        odec(irq_line[0] & 255)
+        os("\n    nextreg $22,")
+        odec(6 | (irq_line[0] >> 8))
+        onl()
+    end
     oi("ei")
     os("\n; ---- main program ----\n")
     if far_arr_pages > 0 then oi("call rt_far_zero") end
+    byte far_end = next_page     -- far data and assets end here, code pages follow
+    -- the main program into main.tmp first, statement by statement (the
+    -- positions and estimated sizes kept): resident if it fits, else in
+    -- chunks in code pages
+    to_file(0)
+    byte mh = file_open("main.tmp", FILE_WRITE)
+    to_file(mh)
+    nmst = 0
     long cost0 = cost_out
     word it = prog_first
     while it ~= 0 and not failed do
         byte k = nk[it]
-        if k == S_VAR then
-            declare_var(it, true, false)
-        elseif k ~= I_FUNC and k ~= I_STRUCT and k ~= S_ASSET then
-            cg_stmt(it)
+        if k ~= I_FUNC and k ~= I_STRUCT and k ~= S_ASSET and k ~= I_INTERRUPT then
+            long c0 = cost_out
+            flush()
+            if nmst < MAXMST then
+                long mp = file_pos(mh)
+                mst_pl[nmst] = word(mp)
+                mst_ph[nmst] = word(mp >> 16)
+                mst_cost[nmst] = 0
+                nmst += 1
+            end
+            if k == S_VAR then declare_var(it, true, false) else cg_stmt(it) end
+            mst_cost[nmst - 1] = word(long(mst_cost[nmst - 1]) + (cost_out - c0))
         end
         it = nx[it]
     end
-    oi("jp __main_end")
-    onl()
-    resident_used += cost_out - cost0
+    flush()
+    long mend = file_pos(mh)
+    to_file(outh)
+    file_close(mh)
+    if failed then return end
+    long main_cost = cost_out - cost0
+    if resident_used + main_cost <= RESIDENT_LIMIT then
+        resident_used += main_cost
+        ocopy("main.tmp")
+        oi("jp __main_end")
+        onl()
+    else
+        main_chunks(mend)
+        if failed then return end
+    end
     if resident_used > RESIDENT_LIMIT then
         if fail_at(0, 0) then
-            msg("not supported by the self-hosted compiler yet: a main program this large (move code into functions); estimate: globals ")
+            msg("not supported by the self-hosted compiler yet: a program this large (resident estimate: globals ")
             msg_dec(0, word(est_globals))
             msg(", other data ")
             msg_dec(0, word(est_reserve))
-            msg(", main code ")
-            msg_dec(0, word(cost_out - cost0))
+            msg(")")
         end
         return
     end
-    byte far_end = next_page
     word f = 1
     while f <= nsy and not failed do
         if sk[f] == SK_FUNC then gen_function(f) end
@@ -4492,6 +5364,7 @@ function generate()
     if any_img then ocopy("rt_images.asm") end
     if uses_samples then ocopy("rt_samples.asm") end
     if uses_notes then ocopy("rt_notes.asm") end
+    if uses_trig then ocopy("rt_trig.asm") end
     -- the background driver of the sound module
     word drv = 0
     word df = 1
@@ -4504,14 +5377,51 @@ function generate()
     bool slot1 = far_end > first_page
     bool banked = cur_page ~= 0
     os("\n; ---- interrupt service routine ----\n")
+    word frame_h = 0
+    word fi = 1
+    while fi <= nsy do
+        if sk[fi] == SK_FUNC and sdim[fi] == 1 then frame_h = fi end
+        fi += 1
+    end
+    -- 32-bit code and recursion keep values in the shadow registers
+    bool shadow = (uses_long or uses_recursion) and (frame_h ~= 0 or nlines > 0)
     os("__isr:\n    push af\n    push bc\n    push de\n    push hl\n")
+    if shadow then os("    exx\n    push bc\n    push de\n    push hl\n    exx\n    ex af,af'\n    push af\n    ex af,af'\n") end
     if slot1 then os("    ld a,(rt_farpage)\n    push af\n") end
     if banked then os("    ld a,(rt_codepage)\n    push af\n    ld a,(rt_bret)\n    push af\n") end
-    os("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n")
-    if drv ~= 0 then o_ins_lab("call ", drv, "") end
-    if uses_samples then oi("call rt_smp_tick") end
+    if nlines == 0 then
+        isr_tick(drv, frame_h)
+    else
+        -- the entries: the handler lines and line 192 (the frame), sorted
+        oi("ld a,(rt_irq_idx)")
+        byte i = 0
+        while i < nentries do
+            os(".e")
+            odec(i)
+            os(":\n")
+            if i + 1 < nentries then
+                os("    cp ")
+                odec(i)
+                os("\n    jr nz,.e")
+                odec(i + 1)
+                onl()
+            end
+            if ent_line[i] == 192 then isr_tick(drv, frame_h) end
+            if ent_fn[i] ~= 0 then o_ins_lab("call ", ent_fn[i], "") end
+            byte nxt = i + 1
+            if nxt == nentries then nxt = 0 end
+            os("    ld a,")
+            odec(nxt)
+            os("\n    ld de,")
+            odec(ent_line[nxt])
+            os("\n    jp .set\n")
+            i += 1
+        end
+        os(".set:\n    ld (rt_irq_idx),a\n    ld a,e\n    nextreg $23,a\n    ld a,d\n    and 1\n    or %00000110\n    nextreg $22,a\n")
+    end
     if banked then os("    pop af\n    ld (rt_bret),a\n    pop af\n    ld (rt_codepage),a\n    nextreg $52,a\n") end
     if slot1 then os("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n") end
+    if shadow then os("    ex af,af'\n    pop af\n    ex af,af'\n    exx\n    pop hl\n    pop de\n    pop bc\n    exx\n") end
     os("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n")
     ocopy("rt_font.asm")
     if far_arr_pages > 0 then
@@ -4603,7 +5513,8 @@ function generate()
     os("\n__program_end:\n")
     oi("ASSERT __program_end <= $FD00, \"main program and data too large\"")
     onl()
-    -- the pictures and samples, the banked functions
+    -- the far data, pictures and samples, the banked functions
+    far_data_out()
     asset_pages_out()
     to_file(0)
     file_close(bankh)
@@ -4633,6 +5544,7 @@ if load_tokens() then
         file_close(outh)
         file_delete("bank.asm")
         file_delete("fn.tmp")
+        file_delete("main.tmp")
     end
     if failed then
         olen = 0
