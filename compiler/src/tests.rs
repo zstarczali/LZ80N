@@ -37,6 +37,17 @@ fn build(name: &str, src: &str) -> Option<(Vec<u8>, HashMap<String, u16>)> {
     build_opts(name, src, false)
 }
 
+/// Compile + assemble a program whose `include`s are relative to `dir`.
+fn build_in(dir: &std::path::Path, src: &str) -> (Vec<u8>, HashMap<String, u16>) {
+    let asm = match crate::compile_opts(src, "t.nex", true, dir, false) {
+        Ok(a) => a,
+        Err(e) => panic!("unexpected errors: {:?}", e.iter().map(|d| d.to_string()).collect::<Vec<_>>()),
+    };
+    let out = crate::asm::assemble(&asm, dir).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
+    let syms = out.symbols16();
+    (out.nex.unwrap().1, syms)
+}
+
 /// `bank_all`: every function in its own code page.
 fn build_opts(name: &str, src: &str, bank_all: bool) -> Option<(Vec<u8>, HashMap<String, u16>)> {
     // relative asset paths resolve against examples/
@@ -92,10 +103,24 @@ fn run(name: &str, src: &str) -> Option<String> {
     run_with(name, src, |_| {}).map(|r| r.0)
 }
 
-/// Assert the printed output.
+/// Assert the printed output. With SELFHOST=1 the program is also compiled
+/// by the self-hosted compiler (selfhost/codegen.lz80n) when it supports it,
+/// and must print the same.
 fn expect(name: &str, src: &str, want: &str) {
     if let Some(out) = run(name, src) {
         assert_eq!(out, want, "program:\n{src}");
+    }
+    if std::env::var("SELFHOST").is_ok() {
+        static SH: std::sync::OnceLock<SelfHost> = std::sync::OnceLock::new();
+        let sh = SH.get_or_init(SelfHost::new);
+        match sh.compile(src) {
+            Ok(asm) => {
+                assert_eq!(run_asm(&asm), want, "self-hosted compiler, program:\n{src}");
+                eprintln!("SELFHOST ok {name}");
+            }
+            Err(e) if e.contains("not supported by the self-hosted compiler") => eprintln!("SELFHOST skip {name}: {e}"),
+            Err(e) => panic!("self-hosted compiler: {e}\nprogram:\n{src}"),
+        }
     }
 }
 
@@ -3976,7 +4001,7 @@ fn selfhost_parser_matches_rust() {
     let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
     let parser_src = std::fs::read_to_string(root.join("selfhost/parser.lz80n")).unwrap();
     let (lex_nex, lex_syms) = build("selfhost_lexer2", &lexer_src).unwrap();
-    let (par_nex, par_syms) = build("selfhost_parser", &parser_src).unwrap();
+    let (par_nex, par_syms) = build_in(&root.join("selfhost"), &parser_src);
     let mut inputs: Vec<(String, String)> = vec![];
     for entry in std::fs::read_dir(root.join("examples")).unwrap() {
         let p = entry.unwrap().path();
@@ -3986,6 +4011,7 @@ fn selfhost_parser_matches_rust() {
     }
     inputs.push(("selfhost/lexer.lz80n".into(), lexer_src.clone()));
     inputs.push(("selfhost/parser.lz80n".into(), parser_src.clone()));
+    inputs.push(("selfhost/parser_core.lz80n".into(), std::fs::read_to_string(root.join("selfhost/parser_core.lz80n")).unwrap()));
     for (name, m) in [
         ("FILE", crate::prelude::FILE),
         ("SOUND", crate::prelude::SOUND),
@@ -4217,5 +4243,229 @@ fn selfhost_asm_errors() {
         let (r, _) = selfhost_assemble(&nex, &syms, asm);
         assert_eq!(r.err().as_deref().map(str::trim_end), Some(want), "{asm}");
         assert!(crate::asm::assemble(asm, &root).is_err(), "the Rust assembler accepts {asm}");
+    }
+}
+
+/// The runtime files the self-hosted code generator copies from the SD card.
+fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
+    let startup = crate::runtime::STARTUP.trim_end();
+    let startup = startup.strip_suffix("ei").expect("startup ends with ei");
+    let mut font = String::from("rt_font:\n");
+    for glyph in crate::font::bytes().chunks(8) {
+        let row: Vec<String> = glyph.iter().map(|b| format!("${b:02X}")).collect();
+        font.push_str(&format!("    db {}\n", row.join(",")));
+    }
+    vec![
+        ("rt_start.asm".into(), startup.as_bytes().to_vec()),
+        ("rt_lib.asm".into(), crate::runtime::RUNTIME.as_bytes().to_vec()),
+        ("rt_font.asm".into(), font.into_bytes()),
+    ]
+}
+
+struct SelfHost {
+    lex: (Vec<u8>, HashMap<String, u16>),
+    cg: (Vec<u8>, HashMap<String, u16>),
+}
+
+impl SelfHost {
+    fn new() -> SelfHost {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+        let cg_src = std::fs::read_to_string(root.join("selfhost/codegen.lz80n")).unwrap();
+        SelfHost { lex: build("sh_lex", &lexer_src).unwrap(), cg: build_in(&root.join("selfhost"), &cg_src) }
+    }
+
+    /// The assembly the self-hosted compiler makes for `src`, or its error.
+    fn compile(&self, src: &str) -> Result<String, String> {
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), src.as_bytes().to_vec());
+        let files = run_stage(&self.lex.0, &self.lex.1, files);
+        let mut files = files;
+        for (n, d) in selfhost_runtime_files() {
+            files.insert(n, d);
+        }
+        let files = run_stage(&self.cg.0, &self.cg.1, files);
+        if let Some(e) = files.get("codegen.err") {
+            return Err(String::from_utf8_lossy(e).trim_end().to_string());
+        }
+        Ok(String::from_utf8_lossy(files.get("out.asm").expect("no out.asm")).to_string())
+    }
+}
+
+/// Run an assembled program in the emulator: what it prints.
+fn run_asm(asm: &str) -> String {
+    let out = crate::asm::assemble(asm, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
+    let syms = out.symbols16();
+    let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+    let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+    let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+    let mut s = String::new();
+    for _ in 0..100_000_000u64 {
+        if cpu.pc == end {
+            return s;
+        }
+        if (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+            s.push(cpu.a as char);
+        } else if cpu.pc == newline {
+            s.push('\n');
+        }
+        cpu.tick().unwrap_or_else(|e| panic!("emulator: {e}\noutput so far:\n{s}"));
+    }
+    panic!("program did not terminate; output so far:\n{s}");
+}
+
+/// Programs compiled by selfhost/codegen.lz80n print what the same programs
+/// compiled by the Rust compiler print.
+#[test]
+fn selfhost_codegen_runs_like_rust() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"print("Hi", 42, true, false, 300, 70000 - 4465)"#,
+        r#"
+byte a = 200
+byte b = 100
+word w = a + b
+byte c = a + b
+print(w, c, a * 2, a / 3, a % 7, a - b, b - a)
+sbyte s = -5
+sword t = -1000
+print(s, t, s * 3, t / 7, t % 7, s - 120, -s, 0 - t)
+print(a & 0x0F, a | 1, a ~ 0xFF, ~a, a << 2, a >> 3, s >> 1, t >> 2, w << 7)
+word big = 65535
+print(big + 1, big * big, word(s), sword(big), byte(t), sbyte(200), sword(s))
+"#,
+        r#"
+const K = 3 * 4
+const NEG = -7
+byte x = K
+print(K, NEG, x + NEG, K << 2)
+var v = 1000
+var u = 7
+print(v, u)
+"#,
+        r#"
+byte a = 5
+word w = 300
+sbyte s = -3
+print(a < 6, a <= 5, a > 5, a >= 6, a == 5, a ~= 5, w > a, s < a, s < 0, w == 300)
+print(a > 3 and w < 1000, a > 9 or s < 0, not (a == 5), not true)
+bool b = a > 4
+print(b, not b)
+"#,
+        r#"
+byte n = 7
+if n > 5 then
+    print("big")
+elseif n > 2 then
+    print("mid")
+else
+    print("small")
+end
+for i = 1, 5 do write(i, " ") end
+print("")
+for i = 10, 0, -3 do write(i, " ") end
+print("")
+for i = 250, 255 do write(i, " ") end
+print("")
+for i = 0, 20, 7 do write(i, " ") end
+print("")
+for i = -3, 3 do write(i, " ") end
+print("")
+word k = 0
+while true do
+    k += 1
+    if k == 4 then break end
+end
+print(k)
+byte total = 0
+for i = 1, 10 do
+    if i == 8 then break end
+    total += i
+end
+print(total)
+"#,
+        r#"
+function add(byte x, word y) -> word
+    return x + y
+end
+function sq(byte x) -> word
+    return x * x
+end
+function neg(sword v) -> sword
+    return -v
+end
+function even(byte v) -> bool
+    return v % 2 == 0
+end
+function hello()
+    print("hello")
+end
+hello()
+print(add(5, 1000), sq(200), neg(-300), neg(7), even(4), even(7), add(byte(sq(3)), sq(byte(sq(2)))))
+"#,
+        r#"
+byte t[5]
+word ws[] = {100, 200, 300}
+byte pr[] = {2, 3, 5, 7, 11}
+for i = 0, 4 do t[i] = i * i end
+t[2] += 10
+print(t[0], t[1], t[2], t[3], t[4], ws[0] + ws[2], pr[4], ws[1])
+word sum = 0
+for i = 0, 4 do sum += pr[i] * t[i] end
+print(sum)
+memory[0xC000] = 77
+print(memory[0xC000])
+function fill(byte v)
+    byte loc[3]
+    for i = 0, 2 do loc[i] = v + i end
+    print(loc[0], loc[1], loc[2])
+end
+fill(9)
+"#,
+        r#"
+word f0 = 0
+word f1 = 1
+for i = 1, 20 do
+    word f2 = f0 + f1
+    f0 = f1
+    f1 = f2
+end
+print(f1)
+function gcd(word a, word b) -> word
+    while b ~= 0 do
+        word t = a % b
+        a = b
+        b = t
+    end
+    return a
+end
+print(gcd(1071, 462), gcd(17, 5))
+word primes = 0
+for n = 2, 200 do
+    bool p = true
+    for d = 2, 14 do
+        if d < n and n % d == 0 then
+            p = false
+            break
+        end
+    end
+    if p then primes += 1 end
+end
+print(primes)
+"#,
+        r#"
+byte r
+asm
+    ld a,42
+    ld (g_r),a
+end
+print(r)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let want = run(&format!("sh_cg_{i}"), src).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let got = run_asm(&asm);
+        assert_eq!(got, want, "program {i}:\n{src}");
     }
 }

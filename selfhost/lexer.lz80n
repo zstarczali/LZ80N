@@ -67,8 +67,8 @@ string keywords[] = {
 -- ---------------------------------------------------------------- input
 
 byte inh                        -- input file
-word size                       -- its length (sources are < 64K)
-word pos                        -- index of c0
+long size                       -- its length
+long pos                        -- index of c0
 byte c0                         -- current character (0 past the end)
 byte c1                         -- the one after it
 word lno = 1
@@ -552,7 +552,7 @@ inh = file_open("in.lz80n", FILE_READ)
 if inh == FILE_ERROR then
     print("cannot open in.lz80n, error", file_status)
 else
-    size = word(file_size(inh))
+    size = file_size(inh)
     pos = 0
     c0 = 0
     c1 = 0
