@@ -178,14 +178,49 @@ const B_LOR = 18
 
 -- ---------------------------------------------------------------- tokens
 
-const MAX_TOKENS = 32000
-far byte tk[32000]          -- kind
-far word tl[32000]          -- line
-far word tc[32000]          -- column
-far word tvl[32000]         -- value, low word
-far word tvh[32000]         -- value, high word
-far word toff[32000]        -- text: offset in tpool
-far word tlen[32000]        -- text: length
+const MAX_TOKENS = 48000
+far byte tk[48000]          -- kind
+-- (words as two byte arrays: a far array holds at most 64K bytes, so a
+-- word array at most 32767 elements)
+far byte tl_lo[48000]       -- line
+far byte tl_hi[48000]
+far byte tc_[48000]         -- column (at most 255)
+far byte to_lo[48000]       -- text: offset in tpool (numbers: their 4 bytes there)
+far byte to_hi[48000]
+far byte tn_lo[48000]       -- text: length
+far byte tn_hi[48000]
+
+function tline(word t) -> word
+    return word(tl_hi[t]) << 8 | tl_lo[t]
+end
+
+function tcol(word t) -> byte
+    return tc_[t]
+end
+
+function toff_(word t) -> word
+    return word(to_hi[t]) << 8 | to_lo[t]
+end
+
+function set_toff(word t, word o)
+    to_lo[t] = byte(o)
+    to_hi[t] = byte(o >> 8)
+end
+
+function tlen_(word t) -> word
+    return word(tn_hi[t]) << 8 | tn_lo[t]
+end
+
+-- the value of a number token, low and high word
+function tval_lo(word t) -> word
+    word o = toff_(t)
+    return word(tpool[o]) | word(tpool[o + 1]) << 8
+end
+
+function tval_hi(word t) -> word
+    word o = toff_(t)
+    return word(tpool[o + 2]) | word(tpool[o + 3]) << 8
+end
 far byte tpool[60000]
 -- identifiers are interned: equal names share their text (and offset)
 far word ihead[4096]
@@ -244,14 +279,14 @@ function fail_at(word l, word c) -> bool
 end
 
 function fail_tok(word t) -> bool
-    return fail_at(tl[t], tc[t])
+    return fail_at(tline(t), tcol(t))
 end
 
 -- the text of token t into the message
 function msg_text(word t)
     word i = 0
-    word o = toff[t]
-    while i < tlen[t] do
+    word o = toff_(t)
+    while i < tlen_(t) do
         if elen < 400 then
             emsg[elen] = tpool[o + i]
             elen += 1
@@ -311,7 +346,7 @@ function msg_tok(word t)
         msg("`")
     elseif k == T_INT then
         msg("number `")
-        msg_dec(tvh[t], tvl[t])
+        msg_dec(tval_hi(t), tval_lo(t))
         msg("`")
     elseif k == T_STR then
         msg("string")
@@ -319,7 +354,7 @@ function msg_tok(word t)
         msg("end of file")
     elseif k == T_FIXED then
         msg("`fixed(")
-        msg_dec(tvh[t], tvl[t])
+        msg_dec(tval_hi(t), tval_lo(t))
         msg(")`")
     else
         msg("`")
@@ -334,7 +369,7 @@ const MAX_NODES = 32000
 far byte nk[32000]
 far byte nf[32000]
 far word nl[32000]
-far word nc[32000]
+far byte nc[32000]       -- (at most 255)
 far word n1[32000]
 far word n2[32000]
 far word n3[32000]
@@ -350,8 +385,8 @@ function node(byte kind, word t) -> word
     nnodes += 1
     word n = nnodes
     nk[n] = kind
-    nl[n] = tl[t]
-    nc[n] = tc[t]
+    nl[n] = tline(t)
+    nc[n] = tcol(t)
     return n
 end
 
@@ -420,8 +455,8 @@ end
 -- is token t the identifier s?
 function text_is(word t, string s) -> bool
     byte n = len(s)
-    if tk[t] ~= T_IDENT or tlen[t] ~= n then return false end
-    word o = toff[t]
+    if tk[t] ~= T_IDENT or tlen_(t) ~= n then return false end
+    word o = toff_(t)
     byte i = 0
     while i < n do
         if tpool[o + i] ~= asc(s, i) then return false end
@@ -898,8 +933,8 @@ function unary() -> word
     -- fold negative literals right away
     if op == 0 and (nk[e] == E_INT or nk[e] == E_FIXED) then
         nf[e] = 1 - nf[e]
-        nl[e] = tl[t0]
-        nc[e] = tc[t0]
+        nl[e] = tline(t0)
+        nc[e] = tcol(t0)
         return e
     end
     word u = node(E_UNARY, t0)
@@ -1042,7 +1077,7 @@ end
 -- an identifier just read at the end of the pool: refer it to an equal
 -- one read before, or remember it
 function intern(word t, word h)
-    word n = tlen[t]
+    word n = tlen_(t)
     word e = ihead[h]
     while e ~= 0 do
         if ilen[e] == n then
@@ -1050,7 +1085,7 @@ function intern(word t, word h)
             word i = 0
             while i < n and tpool[o + i] == tpool[pool_len + i] do i += 1 end
             if i == n then
-                toff[t] = o
+                set_toff(t, o)
                 return
             end
         end
@@ -1076,21 +1111,40 @@ function load_tokens() -> bool
         if eof_in then break end
         if ntok >= MAX_TOKENS then
             fail_at(0, 0)
-            msg("not supported by the self-hosted compiler yet: programs of more than 32000 tokens")
+            msg("not supported by the self-hosted compiler yet: programs of more than 48000 tokens")
             break
         end
         word t = ntok
         ntok += 1
         tk[t] = k
-        tl[t] = in_word()
-        tc[t] = in_word()
+        word ln = in_word()
+        tl_lo[t] = byte(ln)
+        tl_hi[t] = byte(ln >> 8)
+        word cl = in_word()
+        if cl > 255 then cl = 255 end
+        tc_[t] = byte(cl)
+        set_toff(t, 0)
+        tn_lo[t] = 0
+        tn_hi[t] = 0
         if k == T_INT or k == T_FIXED then
-            tvl[t] = in_word()
-            tvh[t] = in_word()
+            -- the value: 4 bytes in the pool
+            if pool_len + 4 > 60000 then
+                if fail_at(ln, cl) then msg("program too large: more than 60000 bytes of names and texts") end
+                break
+            end
+            set_toff(t, pool_len)
+            word vl = in_word()
+            word vh = in_word()
+            tpool[pool_len] = byte(vl)
+            tpool[pool_len + 1] = byte(vl >> 8)
+            tpool[pool_len + 2] = byte(vh)
+            tpool[pool_len + 3] = byte(vh >> 8)
+            pool_len += 4
         elseif k == T_IDENT or k == T_STR or k == T_ASM_BODY or k == T_ERROR then
             word n = in_word()
-            toff[t] = pool_len
-            tlen[t] = n
+            set_toff(t, pool_len)
+            tn_lo[t] = byte(n)
+            tn_hi[t] = byte(n >> 8)
             word i = 0
             word h = 0
             while i < n do
@@ -1100,11 +1154,11 @@ function load_tokens() -> bool
                 i += 1
             end
             if pool_len + n > 60000 then
-                if fail_at(tl[t], tc[t]) then msg("program too large: more than 60000 bytes of names and texts") end
+                if fail_at(tline(t), tcol(t)) then msg("program too large: more than 60000 bytes of names and texts") end
                 break
             end
             if k == T_IDENT then intern(t, h & 4095) end
-            if toff[t] == pool_len then pool_len += n end
+            if toff_(t) == pool_len then pool_len += n end
         end
         if k == T_ERROR then
             -- the lexer stopped: its error is the result
