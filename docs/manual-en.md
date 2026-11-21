@@ -9,7 +9,7 @@ on the Next or in an emulator. There is no interpreter, no virtual machine and
 no garbage collector: what you write becomes Z80N instructions.
 
 This manual describes the language and its libraries as implemented in
-version 1.2.1 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
+version 1.3.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
 The compact technical specification is [`spec.md`](spec.md).
 
 ---

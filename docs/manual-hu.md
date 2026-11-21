@@ -8,7 +8,7 @@ fordítja, és `.nex` fájlba csomagolja, amely közvetlenül fut a Nexten vagy
 emulátorban. Nincs interpreter, nincs virtuális gép és nincs szemétgyűjtő: amit
 leírsz, az Z80N utasításokká válik.
 
-Ez a kézikönyv a nyelvet és a könyvtárait az 1.2.1-es verzió állapota szerint
+Ez a kézikönyv a nyelvet és a könyvtárait az 1.3.0-s verzió állapota szerint
 írja le (lásd [`CHANGELOG.md`](../CHANGELOG.md)). Az angol változat: [`manual-en.md`](manual-en.md). A tömör műszaki
 specifikáció: [`spec.md`](spec.md).
 
