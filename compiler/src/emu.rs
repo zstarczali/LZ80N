@@ -167,7 +167,14 @@ impl Cpu {
             a: 0xFF, f: 0xFF, b: 0, c: 0, d: 0, e: 0, h: 0, l: 0,
             sp: 0xFFFF, pc: 0, i: 0, alt: [0; 8],
             mem: vec![0; 65536],
-            nextreg: { let mut n = [0; 256]; n[0x12] = 8; n[0x13] = 11; n }, nr_sel: 0, border: 7,
+            nextreg: {
+                let mut n = [0; 256];
+                n[0x12] = 8;
+                n[0x13] = 11;
+                // the MMU slots: ROM, ROM, then banks 5, 2, 0
+                n[0x50..0x58].copy_from_slice(&[0xFF, 0xFF, 10, 11, 4, 5, 0, 1]);
+                n
+            }, nr_sel: 0, border: 7,
             keys: [0x1F; 8], kempston: 0, mouse: [0, 0, 0xFF], halted: false,
             patterns: vec![0; 16384], pattern_ptr: 0, sprite_attr: [[0; 5]; 128],
             palettes: [[0; 256]; 8], pal_idx: 0,
@@ -648,7 +655,7 @@ impl Cpu {
         self.pc = ret.wrapping_add(1);
         let mut fs = self.esx.take().unwrap();
         fs.calls += 1;
-        fs.mmu_not_rom |= self.slot0 != 0xFF || self.slot1 != 0xFF;
+        fs.mmu_not_rom |= self.slot0 != 0xFF || self.slot1 != 0xFF || self.slot2 != 10;
         fs.with_interrupts |= self.iff;
         let name_at = |cpu: &Cpu, mut a: u16| {
             let mut s = String::new();

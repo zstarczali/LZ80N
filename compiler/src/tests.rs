@@ -5689,7 +5689,11 @@ fn selfhost_ide() {
                 break;
             }
         }
+        eprintln!("{name}: {:.2} s at 28 MHz", cpu.t_states as f64 / 28e6);
         let fs = cpu.esx.take().unwrap();
+        // esxDOS (and the dot command nexload) with the ROM and the system
+        // variables mapped
+        assert!(!fs.mmu_not_rom, "{name}: esxDOS called without ROM / bank 5 in slots 0-2");
         let next = fs.exec.first().and_then(|c| c.strip_prefix("nexload ")).map(String::from);
         (fs, cpu, next)
     };
@@ -5792,7 +5796,8 @@ fn selfhost_ide_keyboard() {
     let asm = crate::compile_main(src, Some(&dir.join("ide.lz80n")), "ide.nex", true, &dir, false).unwrap();
     let out = crate::asm::assemble(&asm, &dir).unwrap();
     let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
-    cpu.esx = Some(crate::emu::EsxFs::default());
+    // (ide.on: as after a compile, no splash screen)
+    cpu.esx = Some(crate::emu::EsxFs::with_files(&[("ide.on", b"")]));
     // (half-row, bit) of the keys; CAPS = (0, 0), SYMBOL = (7, 1)
     let (caps, sym) = ((0usize, 0u8), (7usize, 1u8));
     let keys: Vec<Vec<(usize, u8)>> = vec![
@@ -5888,7 +5893,7 @@ fn selfhost_ide_selection() {
 #[test]
 fn selfhost_ide_mouse() {
     let text = b"first line\nsecond line\nthird line\n";
-    let (mut cpu, _) = ide_cpu(&[("p.txt", text), ("ide.ses", b"p.txt\n0\n0\n0\n0\n")]);
+    let (mut cpu, _) = ide_cpu(&[("p.txt", text), ("ide.ses", b"p.txt\n0\n0\n0\n0\n"), ("ide.on", b"")]);
     // whole frames, with the mouse moved by (dx, dy) pointer pixels and the
     // buttons (bit 1 left, bit 0 right; 1 = up)
     let mut px = 160i32;
@@ -5971,5 +5976,57 @@ fn selfhost_ide_mouse() {
     go(&mut cpu, 2 * 4 + 1, 3, 3);
     frame(&mut cpu, 2);
     assert!(ide_row(&cpu, 1).contains("New"), "File menu: {}", ide_row(&cpu, 1));
+    // still there after the cursor blinked (its line is under the menu)
+    frame(&mut cpu, 60);
+    assert!(ide_row(&cpu, 1).contains("New"), "File menu after a blink: {}", ide_row(&cpu, 1));
+    assert!(ide_row(&cpu, 5).contains("Exit"), "File menu: {}", ide_row(&cpu, 5));
     assert!(ide_row(&cpu, 0).contains("LZ80N IDE"));
+}
+
+/// The splash screen at the start (the logo, the version from
+/// version.txt), closed by a key; File -> Exit (EXT Q) asks again when the
+/// text is changed, then resets the Next (NextReg 2).
+#[test]
+fn selfhost_ide_splash_exit() {
+    let (mut cpu, end) = ide_cpu(&[("version.txt", b"9.8.7\n")]);
+    let f = cpu.frame_count;
+    while cpu.frame_count < f + 30 {
+        cpu.tick().unwrap();
+    }
+    // the logo: block tiles in the stripe colours
+    let logo: Vec<u8> = (0..80).map(|c| cpu.mem[0x6000 + 5 * 160 + c * 2]).collect();
+    assert!(logo.iter().any(|&t| t >= 128 && t <= 130), "no logo");
+    assert_eq!(ide_attr(&cpu, 5, 25), 39);
+    assert!(ide_row(&cpu, 20).contains("version 9.8.7"), "{}", ide_row(&cpu, 20));
+    // a key: the editor
+    cpu.keys[6] &= !(1 << 4);
+    let f = cpu.frame_count;
+    while cpu.frame_count < f + 4 {
+        cpu.tick().unwrap();
+    }
+    cpu.keys = [0x1F; 8];
+    while cpu.frame_count < f + 10 {
+        cpu.tick().unwrap();
+    }
+    assert!(ide_row(&cpu, 0).contains("LZ80N IDE"), "{}", ide_row(&cpu, 0));
+    assert_eq!(ide_row(&cpu, 1), "   1", "the key closing the splash is not typed");
+
+    // EXT Q with a changed text: asked to repeat it, then the reset
+    let k = [b'x', 0x80 | b'q', 0x80 | b'q'];
+    let (mut cpu, end2) = ide_cpu(&[("ide.key", &k)]);
+    let _ = end;
+    let mut n = 0u64;
+    while cpu.pc != end2 {
+        cpu.tick().unwrap();
+        n += 1;
+        assert!(n < 500_000_000, "the IDE did not end");
+    }
+    assert_eq!(cpu.nextreg[2], 1, "no reset");
+    let k = [b'x', 0x80 | b'q'];
+    let (mut cpu, end3) = ide_cpu(&[("ide.key", &k)]);
+    while cpu.pc != end3 {
+        cpu.tick().unwrap();
+    }
+    assert_ne!(cpu.nextreg[2], 1, "reset without asking");
+    assert!(ide_row(&cpu, 31).contains("unsaved changes"), "{}", ide_row(&cpu, 31));
 }

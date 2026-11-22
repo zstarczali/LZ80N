@@ -167,7 +167,7 @@ up to 32 KB.
   F G, the backquote on X). EXTEND (CAPS+SYMBOL) then S save, O open, N new,
   B compile, R compile and run, F find, G go to line, M mark (the cursor
   keys then select), A select all, C / X / V copy, cut, paste (the line
-  when nothing is selected), K delete a line; cursor left / right / up /
+  when nothing is selected), K delete a line, Q exit; cursor left / right / up /
   down: start / end of the line, of the text. Keys repeat when held.
   Typing, DELETE or ENTER replaces the selection.
 * The Kempston mouse: a sprite pointer. A click moves the cursor, a drag
@@ -184,6 +184,10 @@ up to 32 KB.
   `run.on` does not exist. The IDE reloads the file, shows the result
   in the status line, and puts the cursor on the line and column of a
   code generator error.
+* A splash screen at the start (the logo, the version from `version.txt`,
+  which the export writes); Help -> About shows it again. File -> Exit
+  (EXT Q) asks again for unsaved changes, then resets the Next (back to
+  its menu).
 * `ide.key`: when it exists its bytes are the keys (`$80` + a letter =
   EXTEND + that letter) and the IDE ends at its end; the tests drive the
   IDE this way.
@@ -227,6 +231,7 @@ up to 32 KB.
   `selfhost_ide_selection`: selections, copy, cut and paste from the keys;
   `selfhost_ide_mouse`: the emulated Kempston mouse: drag, the right
   button's menu, line numbers, the menu bar;
+  `selfhost_ide_splash_exit`: the splash screen, File -> Exit;
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
   self-hosted compiler compiles the lexer, the parser and the assembler; they
   give byte-identical results to their lz80nc-compiled versions;

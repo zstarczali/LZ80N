@@ -56,9 +56,12 @@ const C_MENUKEY = 35
 const C_SEL = 36
 const C_TRACK = 37
 const C_THUMB = 38
-const NPAIRS = 19
-byte pal_paper[19] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02, 0x4B, 0x25, 0x92}
-byte pal_ink[19] = {0xB6, 0x1F, 0x1C, 0xFC, 0xF4, 0x6E, 0xB3, 0x6D, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xE7, 0xFC, 0xFF, 0x49, 0xFF}
+const C_LOGO = 39           -- 39..42: the logo's stripes (red, yellow, green, cyan)
+const C_SPLASH = 43
+const C_SPLDIM = 44
+const NPAIRS = 25
+byte pal_paper[25] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02, 0x4B, 0x25, 0x92, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+byte pal_ink[25] = {0xB6, 0x1F, 0x1C, 0xFC, 0xF4, 0x6E, 0xB3, 0x6D, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xE7, 0xFC, 0xFF, 0x49, 0xFF, 0xE0, 0xFC, 0x1C, 0x1F, 0xFF, 0x92}
 
 byte rowc[80]               -- one screen row: characters
 byte rowa[80]               --   and attributes
@@ -121,6 +124,24 @@ function screen_init()
         ld de,$7400+32*8
         ld bc,96*8
         ldir
+        ; tiles 128..130: the upper half, the lower half, a full block
+        ld hl,$7400+128*8
+        ld b,8
+.g:
+        ld a,b
+        cp 5
+        sbc a,a             ; $FF for the rows 0..3 (b = 8..5)
+        cpl
+        ld (hl),a
+        ld de,8
+        add hl,de
+        cpl
+        ld (hl),a
+        add hl,de
+        ld (hl),$FF
+        ld de,-15
+        add hl,de
+        djnz .g
     end
     nextreg[0x43] = 0x30
     nextreg[0x40] = 40
@@ -642,9 +663,11 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About"
+    "Keys", "About", "Exit          EXT Q"
 }
-byte menu_first[5] = {0, 4, 13, 15, 17}
+-- the items of the menus in order (File, Edit, Build, Help): command numbers
+byte menu_order[18] = {0, 1, 2, 3, 17, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+byte menu_first[5] = {0, 5, 14, 16, 18}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -662,7 +685,7 @@ end
 
 function box_item(byte i) -> byte
     if popup then return popup_items[i] end
-    return menu_first[menu_cur] + i
+    return menu_order[menu_first[menu_cur] + i]
 end
 
 function open_menu(byte m)
@@ -708,9 +731,8 @@ function draw_menu_box()
     end
 end
 
--- the help and about boxes
+-- the help box
 bool help_open = false
-bool about = false
 string help_text[] = {
     "LZ80N IDE - keys",
     "",
@@ -724,7 +746,7 @@ string help_text[] = {
     "",
     "EXTEND (CAPS+SYM), then:",
     "  S save  O open  N new  B compile  R compile & run",
-    "  F find  G go to line  K delete line",
+    "  F find  G go to line  K delete line  Q exit",
     "  M mark (then the cursor keys select)  A select all",
     "  C copy  X cut  V paste (a line without a selection)",
     "  left / right: start / end of the line",
@@ -737,22 +759,9 @@ string help_text[] = {
     "Any key closes this."
 }
 const NHELP = 23
-string about_text[] = {
-    "LZ80N IDE",
-    "",
-    "The editor and the self-hosted compiler of LZ80N,",
-    "a Lua-like language for the ZX Spectrum Next.",
-    "",
-    "Build -> Compile runs lexer.nex, codegen.nex and",
-    "asm.nex and comes back here; the program is out.nex.",
-    "",
-    "github.com/zstarczali/LZ80N"
-}
-const NABOUT = 9
 
 function draw_help()
     byte n = NHELP
-    if about then n = NABOUT end
     byte i = 0
     while i < n + 2 do
         byte r = TEXT_TOP + 1 + i
@@ -764,7 +773,7 @@ function draw_help()
             k += 1
         end
         if i > 0 and i <= n then
-            if about then row_text(12, about_text[i - 1], C_BOX) else row_text(12, help_text[i - 1], C_BOX) end
+            row_text(12, help_text[i - 1], C_BOX)
         end
         put_row(r)
         i += 1
@@ -788,6 +797,9 @@ function redraw()
     end
     if redraw_line then
         if cy >= top and cy < top + TEXT_ROWS then draw_text_row(byte(cy - top) + TEXT_TOP) end
+        -- (that row may be under a menu or the help)
+        if menu_open then draw_menu_box() end
+        if help_open then draw_help() end
         draw_menu_bar()
         draw_status()
         redraw_line = false
@@ -1999,10 +2011,13 @@ function run_item(byte it)
         cmd_compile(false)
     elseif it == 14 then
         cmd_compile(true)
-    elseif it == 15 or it == 16 then
+    elseif it == 15 then
         help_open = true
-        about = it == 16
         redraw_all = true
+    elseif it == 16 then
+        splash(false)
+    elseif it == 17 then
+        if may_drop(K_EXT + 'q') then exit_ide() end
     end
 end
 
@@ -2054,6 +2069,8 @@ function ext_command(word c)
         mark_cmd()
     elseif c == 'k' then
         delete_this_line()
+    elseif c == 'q' then
+        run_item(17)
     elseif c == K_LEFT then
         move_to(cy, 0)
     elseif c == K_RIGHT then
@@ -2280,6 +2297,121 @@ function load_session()
     redraw_all = true
 end
 
+-- ---------------------------------------------------------------- splash, exit
+
+-- 5x7 letters of the logo (bit 4 = the left column)
+string logo_chars = "LZ80NIDE"
+byte logo_font[56] = {
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F,
+    0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F,
+    0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E,
+    0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E,
+    0x11, 0x19, 0x19, 0x15, 0x13, 0x13, 0x11,
+    0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E,
+    0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E,
+    0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F
+}
+
+-- the logo's 4 screen rows (r = 0..3: letter rows 2r and 2r+1) of t into
+-- rowc / rowa from column c; a letter pixel is a half cell (square)
+function logo_row(string t, byte c, byte r)
+    byte i = 0
+    while i < len(t) do
+        byte k = 0
+        while k < 8 and asc(logo_chars, k) ~= asc(t, i) do k += 1 end
+        if k < 8 then
+            byte up = logo_font[k * 7 + r * 2]
+            byte dn = 0
+            if r < 3 then dn = logo_font[k * 7 + r * 2 + 1] end
+            byte x = 0
+            while x < 5 do
+                byte m = 0x10 >> x
+                byte g = 0
+                if up & m ~= 0 and dn & m ~= 0 then
+                    g = 130
+                elseif up & m ~= 0 then
+                    g = 128
+                elseif dn & m ~= 0 then
+                    g = 129
+                end
+                if g ~= 0 then
+                    rowc[c + x] = g
+                    rowa[c + x] = (C_LOGO + r) * 2
+                end
+                x += 1
+            end
+        end
+        c += 6
+        i += 1
+    end
+end
+
+-- text centred in rowc / rowa
+function row_centre(string t, byte colour)
+    row_text(40 - len(t) / 2, t, colour)
+end
+
+-- the version of the compiler (version.txt next to the .nex files)
+function version_text() -> string
+    if not file_exists("version.txt") then return "" end
+    sh = file_open("version.txt", FILE_READ)
+    if sh == FILE_ERROR then return "" end
+    read_ln()
+    file_close(sh)
+    return sline
+end
+
+-- the splash screen (Help -> About too) until a key, a click or (start)
+-- about 4 seconds
+function splash(bool start)
+    string v = version_text()
+    if v ~= "" then v = "version " .. v .. "  -  " end
+    byte r = 0
+    while r < 32 do
+        row_clear(C_SPLASH)
+        if r >= 5 and r <= 8 then logo_row("LZ80N", 25, byte(r - 5)) end
+        if r >= 11 and r <= 14 then logo_row("IDE", 31, byte(r - 11)) end
+        if r == 18 then row_centre("The LZ80N compiler and editor, on the ZX Spectrum Next itself", C_SPLASH) end
+        if r == 20 then row_centre(v .. "github.com/zstarczali/LZ80N", C_SPLDIM) end
+        if r == 21 then row_centre("Zsolt Tarczali", C_SPLDIM) end
+        if r == 26 then row_centre("Press a key or click", C_SPLDIM) end
+        -- the Spectrum stripes in the corner
+        if r >= 27 then
+            byte k = 0
+            while k < 4 do
+                byte x = 70 + k * 2 - byte(r - 27)
+                rowc[x] = 130
+                rowa[x] = (C_LOGO + k) * 2
+                rowc[x + 1] = 130
+                rowa[x + 1] = (C_LOGO + k) * 2
+                k += 1
+            end
+        end
+        put_row(r)
+        r += 1
+    end
+    byte mb = port[0xFADF]
+    word t = 0
+    while true do
+        if not scripted then vsync() end
+        word k = get_key()
+        if k ~= 0 then break end
+        if port[0xFADF] & 3 ~= mb & 3 then break end
+        t += 1
+        if start and t >= 200 then break end
+    end
+    held = 255
+    mb_last = port[0xFADF]
+    redraw_all = true
+end
+
+-- back to the Next's menu (a soft reset)
+function exit_ide()
+    quit_now = true
+    exiting = true
+end
+bool exiting = false
+
 -- ---------------------------------------------------------------- main
 
 bool quit_now = false
@@ -2301,9 +2433,11 @@ end
 screen_init()
 mouse_init()
 new_text()
+bool from_compile = file_exists("ide.on")
 load_session()
 if file_exists("ide.on") then file_delete("ide.on") end
 load_script()
+if not scripted and not from_compile then splash(true) end
 redraw()
 while not quit_now do
     if not scripted then vsync() end
@@ -2323,4 +2457,10 @@ end
 if scripted and not quit_now then
     store_cur()
     save_session(false)
+end
+if exiting then
+    -- File -> Exit: a soft reset, back to the Next's menu
+    sprites_visible(false, false)
+    nextreg[0x6B] = 0
+    nextreg[0x02] = 1
 end

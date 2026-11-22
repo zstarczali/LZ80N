@@ -43,6 +43,33 @@ __main_end:
 
 ; ==== runtime library ====
 
+; esxDOS call (RST $08, the function byte at rt_esx_fn; A, BC, DE, HL, IX
+; as the call takes them; carry and registers as it leaves them), with the
+; system variables (bank 5) at $4000: banked code has its page there, and
+; NextZXOS (dot commands) needs them. Resident, as it changes slot 2.
+rt_esx:
+    ld (rt_esx_a),a
+    push bc
+    ld bc,$243B
+    ld a,$52
+    out (c),a
+    inc b
+    in a,(c)
+    ld (rt_esx_mmu2),a
+    pop bc
+    nextreg $52,10
+    ld a,(rt_esx_a)
+    rst $08
+rt_esx_fn:
+    db 0
+    push af
+    ld a,(rt_esx_mmu2)
+    nextreg $52,a
+    pop af
+    ret
+rt_esx_a:    db 0
+rt_esx_mmu2: db 10
+
 ; wait for the next frame (rt_frames changes; raster interrupts in
 ; between do not end the wait)
 rt_vsync:

@@ -217,6 +217,8 @@ pub fn export_selfhost(dir: &Path) -> Result<Vec<Built>, String> {
         write(name, src.as_bytes())?;
     }
     write("chain.on", b"1")?;
+    // the IDE shows it (Help -> About, the splash screen)
+    write("version.txt", format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())?;
     let mut built = vec![];
     for stage in ["lexer", "codegen", "assets", "asm", "ide"] {
         let file = format!("{stage}.lz80n");
