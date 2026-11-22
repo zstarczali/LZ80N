@@ -60,7 +60,7 @@ const C_LOGO = 39           -- 39..42: the logo's stripes (red, yellow, green, c
 const C_SPLASH = 43
 const C_SPLDIM = 44
 const NPAIRS = 25
-byte pal_paper[25] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02, 0x4B, 0x25, 0x92, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+byte pal_paper[25] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02, 0x4B, 0x25, 0x92, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}
 byte pal_ink[25] = {0xB6, 0x1F, 0x1C, 0xFC, 0xF4, 0x6E, 0xB3, 0x6D, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xE7, 0xFC, 0xFF, 0x49, 0xFF, 0xE0, 0xFC, 0x1C, 0x1F, 0xFF, 0x92}
 
 byte rowc[80]               -- one screen row: characters
@@ -284,12 +284,61 @@ function get_line(word l)
         return
     end
     word s = lslot[l]
-    blen = sget(s, 0)
-    word i = 0
-    while i < blen do
-        lbuf[i] = sget(s, i + 1)
-        i += 1
+    byte a = byte(s / 255)
+    word o = (s % 255) * 256
+    byte n = 0
+    byte i = 0
+    -- (one loop per array: the slot's place is worked out once)
+    if a == 0 then
+        n = sa0[o]
+        while i < n do
+            lbuf[i] = sa0[o + 1 + i]
+            i += 1
+        end
+    elseif a == 1 then
+        n = sa1[o]
+        while i < n do
+            lbuf[i] = sa1[o + 1 + i]
+            i += 1
+        end
+    elseif a == 2 then
+        n = sa2[o]
+        while i < n do
+            lbuf[i] = sa2[o + 1 + i]
+            i += 1
+        end
+    elseif a == 3 then
+        n = sa3[o]
+        while i < n do
+            lbuf[i] = sa3[o + 1 + i]
+            i += 1
+        end
+    elseif a == 4 then
+        n = sa4[o]
+        while i < n do
+            lbuf[i] = sa4[o + 1 + i]
+            i += 1
+        end
+    elseif a == 5 then
+        n = sa5[o]
+        while i < n do
+            lbuf[i] = sa5[o + 1 + i]
+            i += 1
+        end
+    elseif a == 6 then
+        n = sa6[o]
+        while i < n do
+            lbuf[i] = sa6[o + 1 + i]
+            i += 1
+        end
+    else
+        n = sa7[o]
+        while i < n do
+            lbuf[i] = sa7[o + 1 + i]
+            i += 1
+        end
     end
+    blen = n
 end
 
 -- the line being edited, in cur[]
@@ -415,16 +464,42 @@ const NKEYWORDS = 28
 string types[] = {"bool", "byte", "sbyte", "word", "sword", "long", "fixed", "fixed16", "string"}
 const NTYPES = 9
 
-function word_kind(byte a, byte b) -> byte
+-- the first letter and the length of each keyword and type (kw_init)
+byte kw_c[37]
+byte kw_l[37]
+function kw_init()
     byte k = 0
     while k < NKEYWORDS do
-        if word_is(a, b, keywords[k]) then return C_KEY end
+        kw_c[k] = asc(keywords[k], 0)
+        kw_l[k] = len(keywords[k])
         k += 1
     end
     k = 0
     while k < NTYPES do
-        if word_is(a, b, types[k]) then return C_TYPE end
+        kw_c[NKEYWORDS + k] = asc(types[k], 0)
+        kw_l[NKEYWORDS + k] = len(types[k])
         k += 1
+    end
+end
+
+function word_kind(byte a, byte b) -> byte
+    byte c = lbuf[a]
+    byte n = b - a
+    if c >= 'a' and c <= 'w' and n >= 2 and n <= 9 then
+        byte k = 0
+        while k < NKEYWORDS do
+            if kw_c[k] == c and kw_l[k] == n then
+                if word_is(a, b, keywords[k]) then return C_KEY end
+            end
+            k += 1
+        end
+        k = 0
+        while k < NTYPES do
+            if kw_c[NKEYWORDS + k] == c and kw_l[NKEYWORDS + k] == n then
+                if word_is(a, b, types[k]) then return C_TYPE end
+            end
+            k += 1
+        end
     end
     -- a call: a built-in or a function
     byte j = b
@@ -569,7 +644,9 @@ function thumb()
     th_a = byte(t * (TEXT_ROWS - th_n) / most)
 end
 
-function draw_text_row(byte r)
+-- a text row into rowc / rowa (overlays draw over it before put_row, so
+-- the screen never shows the text under them)
+function build_text_row(byte r)
     word l = top + (r - TEXT_TOP)
     row_clear(C_TEXT)
     if sel_on then sel_order() end
@@ -601,6 +678,10 @@ function draw_text_row(byte r)
     thumb()
     byte i = r - TEXT_TOP
     if i >= th_a and i < th_a + th_n then rowa[79] = C_THUMB * 2 else rowa[79] = C_TRACK * 2 end
+end
+
+function draw_text_row(byte r)
+    build_text_row(r)
     put_row(r)
 end
 
@@ -663,11 +744,11 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "Exit          EXT Q", "Build output  EXT L"
+    "Keys", "About", "", "Build output  EXT L"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
-byte menu_order[19] = {0, 1, 2, 3, 17, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 16}
-byte menu_first[5] = {0, 5, 14, 17, 19}
+byte menu_order[18] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 16}
+byte menu_first[5] = {0, 4, 13, 16, 18}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -688,17 +769,71 @@ function box_item(byte i) -> byte
     return menu_order[menu_first[menu_cur] + i]
 end
 
+-- the screen rows to draw again (text rows a..b) and the parts to draw
+byte dirty_a = 255
+byte dirty_b = 0
+bool box_dirty = false
+bool bar_dirty = false
+
+function mark_rows(byte a, byte b)
+    if a < dirty_a then dirty_a = a end
+    if b > dirty_b then dirty_b = b end
+end
+
+-- the attributes of n cells of screen row r from column c (no other
+-- drawing: moving in a menu only recolours two rows)
+function put_attr(byte r, byte c, byte n, byte a)
+    asm
+        ld a,(p_put_attr_r)
+        ld e,a
+        ld d,160
+        mul d,e
+        ld hl,$6001
+        add hl,de
+        ld a,(p_put_attr_c)
+        add a,a
+        add hl,a
+        ld a,(p_put_attr_n)
+        ld b,a
+        ld a,(p_put_attr_a)
+.l:
+        ld (hl),a
+        inc hl
+        inc hl
+        djnz .l
+    end
+end
+
+-- the menu's item it highlighted
+function set_item(byte it)
+    if not menu_open or it == menu_item then return end
+    put_attr(box_y + menu_item, box_x, BOXW, C_BOX * 2)
+    menu_item = it
+    put_attr(box_y + menu_item, box_x, BOXW, C_MENUHI * 2)
+end
+
+-- close the menu: the rows under it are drawn again
+function close_menu()
+    if not menu_open then return end
+    mark_rows(box_y, box_y + box_n())
+    menu_open = false
+    bar_dirty = true
+end
+
 function open_menu(byte m)
+    close_menu()
     menu_open = true
     popup = false
     menu_cur = m
     menu_item = 0
     box_x = menu_x[m] - 1
     box_y = TEXT_TOP
-    redraw_all = true
+    box_dirty = true
+    bar_dirty = true
 end
 
 function open_popup(word c, word r)
+    close_menu()
     menu_open = true
     popup = true
     menu_item = 0
@@ -707,7 +842,7 @@ function open_popup(word c, word r)
     if r < TEXT_TOP then r = TEXT_TOP end
     box_x = byte(c)
     box_y = byte(r)
-    redraw_all = true
+    box_dirty = true
 end
 
 function draw_menu_box()
@@ -715,7 +850,7 @@ function draw_menu_box()
     byte i = 0
     while i <= n do
         byte r = box_y + i
-        draw_text_row(r)
+        build_text_row(r)
         byte colour = C_BOX
         if i < n and i == menu_item then colour = C_MENUHI end
         byte k = 0
@@ -746,7 +881,7 @@ string help_text[] = {
     "",
     "EXTEND (CAPS+SYM), then:",
     "  S save  O open  N new  B compile  R compile & run",
-    "  F find  G go to line  K delete line  L build output  Q exit",
+    "  F find  G go to line  K delete line  L build output",
     "  M mark (then the cursor keys select)  A select all",
     "  C copy  X cut  V paste (a line without a selection)",
     "  left / right: start / end of the line",
@@ -805,7 +940,7 @@ function draw_output()
     byte r = TEXT_TOP + TEXT_ROWS - nout - 2
     byte i = 0
     while i < nout + 2 do
-        draw_text_row(r + i)
+        build_text_row(r + i)
         byte k = 1
         while k < 79 do
             rowc[k] = ' '
@@ -829,7 +964,7 @@ function draw_help()
     byte i = 0
     while i < n + 2 do
         byte r = TEXT_TOP + 1 + i
-        draw_text_row(r)
+        build_text_row(r)
         byte k = 0
         while k < 60 do
             rowc[10 + k] = ' '
@@ -844,12 +979,21 @@ function draw_help()
     end
 end
 
+-- is screen row r under a menu, the help or the build output? (those draw
+-- it, with the text under them, so a row is written once: no flicker)
+function covered(byte r) -> bool
+    if menu_open and r >= box_y and r <= box_y + box_n() then return true end
+    if help_open and r >= TEXT_TOP + 1 and r < TEXT_TOP + 1 + NHELP + 2 then return true end
+    if out_open and r >= TEXT_TOP + TEXT_ROWS - nout - 2 then return true end
+    return false
+end
+
 function redraw()
     if redraw_all then
         draw_menu_bar()
         byte r = TEXT_TOP
         while r < TEXT_TOP + TEXT_ROWS do
-            draw_text_row(r)
+            if not covered(r) then draw_text_row(r) end
             r += 1
         end
         if menu_open then draw_menu_box() end
@@ -858,14 +1002,34 @@ function redraw()
         draw_status()
         redraw_all = false
         redraw_line = false
+        dirty_a = 255
+        dirty_b = 0
+        box_dirty = false
+        bar_dirty = false
         return
     end
-    if redraw_line then
-        if cy >= top and cy < top + TEXT_ROWS then draw_text_row(byte(cy - top) + TEXT_TOP) end
-        -- (that row may be under a menu or the help)
+    if dirty_a <= dirty_b then
+        byte r = dirty_a
+        while r <= dirty_b do
+            if not covered(r) then draw_text_row(r) end
+            r += 1
+        end
+        dirty_a = 255
+        dirty_b = 0
+    end
+    if box_dirty then
         if menu_open then draw_menu_box() end
-        if help_open then draw_help() end
-        if out_open then draw_output() end
+        box_dirty = false
+    end
+    if bar_dirty then
+        draw_menu_bar()
+        bar_dirty = false
+    end
+    if redraw_line then
+        if cy >= top and cy < top + TEXT_ROWS then
+            byte cr = byte(cy - top) + TEXT_TOP
+            if not covered(cr) then draw_text_row(cr) end
+        end
         draw_menu_bar()
         draw_status()
         redraw_line = false
@@ -873,15 +1037,71 @@ function redraw()
 end
 
 -- keep the cursor on the screen
+-- the tilemap's text rows moved by n rows (up: the text goes up)
+word sh_src = 0
+word sh_dst = 0
+word sh_cnt = 0
+function shift_rows(byte n, bool up)
+    sh_cnt = word(TEXT_ROWS - n) * 160
+    if up then
+        sh_dst = TILEMAP + TEXT_TOP * 160
+        sh_src = sh_dst + word(n) * 160
+        asm
+            ld hl,(g_sh_src)
+            ld de,(g_sh_dst)
+            ld bc,(g_sh_cnt)
+            ldir
+        end
+    else
+        sh_dst = TILEMAP + (TEXT_TOP + TEXT_ROWS) * 160 - 1
+        sh_src = sh_dst - word(n) * 160
+        asm
+            ld hl,(g_sh_src)
+            ld de,(g_sh_dst)
+            ld bc,(g_sh_cnt)
+            lddr
+        end
+    end
+end
+
+-- the scroll bar column
+function draw_thumb()
+    thumb()
+    byte i = 0
+    while i < TEXT_ROWS do
+        if i >= th_a and i < th_a + th_n then
+            put_attr(TEXT_TOP + i, 79, 1, C_THUMB * 2)
+        else
+            put_attr(TEXT_TOP + i, 79, 1, C_TRACK * 2)
+        end
+        i += 1
+    end
+end
+
+-- the first line on the screen: for a few lines the tilemap rows move and
+-- only the new ones are drawn
+function set_top(word t)
+    if t == top then return end
+    word d = 0
+    bool up = t > top
+    if up then d = t - top else d = top - t end
+    top = t
+    if redraw_all or menu_open or help_open or out_open or d >= TEXT_ROWS - 2 then
+        redraw_all = true
+        return
+    end
+    shift_rows(byte(d), up)
+    byte i = 0
+    while i < byte(d) do
+        if up then draw_text_row(TEXT_TOP + TEXT_ROWS - 1 - i) else draw_text_row(TEXT_TOP + i) end
+        i += 1
+    end
+    draw_thumb()
+end
+
 function scroll_to_cursor()
-    if cy < top then
-        top = cy
-        redraw_all = true
-    end
-    if cy >= top + TEXT_ROWS then
-        top = cy - TEXT_ROWS + 1
-        redraw_all = true
-    end
+    if cy < top then set_top(cy) end
+    if cy >= top + TEXT_ROWS then set_top(cy - TEXT_ROWS + 1) end
     if cx < left_ then
         left_ = cx
         redraw_all = true
@@ -1184,11 +1404,7 @@ function hover()
     word r = py / 8
     word c = px / 4
     if r >= box_y and r < box_y + box_n() and c >= box_x and c < box_x + BOXW then
-        byte it = byte(r - box_y)
-        if it ~= menu_item then
-            menu_item = it
-            redraw_all = true
-        end
+        set_item(byte(r - box_y))
         return
     end
     if r == 0 and not popup then
@@ -1219,10 +1435,9 @@ function mouse_held()
         word t = word(r) * most / span
         if t > most then t = most end
         if t ~= top then
-            top = t
+            set_top(t)
             if cy < top then move_to(top, cx) end
             if cy >= top + TEXT_ROWS then move_to(top + TEXT_ROWS - 1, cx) end
-            redraw_all = true
         end
         return
     end
@@ -1230,11 +1445,11 @@ function mouse_held()
     word r = py / 8
     -- above or below the text: scroll
     if r < TEXT_TOP then
-        if top > 0 then top -= 1 end
+        if top > 0 then set_top(top - 1) end
         r = TEXT_TOP
         drag_l = 0xFFFF
     elseif r >= TEXT_TOP + TEXT_ROWS then
-        if top + TEXT_ROWS < nlines then top += 1 end
+        if top + TEXT_ROWS < nlines then set_top(top + 1) end
         r = TEXT_TOP + TEXT_ROWS - 1
         drag_l = 0xFFFF
     end
@@ -1247,9 +1462,19 @@ function mouse_held()
     if l == drag_l and col == drag_c then return end
     drag_l = l
     drag_c = col
+    word was = cy
     move_to(l, byte(col))
     sel_on = sel_l ~= cy or sel_c ~= cx
-    redraw_all = true
+    -- the selection changed on the lines between the old and the new end
+    word a = was
+    word b = cy
+    if b < a then
+        a = cy
+        b = was
+    end
+    if a < top then a = top end
+    if b >= top + TEXT_ROWS then b = top + TEXT_ROWS - 1 end
+    if a <= b then mark_rows(byte(a - top) + TEXT_TOP, byte(b - top) + TEXT_TOP) end
 end
 
 -- the word around the cursor
@@ -1288,10 +1513,9 @@ function scroll_by(sword d)
     if most < 0 then most = 0 end
     if t > most then t = most end
     if t < 0 then t = 0 end
-    top = word(t)
+    set_top(word(t))
     if cy < top then move_to(top, cx) end
     if cy >= top + TEXT_ROWS then move_to(top + TEXT_ROWS - 1, cx) end
-    redraw_all = true
 end
 
 function click()
@@ -1320,14 +1544,12 @@ function click()
     if menu_open then
         if r >= box_y and r < box_y + box_n() and c >= box_x and c < box_x + BOXW then
             byte it = box_item(byte(r - box_y))
-            menu_open = false
-            redraw_all = true
+            close_menu()
             run_item(it)
             return
         end
         if not popup then was_menu = menu_cur end
-        menu_open = false
-        redraw_all = true
+        close_menu()
         if r ~= 0 then return end
     end
     if r == 0 then
@@ -1391,7 +1613,10 @@ function move_to(word l, byte c)
         word old = cy
         load_cur(l)
         cy = l
-        if old >= top and old < top + TEXT_ROWS then draw_text_row(byte(old - top) + TEXT_TOP) end
+        if old >= top and old < top + TEXT_ROWS then
+            byte orow = byte(old - top) + TEXT_TOP
+            if not covered(orow) then draw_text_row(orow) end
+        end
     else
         load_cur(l)
     end
@@ -2123,8 +2348,6 @@ function run_item(byte it)
         redraw_all = true
     elseif it == 16 then
         splash(false)
-    elseif it == 17 then
-        if may_drop(K_EXT + 'q') then exit_ide() end
     elseif it == 18 then
         show_output()
     end
@@ -2133,22 +2356,20 @@ end
 function menu_key(word k)
     byte n = box_n()
     if k == K_BREAK or k == K_MENU then
-        menu_open = false
+        close_menu()
     elseif k == K_LEFT and not popup then
         if menu_cur == 0 then open_menu(NMENUS - 1) else open_menu(menu_cur - 1) end
     elseif k == K_RIGHT and not popup then
         if menu_cur + 1 == NMENUS then open_menu(0) else open_menu(menu_cur + 1) end
     elseif k == K_UP then
-        if menu_item == 0 then menu_item = n - 1 else menu_item -= 1 end
+        if menu_item == 0 then set_item(n - 1) else set_item(menu_item - 1) end
     elseif k == K_DOWN then
-        menu_item += 1
-        if menu_item == n then menu_item = 0 end
+        if menu_item + 1 == n then set_item(0) else set_item(menu_item + 1) end
     elseif k == K_ENTER then
-        menu_open = false
-        redraw_all = true
-        run_item(box_item(menu_item))
+        byte it = box_item(menu_item)
+        close_menu()
+        run_item(it)
     end
-    redraw_all = true
 end
 
 function ext_command(word c)
@@ -2178,8 +2399,6 @@ function ext_command(word c)
         mark_cmd()
     elseif c == 'k' then
         delete_this_line()
-    elseif c == 'q' then
-        run_item(17)
     elseif c == 'l' then
         show_output()
     elseif c == K_LEFT then
@@ -2414,7 +2633,7 @@ function load_session()
     redraw_all = true
 end
 
--- ---------------------------------------------------------------- splash, exit
+-- ---------------------------------------------------------------- splash
 
 -- 5x7 letters of the logo (bit 4 = the left column)
 string logo_chars = "LZ80NIDE"
@@ -2482,28 +2701,37 @@ end
 -- about 4 seconds
 function splash(bool start)
     string v = version_text()
-    if v ~= "" then v = "version " .. v .. "  -  " end
-    byte r = 0
-    while r < 32 do
-        row_clear(C_SPLASH)
-        if r >= 5 and r <= 8 then logo_row("LZ80N", 25, byte(r - 5)) end
-        if r >= 11 and r <= 14 then logo_row("IDE", 31, byte(r - 11)) end
-        if r == 18 then row_centre("The LZ80N compiler and editor, on the ZX Spectrum Next itself", C_SPLASH) end
-        if r == 20 then row_centre(v .. "github.com/zstarczali/LZ80N", C_SPLDIM) end
-        if r == 21 then row_centre("Zsolt Tarczali", C_SPLDIM) end
-        if r == 26 then row_centre("Press a key or click", C_SPLDIM) end
-        -- the Spectrum stripes in the corner
-        if r >= 27 then
-            byte k = 0
-            while k < 4 do
-                byte x = 70 + k * 2 - byte(r - 27)
+    if v ~= "" then v = "v" .. v .. " - " end
+    redraw_all = true
+    redraw()
+    -- a box of rows 7..24, columns 18..61, over the editor
+    byte r = 7
+    while r <= 24 do
+        build_text_row(r)
+        byte k = 18
+        while k <= 61 do
+            rowc[k] = ' '
+            rowa[k] = C_SPLASH * 2
+            k += 1
+        end
+        if r >= 8 and r <= 11 then logo_row("LZ80N", 25, byte(r - 8)) end
+        if r >= 13 and r <= 16 then
+            logo_row("IDE", 31, byte(r - 13))
+            -- the Spectrum stripes next to it
+            byte s_ = 0
+            while s_ < 4 do
+                byte x = 53 + s_ * 2 - byte(r - 13)
                 rowc[x] = 130
-                rowa[x] = (C_LOGO + k) * 2
+                rowa[x] = (C_LOGO + s_) * 2
                 rowc[x + 1] = 130
-                rowa[x + 1] = (C_LOGO + k) * 2
-                k += 1
+                rowa[x + 1] = (C_LOGO + s_) * 2
+                s_ += 1
             end
         end
+        if r == 18 then row_centre("The LZ80N compiler and editor on the Next", C_SPLASH) end
+        if r == 20 then row_centre(v .. "github.com/zstarczali/LZ80N", C_SPLDIM) end
+        if r == 21 then row_centre("Zsolt Tarczali", C_SPLDIM) end
+        if r == 23 then row_centre("Press a key or click", C_SPLDIM) end
         put_row(r)
         r += 1
     end
@@ -2522,12 +2750,6 @@ function splash(bool start)
     redraw_all = true
 end
 
--- back to the Next's menu (a soft reset)
-function exit_ide()
-    quit_now = true
-    exiting = true
-end
-bool exiting = false
 
 -- ---------------------------------------------------------------- main
 
@@ -2548,6 +2770,7 @@ function load_script()
 end
 
 screen_init()
+kw_init()
 mouse_init()
 new_text()
 bool from_compile = file_exists("ide.on")
@@ -2564,7 +2787,7 @@ while not quit_now do
     if k == 0xFFFF then break end           -- the end of ide.key
     if k ~= 0 then handle_key(k) end
     blink_t += 1
-    if blink_t >= 25 and not scripted then
+    if blink_t >= 25 and not scripted and not menu_open and not help_open and not out_open then
         blink_t = 0
         blink = not blink
         redraw_line = true
@@ -2574,10 +2797,4 @@ end
 if scripted and not quit_now then
     store_cur()
     save_session(false)
-end
-if exiting then
-    -- File -> Exit: a soft reset, back to the Next's menu
-    sprites_visible(false, false)
-    nextreg[0x6B] = 0
-    nextreg[0x02] = 1
 end

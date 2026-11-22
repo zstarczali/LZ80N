@@ -6023,25 +6023,27 @@ fn selfhost_ide_mouse() {
     // still there after the cursor blinked (its line is under the menu)
     frame(&mut cpu, 60);
     assert!(ide_row(&cpu, 1).contains("New"), "File menu after a blink: {}", ide_row(&cpu, 1));
-    assert!(ide_row(&cpu, 5).contains("Exit"), "File menu: {}", ide_row(&cpu, 5));
+    assert!(ide_row(&cpu, 4).contains("Save as"), "File menu: {}", ide_row(&cpu, 4));
     assert!(ide_row(&cpu, 0).contains("LZ80N IDE"));
 }
 
 /// The splash screen at the start (the logo, the version from
-/// version.txt), closed by a key; File -> Exit (EXT Q) asks again when the
-/// text is changed, then resets the Next (NextReg 2).
+/// version.txt), closed by a key.
 #[test]
-fn selfhost_ide_splash_exit() {
+fn selfhost_ide_splash() {
     let (mut cpu, end) = ide_cpu(&[("version.txt", b"9.8.7\n")]);
     let f = cpu.frame_count;
     while cpu.frame_count < f + 30 {
         cpu.tick().unwrap();
     }
     // the logo: block tiles in the stripe colours
-    let logo: Vec<u8> = (0..80).map(|c| cpu.mem[0x6000 + 5 * 160 + c * 2]).collect();
+    let logo: Vec<u8> = (0..80).map(|c| cpu.mem[0x6000 + 8 * 160 + c * 2]).collect();
     assert!(logo.iter().any(|&t| t >= 128 && t <= 130), "no logo");
-    assert_eq!(ide_attr(&cpu, 5, 25), 39);
-    assert!(ide_row(&cpu, 20).contains("version 9.8.7"), "{}", ide_row(&cpu, 20));
+    assert_eq!(ide_attr(&cpu, 8, 25), 39);
+    assert!(ide_row(&cpu, 20).contains("v9.8.7 - github"), "{}", ide_row(&cpu, 20));
+    // a box over the editor: the menu bar and the status line around it
+    assert!(ide_row(&cpu, 0).contains("LZ80N IDE"), "{}", ide_row(&cpu, 0));
+
     // a key: the editor
     cpu.keys[6] &= !(1 << 4);
     let f = cpu.frame_count;
@@ -6054,23 +6056,43 @@ fn selfhost_ide_splash_exit() {
     }
     assert!(ide_row(&cpu, 0).contains("LZ80N IDE"), "{}", ide_row(&cpu, 0));
     assert_eq!(ide_row(&cpu, 1), "   1", "the key closing the splash is not typed");
-
-    // EXT Q with a changed text: asked to repeat it, then the reset
-    let k = [b'x', 0x80 | b'q', 0x80 | b'q'];
-    let (mut cpu, end2) = ide_cpu(&[("ide.key", &k)]);
     let _ = end;
-    let mut n = 0u64;
-    while cpu.pc != end2 {
-        cpu.tick().unwrap();
-        n += 1;
-        assert!(n < 500_000_000, "the IDE did not end");
-    }
-    assert_eq!(cpu.nextreg[2], 1, "no reset");
-    let k = [b'x', 0x80 | b'q'];
-    let (mut cpu, end3) = ide_cpu(&[("ide.key", &k)]);
-    while cpu.pc != end3 {
+
+    // the menu (EDIT), down twice, up: only the highlight moves
+    let (mut cpu, end) = ide_cpu(&[("ide.key", &[7, 2, 2, 1])]);
+    while cpu.pc != end {
         cpu.tick().unwrap();
     }
-    assert_ne!(cpu.nextreg[2], 1, "reset without asking");
-    assert!(ide_row(&cpu, 31).contains("unsaved changes"), "{}", ide_row(&cpu, 31));
+    assert!(ide_row(&cpu, 2).contains("Open"), "{}", ide_row(&cpu, 2));
+    let hi: Vec<u8> = (1..6).map(|r| ide_attr(&cpu, r, 2)).collect();
+    assert_eq!(hi, [33, 29, 33, 33, 33], "item 2 highlighted");
+}
+
+/// Scrolling: the tilemap rows move and only the new rows are drawn; the
+/// screen must be the same as drawn from scratch.
+#[test]
+fn selfhost_ide_scroll() {
+    let text: String = (1..=200).map(|i| format!("word v{i} = {i} -- line {i}\n")).collect();
+    let mut keys = vec![2u8; 45];             // down: the text scrolls up
+    keys.extend([1u8; 20]);                   // up, 5 of them scroll
+    keys.extend([6u8, 6, 5]);                 // page down twice, page up
+    let (mut cpu, end) = ide_cpu(&[("p.lz80n", text.as_bytes()), ("ide.ses", b"p.lz80n\n0\n0\n0\n0\n"), ("ide.key", &keys)]);
+    let t0 = cpu.t_states;
+    while cpu.pc != end {
+        cpu.tick().unwrap();
+    }
+    eprintln!("{} keys: {:.2} s at 28 MHz", keys.len(), (cpu.t_states - t0) as f64 / 28e6);
+    // the cursor: 45 down, 20 up: 25; page down twice, up: 55 (line 56)
+    let status = ide_row(&cpu, 31);
+    assert!(status.contains("Ln    56"), "{status}");
+    let top = (1..=30).map(|r| ide_row(&cpu, r)).collect::<Vec<_>>();
+    let first: usize = top[0].split_whitespace().next().unwrap().parse().unwrap();
+    for (i, row) in top.iter().enumerate() {
+        let n = first + i;
+        assert_eq!(row, &format!("{n:>4} word v{n} = {n} -- line {n}"), "row {}", i + 1);
+    }
+    // the scroll bar's thumb: rows of the same colour, one block
+    let thumb: Vec<u8> = (1..=30).map(|r| ide_attr(&cpu, r, 79)).collect();
+    let blocks = thumb.windows(2).filter(|w| w[0] != w[1]).count();
+    assert!(blocks <= 2 && thumb.contains(&38), "{thumb:?}");
 }

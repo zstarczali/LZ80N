@@ -167,7 +167,7 @@ up to 32 KB.
   F G, the backquote on X). EXTEND (CAPS+SYMBOL) then S save, O open, N new,
   B compile, R compile and run, F find, G go to line, M mark (the cursor
   keys then select), A select all, C / X / V copy, cut, paste (the line
-  when nothing is selected), K delete a line, Q exit; cursor left / right / up /
+  when nothing is selected), K delete a line, L the build output; cursor left / right / up /
   down: start / end of the line, of the text. Keys repeat when held.
   Typing, DELETE or ENTER replaces the selection.
 * The Kempston mouse: a sprite pointer. A click moves the cursor, a drag
@@ -192,10 +192,14 @@ up to 32 KB.
 * The Next keyboard's extra keys (cursor keys, DELETE, EDIT, BREAK,
   EXTEND, ...) are read from NextRegs $B0 / $B1 too, for machines that do
   not put them into the key matrix.
-* A splash screen at the start (the logo, the version from `version.txt`,
-  which the export writes); Help -> About shows it again. File -> Exit
-  (EXT Q) asks again for unsaved changes, then resets the Next (back to
-  its menu).
+* A splash screen at the start: a box with the logo and the version
+  (`version.txt`, which the export writes); Help -> About shows it again.
+* Menus, the help and the build output are drawn over the text row by row
+  (each screen row written once), and the cursor does not blink under
+  them: no flicker. Moving in a menu only recolours two rows; opening and
+  closing one draws only the rows under it.
+* Scrolling a few lines moves the tilemap rows (LDIR / LDDR) and draws only
+  the new rows (about one frame per line; a whole screen about two).
 * `ide.key`: when it exists its bytes are the keys (`$80` + a letter =
   EXTEND + that letter) and the IDE ends at its end; the tests drive the
   IDE this way.
@@ -239,7 +243,9 @@ up to 32 KB.
   `selfhost_ide_selection`: selections, copy, cut and paste from the keys;
   `selfhost_ide_mouse`: the emulated Kempston mouse: drag, the right
   button's menu, line numbers, the menu bar;
-  `selfhost_ide_splash_exit`: the splash screen, File -> Exit;
+  `selfhost_ide_splash`: the splash screen (a box over the editor), the
+  menu highlight; `selfhost_ide_scroll`: scrolling gives the same screen
+  as drawing it from scratch;
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
   self-hosted compiler compiles the lexer, the parser and the assembler; they
   give byte-identical results to their lz80nc-compiled versions;
