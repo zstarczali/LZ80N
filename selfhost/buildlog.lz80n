@@ -1,0 +1,110 @@
+-- selfhost/buildlog.lz80n - the build log of the compiler's stages
+--
+-- Every stage writes its messages to the screen and to build.log. A stage
+-- started by the one before shows the log so far first, so the screen reads
+-- like one command line session; the IDE shows the log after a compile.
+-- The lexer (the first stage) starts a new log.
+--
+-- A line is built in log_buf (log_s, log_n, log_c, log_time), then log_end
+-- writes it (no string temporaries: the code generator counts them).
+
+word log_t0 = 0
+byte log_buf[256]
+byte log_len = 0
+
+function log_c(byte c)
+    if log_len < 250 then
+        log_buf[log_len] = c
+        log_len += 1
+    end
+end
+
+function log_s(string s)
+    byte i = 0
+    while i < len(s) do
+        log_c(asc(s, i))
+        i += 1
+    end
+end
+
+function log_n(word v)
+    byte d[5]
+    byte n = 0
+    while v >= 10 do
+        d[n] = byte(v % 10)
+        n += 1
+        v = v / 10
+    end
+    log_c('0' + byte(v))
+    while n > 0 do
+        n -= 1
+        log_c('0' + d[n])
+    end
+end
+
+-- the time since log_start: " (1.2 s)"
+function log_time()
+    word t = frames() - log_t0
+    log_s(" (")
+    log_n(t / 50)
+    log_c('.')
+    log_n((t % 50) / 5)
+    log_s(" s)")
+end
+
+-- the line on the screen
+function log_show()
+    byte i = 0
+    while i < log_len do
+        write(chr(log_buf[i]))
+        i += 1
+    end
+    print("")
+    log_len = 0
+end
+
+-- the line on the screen and at the end of build.log
+function log_end()
+    byte h = file_open("build.log", FILE_APPEND)
+    if h ~= FILE_ERROR then
+        log_buf[log_len] = 10
+        file_write(h, addr(log_buf), log_len + 1)
+        file_close(h)
+    end
+    log_show()
+end
+
+function log_line(string s)
+    log_s(s)
+    log_end()
+end
+
+-- the start of a stage: the log so far on the screen (fresh: a new log)
+function log_start(bool fresh)
+    log_t0 = frames()
+    log_len = 0
+    if fresh then
+        if file_exists("build.log") then file_delete("build.log") end
+        return
+    end
+    byte h = file_open("build.log", FILE_READ)
+    if h == FILE_ERROR then return end
+    word c = file_getc(h)
+    while c ~= FILE_EOF do
+        if c == 10 then log_show() else log_c(byte(c)) end
+        c = file_getc(h)
+    end
+    file_close(h)
+    log_len = 0
+end
+
+-- start the next program (nexload); a message when it cannot
+function log_exec(string nex)
+    if not file_exec("nexload " .. nex) then
+        log_s("cannot start ")
+        log_s(nex)
+        log_s(", error ")
+        log_n(file_status)
+        log_end()
+    end
+end

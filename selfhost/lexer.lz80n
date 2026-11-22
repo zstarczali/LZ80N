@@ -15,6 +15,8 @@
 -- the standard modules (lib_*.lz80n) the main file mentions are lexed
 -- first, as compiler/src/main.rs does.
 
+include "buildlog.lz80n"
+
 const T_IDENT = 0
 const T_INT = 1
 const T_DOTDOT = 2
@@ -767,6 +769,21 @@ end
 
 -- ---------------------------------------------------------------- main
 
+-- a new build log: the program's name (the IDE writes it into ide.on)
+log_start(true)
+string prog_name = "in.lz80n"
+byte ih = file_open("ide.on", FILE_READ)
+if ih ~= FILE_ERROR then
+    string nm = ""
+    word ch = file_getc(ih)
+    while ch ~= FILE_EOF and ch ~= 10 and len(nm) < 64 do
+        nm = nm .. chr(byte(ch))
+        ch = file_getc(ih)
+    end
+    file_close(ih)
+    if nm ~= "" then prog_name = nm end
+end
+log_line("LZ80N: compiling " .. prog_name)
 byte probe = file_open("expand.on", FILE_READ)
 if probe ~= FILE_ERROR then
     expand = true
@@ -788,13 +805,17 @@ included[0] = "in.lz80n"
 nincluded = 1
 if not failed then
     if not lex_file("in.lz80n") then
-        print("cannot open in.lz80n, error", file_status)
+        log_line("cannot open in.lz80n, error " .. str(file_status))
     end
 end
 if not failed then out_head(T_EOF, lno, cno) end
 flush()
 file_close(outh)
-print("lexer:", ntokens, "tokens")
+log_s("lexer: ")
+log_n(ntokens)
+log_s(" tokens")
+log_time()
+log_end()
 -- the names of the source files (for the positions of errors)
 byte sfh = file_open("srcfiles.txt", FILE_WRITE)
 if sfh ~= FILE_ERROR then
@@ -816,8 +837,8 @@ end
 -- the next stage (lexer -> [assets ->] codegen -> asm)
 if expand and file_exists("chain.on") then
     if has_assets and not failed then
-        if not file_exec("nexload assets.nex") then print("cannot start assets.nex, error", file_status) end
-    elseif not file_exec("nexload codegen.nex") then
-        print("cannot start codegen.nex, error", file_status)
+        log_exec("assets.nex")
+    else
+        log_exec("codegen.nex")
     end
 end

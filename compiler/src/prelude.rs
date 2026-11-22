@@ -1583,7 +1583,7 @@ function file_sys()
     asm
         push ix
         ld a,(g_file_fn)
-        ld (.fn),a              ; the function byte after RST $08
+        ld (rt_esx_fn),a        ; the function byte after RST $08
         ld a,i                  ; P/V = IFF2: were interrupts enabled?
         push af
         di
@@ -1606,8 +1606,7 @@ function file_sys()
         ld de,(g_file_de)
         ld hl,(g_file_hl)
         ld ix,(g_file_ix)
-        rst $08
-.fn:    db 0
+        call rt_esx             ; (resident: bank 5 at $4000 meanwhile)
         ld (g_file_a),a
         ld (g_file_bc),bc
         ld (g_file_de),de
@@ -1756,7 +1755,22 @@ end
 function file_exec(string cmd) -> bool
     file_cname(cmd)
     file_fn = 0x8F
+    -- the dot command runs as from BASIC: IM 1 and the ROM's interrupt
+    -- routine (a NEX it loads overwrites the IM 2 table)
+    asm
+        di
+        im 1
+        ld a,$3F
+        ld i,a
+    end
     file_sys()
+    asm
+        di
+        ld a,$FE
+        ld i,a
+        im 2
+        ei
+    end
     return not file_failed()
 end
 
