@@ -6270,8 +6270,6 @@ fn selfhost_ide_manual() {
     let cur = (1..31).find(|&r| ide_attr(&cpu, r, 0) == 36).expect("no cursor line");
     assert!(rows[cur - 1].contains("upper("), "{}", rows[cur - 1]);
     assert!(ide_row(&cpu, 31).contains("Manual"), "{}", ide_row(&cpu, 31));
-    std::fs::write("/tmp/scr.bin", &cpu.mem[0x6000..0x7C00]).unwrap();
-    std::fs::write("/tmp/pal.bin", cpu.palettes[3]).unwrap();
     // Help -> Language manual, find the contents line "9. Strings", ENTER
     let mut k = vec![7u8, 4, 4, 4, 2, 13, b'f'];
     k.extend(b"9. Strings\r");
@@ -6392,5 +6390,5 @@ fn dump_selfhost_asm() {
     let prog = std::fs::read_to_string(root.join(std::env::var("PROG").unwrap_or("examples/hello.lz80n".into()))).unwrap();
     let sh = SelfHost::new();
     let (asm, _) = sh.compile_sd(&[("in.lz80n", prog.as_bytes())]).unwrap();
-    std::fs::write("/tmp/sh_out.asm", asm).unwrap();
+    std::fs::write(std::env::temp_dir().join("sh_out.asm"), asm).unwrap();
 }
