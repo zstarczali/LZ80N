@@ -5702,8 +5702,11 @@ fn selfhost_ide() {
     let (left, up) = (3u8, 1u8);
     // the editor types, saves (Save as prompt), compiles, then the chain
     // comes back to it
-    let edit_and_compile = |script: Vec<u8>| {
+    let edit_and_compile = |script: Vec<u8>, extra: &[(&str, &str)]| {
         let mut fs = base.clone();
+        for (n, d) in extra {
+            fs.files.insert(n.to_string(), d.as_bytes().to_vec());
+        }
         fs.files.insert("ide.key".into(), script);
         let (mut fs, cpu, next) = run("ide.nex", fs);
         assert_eq!(next.as_deref(), Some("lexer.nex"), "status: {}", row(&cpu, 31));
@@ -5736,7 +5739,7 @@ fn selfhost_ide() {
     script.extend([ext(b's')]);
     script.extend(b"prog.lz80n\r");
     script.push(ext(b'b'));
-    let (stages, fs, cpu) = edit_and_compile(script);
+    let (stages, fs, cpu) = edit_and_compile(script, &[]);
     assert_eq!(stages, ["lexer.nex", "codegen.nex", "asm.nex"]);
     let prog = "function sq(word x) -> word\nreturn x * x\nend\nprint(\"sq\", sq(12))\n";
     assert_eq!(String::from_utf8_lossy(&fs.files["prog.lz80n"]), prog);
@@ -5756,7 +5759,7 @@ fn selfhost_ide() {
     script.extend([ext(up), ext(b's')]);
     script.extend(b"bad.lz80n\r");
     script.push(ext(b'b'));
-    let (stages, fs, cpu) = edit_and_compile(script);
+    let (stages, fs, cpu) = edit_and_compile(script, &[]);
     assert_eq!(stages, ["lexer.nex", "codegen.nex"]);
     assert!(fs.files.contains_key("codegen.err"));
     let status = row(&cpu, 31);
@@ -5764,6 +5767,20 @@ fn selfhost_ide() {
     assert!(status.contains("Ln     2"), "status: {status}");
     let ses = String::from_utf8_lossy(&fs.files["ide.ses"]).to_string();
     assert!(ses.starts_with("bad.lz80n\n1\n6\n"), "ide.ses: {ses:?}");
+
+    // an error in an included file: the IDE opens it (the main file stays)
+    let mut script = b"include \"inc.lz80n\"\rprint(1)".to_vec();
+    script.extend([ext(b's')]);
+    script.extend(b"main.lz80n\r");
+    script.push(ext(b'b'));
+    let (_, fs, cpu) = edit_and_compile(script, &[("inc.lz80n", "print(2)\nprint(nope)\n")]);
+    let status = row(&cpu, 31);
+    assert!(status.contains("error inc.lz80n:2:7"), "status: {status}");
+    assert!(status.contains("Ln     2"), "status: {status}");
+    assert!(row(&cpu, 0).contains("inc.lz80n  (main: main.lz80n)"), "menu bar: {}", row(&cpu, 0));
+    assert_eq!(row(&cpu, 2), "   2 print(nope)");
+    let ses = String::from_utf8_lossy(&fs.files["ide.ses"]).to_string();
+    assert!(ses.starts_with("inc.lz80n\n") && ses.ends_with("main.lz80n\n"), "ide.ses: {ses:?}");
 }
 
 /// The editor reads the keyboard matrix: letters, SYMBOL SHIFT symbols,

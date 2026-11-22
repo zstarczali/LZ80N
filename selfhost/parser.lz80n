@@ -56,7 +56,7 @@ function open(string kind, word n)
     out_byte('(')
     out_s(kind)
     out_byte(' ')
-    out_dec(0, nl[n])
+    out_dec(0, nl[n] & 0x1FFF)
     out_byte(':')
     out_dec(0, nc[n])
 end

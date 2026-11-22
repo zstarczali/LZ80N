@@ -234,6 +234,28 @@ end
 
 -- ---------------------------------------------------------------- errors
 
+-- line f of srcfiles.txt (written by the lexer): the name of source file f
+function src_file(byte f) -> string
+    byte h = file_open("srcfiles.txt", FILE_READ)
+    if h == FILE_ERROR then return "" end
+    string nm = ""
+    byte k = 0
+    word c = file_getc(h)
+    while c ~= FILE_EOF and k <= f do
+        if c == 10 then
+            k += 1
+            if k > f then break end
+            nm = ""
+        elseif len(nm) < 64 then
+            nm = nm .. chr(byte(c))
+        end
+        c = file_getc(h)
+    end
+    file_close(h)
+    if k < f then return "" end
+    return nm
+end
+
 function fail_node(word n) -> bool
     return fail_at(nl[n], nc[n])
 end
@@ -5661,7 +5683,16 @@ if load_tokens() then
         file_delete("out.asm")
         outh = file_open("codegen.err", FILE_WRITE)
         cur_h = outh
+        -- (an included file: its name; tokens carry line + file * 8192)
+        byte ef = byte(err_l >> 13)
+        err_l = err_l & 0x1FFF
+        string efile = ""
+        if ef ~= 0 then efile = src_file(ef) end
         os("error ")
+        if efile ~= "" then
+            os(efile)
+            ob(':')
+        end
         odec(err_l)
         ob(':')
         odec(err_c)
@@ -5674,7 +5705,8 @@ if load_tokens() then
         onl()
         flush()
         file_close(outh)
-        write("error ", err_l, ":", err_c, " ")
+        if efile ~= "" then write("error ", efile, ":") else write("error ") end
+        write(err_l, ":", err_c, " ")
         word k = 0
         while k < elen do
             write(chr(emsg[k]))

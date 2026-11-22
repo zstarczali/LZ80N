@@ -175,10 +175,18 @@ end
 const T_ASSET = 27
 bool has_assets = false     -- an `asset` declaration: assets.nex runs next
 
+-- the source files: in.lz80n is 0, the others (includes, modules) 1..7 in
+-- the order they are read (7: the 7th and later ones); a token's line is
+-- line + file * 8192, and srcfiles.txt lists the names
+byte fidx = 0
+byte nfiles = 1
+string src_names[8]
+
 function out_head(byte kind, word l, word c)
     if kind == T_ASSET then has_assets = true end
     out_byte(kind)
-    out_word(l)
+    if l > 8191 then l = 8191 end
+    out_word(l + word(fidx) * 8192)
     out_word(c)
 end
 
@@ -586,6 +594,16 @@ byte nincluded = 0
 function lex_file(string name) -> bool
     inh = file_open(name, FILE_READ)
     if inh == FILE_ERROR then return false end
+    byte outer = fidx
+    if name == "in.lz80n" then
+        fidx = 0
+    elseif nfiles < 8 then
+        fidx = nfiles
+        src_names[nfiles] = name
+        nfiles += 1
+    else
+        fidx = 7
+    end
     size = file_size(inh)
     pos = 0
     c0 = 0
@@ -601,6 +619,7 @@ function lex_file(string name) -> bool
         ntokens += 1
     end
     file_close(inh)
+    fidx = outer
     return true
 end
 
@@ -776,6 +795,16 @@ if not failed then out_head(T_EOF, lno, cno) end
 flush()
 file_close(outh)
 print("lexer:", ntokens, "tokens")
+-- the names of the source files (for the positions of errors)
+byte sfh = file_open("srcfiles.txt", FILE_WRITE)
+if sfh ~= FILE_ERROR then
+    src_names[0] = "in.lz80n"
+    for k = 0, nfiles - 1 do
+        string nm = src_names[k] .. chr(10)
+        file_write(sfh, addr(nm) + 1, len(nm))
+    end
+    file_close(sfh)
+end
 -- assets.on: the program declares assets (assets.nex converts them before
 -- the code generator reads them)
 if has_assets and not failed then

@@ -304,6 +304,7 @@ end
 -- ---------------------------------------------------------------- editor state
 
 string fname = ""
+string main_name = ""       -- the program compiled (fname may be an include)
 bool modified = false
 word cy = 0                 -- cursor line
 byte cx = 0                 -- cursor column
@@ -604,6 +605,7 @@ function draw_menu_bar()
     string t = fname
     if t == "" then t = "(new)" end
     if modified then t = t .. " *" end
+    if main_name ~= "" and main_name ~= fname then t = t .. "  (main: " .. main_name .. ")" end
     byte c = 80 - len(t) - 1
     row_text(c, t, C_MENU)
     row_text(30, "LZ80N IDE", C_MENUKEY)
@@ -1763,6 +1765,7 @@ function new_text()
     load_cur(0)
     modified = false
     fname = ""
+    main_name = ""
     redraw_all = true
 end
 
@@ -1810,11 +1813,13 @@ function prompt_done(byte kind, string t)
         if t == "" then return end
         if load_file(t) then
             fname = t
+            main_name = ""
             set_msg("loaded " .. t, C_STATUS)
         end
     elseif kind == 2 then
         if t == "" then return end
         if save_file(t) then
+            if main_name == fname then main_name = t end
             fname = t
             modified = false
             set_msg("saved " .. t, C_STATUS)
@@ -1901,8 +1906,15 @@ function cmd_compile(bool run)
     end
     if not save_file(fname) then return end
     modified = false
-    if fname ~= "in.lz80n" then
-        if not save_file("in.lz80n") then return end
+    -- the program: the main file (an included file being edited is saved,
+    -- the main file is compiled)
+    if main_name == "" or not file_exists(main_name) then main_name = fname end
+    if main_name == fname then
+        if fname ~= "in.lz80n" then
+            if not save_file("in.lz80n") then return end
+        end
+    elseif not copy_file(main_name, "in.lz80n") then
+        return
     end
     for k = 0, 3 do
         string e = "codegen.err"
@@ -1924,6 +1936,30 @@ function cmd_compile(bool run)
         redraw_all = true
     end
     quit_now = true
+end
+
+function copy_file(string from, string to) -> bool
+    byte h = file_open(from, FILE_READ)
+    if h == FILE_ERROR then
+        set_msg("cannot read " .. from, C_ERR)
+        return false
+    end
+    fh = file_open(to, FILE_WRITE)
+    if fh == FILE_ERROR then
+        file_close(h)
+        set_msg("cannot write " .. to, C_ERR)
+        return false
+    end
+    fpos = 0
+    word c = file_getc(h)
+    while c ~= FILE_EOF do
+        fput(byte(c))
+        c = file_getc(h)
+    end
+    if fpos > 0 then file_write(fh, addr(fbuf), fpos) end
+    file_close(fh)
+    file_close(h)
+    return true
 end
 
 function touch(string name)
@@ -2136,6 +2172,7 @@ function save_session(bool compiling)
     for_text(str(cx))
     for_text(str(top))
     if compiling then for_text("1") else for_text("0") end
+    for_text(main_name)
     if fpos > 0 then file_write(fh, addr(fbuf), fpos) end
     file_close(fh)
 end
@@ -2185,8 +2222,21 @@ function check_result()
     read_ln()
     file_close(sh)
     if e == "codegen.err" then
-        -- `error LINE:COL message`
-        word l = num_at(sline, 0)
+        -- `error LINE:COL message`, or `error FILE:LINE:COL message` in an
+        -- included file: that file is opened (the main file stays)
+        string ef = ""
+        byte p = 6
+        if len(sline) > 6 and (asc(sline, 6) < '0' or asc(sline, 6) > '9') then
+            while p < len(sline) and asc(sline, p) ~= ':' do
+                ef = ef .. chr(asc(sline, p))
+                p += 1
+            end
+        end
+        if ef == "" or ef == "in.lz80n" then ef = main_name end
+        if ef ~= "" and ef ~= fname and file_exists(ef) then
+            if load_file(ef) then fname = ef end
+        end
+        word l = num_at(sline, p)
         word c = num_at(sline, byte(num_end))
         if l >= 1 and l <= nlines then
             move_to(l - 1, 0)
@@ -2214,6 +2264,7 @@ function load_session()
     if read_ln() then c = num_at(sline, 0) end
     if read_ln() then t = num_at(sline, 0) end
     if read_ln() then compiled = sline == "1" end
+    if read_ln() then main_name = sline end
     file_close(sh)
     if name == "" or not file_exists(name) then return end
     if not load_file(name) then return end
