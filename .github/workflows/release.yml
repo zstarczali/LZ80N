@@ -2,7 +2,9 @@ name: release
 
 # Builds LZ80N for Windows, macOS and Linux (x64 and ARM64), makes the PDF
 # manuals and packs everything (compiler, SjASMPlus, manuals, examples,
-# README.txt) into one archive per platform.
+# README.txt) into one archive per platform. The compiler that runs on the
+# Next itself (lz80nc --export-selfhost: lexer.nex ... asm.nex, editor.nex)
+# goes into every archive (next/) and into lz80n-<version>-zxnext-sdcard.zip.
 #
 # * push a tag `v1.2.3` (it must match compiler/Cargo.toml) -> GitHub release
 # * run it by hand (Actions -> release -> Run workflow) -> the archives are
@@ -62,9 +64,32 @@ jobs:
           name: manuals
           path: pdf/*.pdf
 
+  next:
+    name: ZX Spectrum Next compiler (.nex)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build lz80nc and export the self-hosted compiler
+        run: |
+          v=$(grep -m1 '^version' compiler/Cargo.toml | cut -d'"' -f2)
+          (cd compiler && cargo build --release --locked)
+          ./compiler/target/release/lz80nc --export-selfhost next/lz80n
+          for f in lexer codegen assets asm editor; do test -s "next/lz80n/$f.nex"; done
+          (cd next && zip -qr "../lz80n-$v-zxnext-sdcard.zip" lz80n)
+          ls -l next/lz80n "lz80n-$v-zxnext-sdcard.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zxnext
+          path: lz80n-*-zxnext-sdcard.zip
+
   build:
     name: ${{ matrix.name }}
-    needs: docs
+    needs: [docs, next]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -128,6 +153,11 @@ jobs:
           name: manuals
           path: pdf
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: zxnext
+          path: zxnext
+
       - name: Package
         id: pkg
         run: |
@@ -146,6 +176,9 @@ jobs:
           mkdir -p "$pkg/examples"
           cp examples/*.lz80n "$pkg/examples/"
           cp -r examples/assets examples/lib "$pkg/examples/"
+          # the compiler for the Next itself (copy next/lz80n to the SD card)
+          mkdir -p "$pkg/next"
+          unzip -q zxnext/lz80n-*-zxnext-sdcard.zip -d "$pkg/next"
           if [[ "${{ matrix.native }}" == true ]]; then
             # smoke test: the packaged compiler builds an example with the packaged assembler
             (cd "$pkg" && ./lz80nc$exe examples/hello.lz80n && test -f examples/hello.nex && rm examples/hello.asm examples/hello.nex)
