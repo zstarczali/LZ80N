@@ -156,6 +156,7 @@ pub const SELFHOST_SOURCES: &[(&str, &str)] = &[
     ("codegen.lz80n", include_str!("../../selfhost/codegen.lz80n")),
     ("asm.lz80n", include_str!("../../selfhost/asm.lz80n")),
     ("asset_info.lz80n", include_str!("../../selfhost/asset_info.lz80n")),
+    ("buildlog.lz80n", include_str!("../../selfhost/buildlog.lz80n")),
     ("assets.lz80n", include_str!("../../selfhost/assets.lz80n")),
     ("ide.lz80n", include_str!("../../selfhost/ide.lz80n")),
 ];

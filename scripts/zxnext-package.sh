@@ -12,7 +12,7 @@ rm -rf "$out"
 "$lz80nc" --export-selfhost "$out"
 for f in lexer codegen assets asm ide; do test -s "$out/$f.nex"; done
 # the compiler's own sources are not needed to run it
-rm -f "$out"/{lexer,parser,parser_core,codegen,asm,asset_info,assets,ide}.lz80n
+rm -f "$out"/{lexer,parser,parser_core,codegen,asm,asset_info,assets,buildlog,ide}.lz80n
 # the examples (in the folder itself: their include and asset paths are
 # relative to it)
 cp examples/*.lz80n "$out/"

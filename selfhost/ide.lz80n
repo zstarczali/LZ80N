@@ -663,11 +663,11 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "Exit          EXT Q"
+    "Keys", "About", "Exit          EXT Q", "Build output  EXT L"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
-byte menu_order[18] = {0, 1, 2, 3, 17, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-byte menu_first[5] = {0, 5, 14, 16, 18}
+byte menu_order[19] = {0, 1, 2, 3, 17, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 16}
+byte menu_first[5] = {0, 5, 14, 17, 19}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -746,7 +746,7 @@ string help_text[] = {
     "",
     "EXTEND (CAPS+SYM), then:",
     "  S save  O open  N new  B compile  R compile & run",
-    "  F find  G go to line  K delete line  Q exit",
+    "  F find  G go to line  K delete line  L build output  Q exit",
     "  M mark (then the cursor keys select)  A select all",
     "  C copy  X cut  V paste (a line without a selection)",
     "  left / right: start / end of the line",
@@ -759,6 +759,70 @@ string help_text[] = {
     "Any key closes this."
 }
 const NHELP = 23
+
+-- the build output: the last lines of build.log in a box at the bottom
+const OUT_MAX = 16
+string out_lines[16]
+byte nout = 0
+bool out_open = false
+
+function show_output()
+    nout = 0
+    byte h = file_open("build.log", FILE_READ)
+    if h ~= FILE_ERROR then
+        string ln = ""
+        word c = file_getc(h)
+        while c ~= FILE_EOF do
+            if c == 10 then
+                if nout == OUT_MAX then
+                    -- keep the last ones
+                    byte i = 1
+                    while i < OUT_MAX do
+                        out_lines[i - 1] = out_lines[i]
+                        i += 1
+                    end
+                    nout -= 1
+                end
+                out_lines[nout] = ln
+                nout += 1
+                ln = ""
+            elseif len(ln) < 74 then
+                ln = ln .. chr(byte(c))
+            end
+            c = file_getc(h)
+        end
+        file_close(h)
+    end
+    if nout == 0 then
+        out_lines[0] = "(no build yet)"
+        nout = 1
+    end
+    out_open = true
+    redraw_all = true
+end
+
+function draw_output()
+    byte r = TEXT_TOP + TEXT_ROWS - nout - 2
+    byte i = 0
+    while i < nout + 2 do
+        draw_text_row(r + i)
+        byte k = 1
+        while k < 79 do
+            rowc[k] = ' '
+            rowa[k] = C_BOX * 2
+            k += 1
+        end
+        if i == 0 then row_text(3, "Build output (any key closes it)", C_BOX) end
+        if i > 0 and i <= nout then
+            byte colour = C_BOX
+            string t = out_lines[i - 1]
+            if find(t, "error") ~= NOT_FOUND or find(t, "cannot") ~= NOT_FOUND then colour = C_ERR end
+            row_text(3, t, colour)
+        end
+        put_row(r + i)
+        i += 1
+    end
+end
 
 function draw_help()
     byte n = NHELP
@@ -790,6 +854,7 @@ function redraw()
         end
         if menu_open then draw_menu_box() end
         if help_open then draw_help() end
+        if out_open then draw_output() end
         draw_status()
         redraw_all = false
         redraw_line = false
@@ -800,6 +865,7 @@ function redraw()
         -- (that row may be under a menu or the help)
         if menu_open then draw_menu_box() end
         if help_open then draw_help() end
+        if out_open then draw_output() end
         draw_menu_bar()
         draw_status()
         redraw_line = false
@@ -922,6 +988,7 @@ function get_key() -> word
         kstate[r] = ~port[row_port[r]] & 31
         r += 1
     end
+    ext_keys()
     bool caps = kstate[0] & 1 ~= 0
     bool sym = kstate[7] & 2 ~= 0
     -- EXTEND: CAPS and SYMBOL together
@@ -953,6 +1020,35 @@ function get_key() -> word
         if held_t > 20 and held_t % 3 == 0 then return finish_key(key_code(held, caps, sym)) end
     end
     return 0
+end
+
+-- the Next keyboard's extra keys (NextRegs $B0 / $B1) as the Spectrum
+-- keys they stand for: when the machine does not put them into the key
+-- matrix itself (it may, then this changes nothing)
+-- $B0 bits 0-7: right, left, down, up (CAPS+8 5 6 7), `.` `,` `"` `;`
+-- (SYMBOL+M N P O); $B1 bits 0-7: EXTEND, CAPS LOCK (CAPS+2), GRAPH (9),
+-- TRUE VIDEO (3), INV VIDEO (4), BREAK (SPACE), EDIT (1), DELETE (0)
+byte ext_row[16] = {4, 3, 4, 4, 7, 7, 5, 5, 255, 3, 4, 3, 3, 7, 3, 4}
+byte ext_bit[16] = {2, 4, 4, 3, 2, 3, 0, 1, 255, 1, 1, 2, 3, 0, 0, 0}
+byte ext_sh[16] = {1, 1, 1, 1, 2, 2, 2, 2, 3, 1, 1, 1, 1, 1, 1, 1}
+function ext_keys()
+    word b = word(nextreg[0xB0]) | word(nextreg[0xB1]) << 8
+    if b == 0 then return end
+    byte i = 0
+    while i < 16 do
+        if b & (1 << i) ~= 0 then
+            byte sh = ext_sh[i]
+            if sh == 3 then
+                -- EXTEND: CAPS and SYMBOL
+                kstate[0] |= 1
+                kstate[7] |= 2
+            else
+                if sh == 1 then kstate[0] |= 1 else kstate[7] |= 2 end
+                kstate[ext_row[i]] |= 1 << ext_bit[i]
+            end
+        end
+        i += 1
+    end
 end
 
 -- after EXTEND the next key is a command
@@ -1201,6 +1297,11 @@ end
 function click()
     word r = py / 8
     word c = px / 4
+    if out_open then
+        out_open = false
+        redraw_all = true
+        return
+    end
     if help_open then
         help_open = false
         redraw_all = true
@@ -1936,7 +2037,13 @@ function cmd_compile(bool run)
         if file_exists(e) then file_delete(e) end
     end
     touch("chain.on")
-    touch("ide.on")
+    -- ide.on: the program's name (the lexer starts the build log with it)
+    byte ih = file_open("ide.on", FILE_WRITE)
+    if ih ~= FILE_ERROR then
+        string nm = main_name .. chr(10)
+        file_write(ih, addr(nm) + 1, len(nm))
+        file_close(ih)
+    end
     if run then touch("run.on") elseif file_exists("run.on") then file_delete("run.on") end
     save_session(true)
     set_msg("compiling...", C_STATUS)
@@ -2018,6 +2125,8 @@ function run_item(byte it)
         splash(false)
     elseif it == 17 then
         if may_drop(K_EXT + 'q') then exit_ide() end
+    elseif it == 18 then
+        show_output()
     end
 end
 
@@ -2071,6 +2180,8 @@ function ext_command(word c)
         delete_this_line()
     elseif c == 'q' then
         run_item(17)
+    elseif c == 'l' then
+        show_output()
     elseif c == K_LEFT then
         move_to(cy, 0)
     elseif c == K_RIGHT then
@@ -2084,6 +2195,11 @@ function ext_command(word c)
 end
 
 function handle_key(word k)
+    if out_open then
+        out_open = false
+        redraw_all = true
+        return
+    end
     if help_open then
         help_open = false
         redraw_all = true
@@ -2293,6 +2409,7 @@ function load_session()
     if compiled then
         check_result()
         save_session(false)
+        show_output()
     end
     redraw_all = true
 end

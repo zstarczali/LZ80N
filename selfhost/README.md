@@ -184,6 +184,14 @@ up to 32 KB.
   `run.on` does not exist. The IDE reloads the file, shows the result
   in the status line, and puts the cursor on the line and column of a
   code generator error.
+* The build log: every stage writes its lines (with the time it took) to
+  the screen and to `build.log`, and shows the lines of the stages before
+  it first, so the screen reads like one command line session. After a
+  compile the IDE shows the log in a box (Build -> Build output, EXT L,
+  shows it again).
+* The Next keyboard's extra keys (cursor keys, DELETE, EDIT, BREAK,
+  EXTEND, ...) are read from NextRegs $B0 / $B1 too, for machines that do
+  not put them into the key matrix.
 * A splash screen at the start (the logo, the version from `version.txt`,
   which the export writes); Help -> About shows it again. File -> Exit
   (EXT Q) asks again for unsaved changes, then resets the Next (back to

@@ -13,6 +13,8 @@
 
 -- ---------------------------------------------------------------- line
 
+include "buildlog.lz80n"
+
 byte lbuf[514]
 word llen
 word lno = 0                -- line number
@@ -2339,6 +2341,8 @@ end
 -- ---------------------------------------------------------------- main
 
 -- in.asm, or out.asm (written by codegen.nex)
+log_start(false)
+print("asm: assembling...")
 string in_name = "in.asm"
 if not file_exists(in_name) then in_name = "out.asm" end
 mn_init()
@@ -2362,16 +2366,18 @@ if failed then
     out_byte(10)
     flush()
     file_close(outh)
-    write("asm: error in line ", err_line, ": ")
+    log_s("asm: error in line ")
+    log_n(err_line)
+    log_s(": ")
     word k = 0
     while k < elen do
-        write(chr(emsg[k]))
+        log_c(emsg[k])
         k += 1
     end
-    print("")
+    log_end()
     -- back to the IDE when it started the compiler
     if file_exists("ide.on") then
-        if not file_exec("nexload ide.nex") then print("cannot start ide.nex, error", file_status) end
+        log_exec("ide.nex")
     end
 else
     string name = ""
@@ -2380,12 +2386,19 @@ else
         name = name .. chr(nex_name[i])
         i += 1
     end
-    print("asm:", pass, "passes,", nsym, "symbols, wrote", name)
+    log_s("asm: ")
+    log_n(pass)
+    log_s(" passes, ")
+    log_n(nsym)
+    log_s(" symbols, wrote ")
+    log_s(name)
+    log_time()
+    log_end()
     -- run the result when run.on exists
     if nex_nlen > 0 and file_exists("run.on") then
         if file_exists("ide.on") then file_delete("ide.on") end
-        if not file_exec("nexload " .. name) then print("cannot start", name, "error", file_status) end
+        log_exec(name)
     elseif file_exists("ide.on") then
-        if not file_exec("nexload ide.nex") then print("cannot start ide.nex, error", file_status) end
+        log_exec("ide.nex")
     end
 end

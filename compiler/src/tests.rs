@@ -37,6 +37,11 @@ fn build(name: &str, src: &str) -> Option<(Vec<u8>, HashMap<String, u16>)> {
     build_opts(name, src, false)
 }
 
+/// A self-hosted stage (its `include`s are in selfhost/).
+fn build_sh(src: &str) -> (Vec<u8>, HashMap<String, u16>) {
+    build_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../selfhost"), src)
+}
+
 /// Compile + assemble a program whose `include`s are relative to `dir`.
 fn build_in(dir: &std::path::Path, src: &str) -> (Vec<u8>, HashMap<String, u16>) {
     let asm = match crate::compile_opts(src, "t.nex", true, dir, false) {
@@ -3627,7 +3632,7 @@ fn selfhost_lex(nex: &[u8], syms: &HashMap<String, u16>, src: &str) -> Vec<u8> {
 fn selfhost_lexer_matches_rust() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
-    let (nex, syms) = build("selfhost_lexer", &lexer_src).unwrap();
+    let (nex, syms) = build_sh(&lexer_src);
     let mut inputs: Vec<(String, String)> = vec![];
     for entry in std::fs::read_dir(root.join("examples")).unwrap() {
         let p = entry.unwrap().path();
@@ -4004,7 +4009,7 @@ fn selfhost_parser_matches_rust() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
     let parser_src = std::fs::read_to_string(root.join("selfhost/parser.lz80n")).unwrap();
-    let (lex_nex, lex_syms) = build("selfhost_lexer2", &lexer_src).unwrap();
+    let (lex_nex, lex_syms) = build_sh(&lexer_src);
     let (par_nex, par_syms) = build_in(&root.join("selfhost"), &parser_src);
     let mut inputs: Vec<(String, String)> = vec![];
     for entry in std::fs::read_dir(root.join("examples")).unwrap() {
@@ -4119,7 +4124,7 @@ fn selfhost_assemble(nex: &[u8], syms: &HashMap<String, u16>, asm: &str) -> (Res
 fn selfhost_asm_check(names: &[&str]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let asm_src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
-    let (nex, syms) = build("selfhost_asm", &asm_src).unwrap();
+    let (nex, syms) = build_sh(&asm_src);
     let dir = root.join("examples");
     for name in names {
         let path = dir.join(format!("{name}.lz80n"));
@@ -4221,7 +4226,7 @@ fn selfhost_asm_all_instruction_forms() {
     );
     let want = crate::asm::assemble(&body, &root).unwrap_or_else(|e| panic!("rust: {}\n{body}", e[0])).nex.unwrap().1;
     let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
-    let (nex, syms) = build("selfhost_asm_forms", &src).unwrap();
+    let (nex, syms) = build_sh(&src);
     let got = selfhost_assemble(&nex, &syms, &body).0.unwrap_or_else(|e| panic!("self-hosted: {e}"));
     assert_eq!(got.len(), want.len());
     if let Some(i) = (0..want.len()).find(|&i| got[i] != want[i]) {
@@ -4233,7 +4238,7 @@ fn selfhost_asm_all_instruction_forms() {
 fn selfhost_asm_errors() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
-    let (nex, syms) = build("selfhost_asm_err", &src).unwrap();
+    let (nex, syms) = build_sh(&src);
     for (asm, want) in [
         ("    ORG $8000\n    ld a,nosuch\n", "2: undefined symbol `nosuch`"),
         ("    ORG $8000\n    jr far\n    ds 200\nfar: nop\n", "2: jr/djnz target out of range"),
@@ -4268,7 +4273,7 @@ impl SelfHost {
         let cg_src = std::fs::read_to_string(root.join("selfhost/codegen.lz80n")).unwrap();
         let as_src = std::fs::read_to_string(root.join("selfhost/assets.lz80n")).unwrap();
         SelfHost {
-            lex: build("sh_lex", &lexer_src).unwrap(),
+            lex: build_sh(&lexer_src),
             cg: build_in(&root.join("selfhost"), &cg_src),
             assets: build_in(&root.join("selfhost"), &as_src),
         }
@@ -4301,7 +4306,9 @@ impl SelfHost {
 
     /// The assembly the self-hosted compiler makes for `src`, or its error.
     fn compile(&self, src: &str) -> Result<String, String> {
-        self.compile_files(&[("in.lz80n", src.as_bytes())])
+        // (the stages include buildlog.lz80n)
+        let log = include_str!("../../selfhost/buildlog.lz80n");
+        self.compile_files(&[("in.lz80n", src.as_bytes()), ("buildlog.lz80n", log.as_bytes())])
     }
 
     /// Like compile, with more source files on the SD card (includes).
@@ -4683,7 +4690,7 @@ fn selfhost_bootstrap() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let rd = |p: &str| std::fs::read(root.join(p)).unwrap();
     let mut sh = SelfHost::new();
-    let sources: Vec<(&str, Vec<u8>)> = vec![("in.lz80n", rd("selfhost/codegen.lz80n")), ("parser_core.lz80n", rd("selfhost/parser_core.lz80n")), ("asset_info.lz80n", rd("selfhost/asset_info.lz80n"))];
+    let sources: Vec<(&str, Vec<u8>)> = vec![("in.lz80n", rd("selfhost/codegen.lz80n")), ("parser_core.lz80n", rd("selfhost/parser_core.lz80n")), ("asset_info.lz80n", rd("selfhost/asset_info.lz80n")), ("buildlog.lz80n", rd("selfhost/buildlog.lz80n"))];
     let as_refs = |v: &Vec<(&'static str, Vec<u8>)>| v.iter().map(|(n, d)| (*n, d.clone())).collect::<Vec<_>>();
     let srcs = as_refs(&sources);
     let refs: Vec<(&str, &[u8])> = srcs.iter().map(|(n, d)| (*n, d.as_slice())).collect();
@@ -5266,7 +5273,7 @@ fn selfhost_assets_match_rust() {
     }
     files.insert("in.lz80n".into(), prog.into_bytes());
     let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
-    let lex = build("sh_lex_assets", &lexer_src).unwrap();
+    let lex = build_sh(&lexer_src);
     let files = run_stage(&lex.0, &lex.1, files);
     assert!(files.contains_key("assets.on"), "the lexer should mark the assets");
     let out = run_stage(&stage.0, &stage.1, files);
@@ -5749,6 +5756,17 @@ fn selfhost_ide() {
     assert_eq!(String::from_utf8_lossy(&fs.files["prog.lz80n"]), prog);
     assert_eq!(fs.files["in.lz80n"], fs.files["prog.lz80n"]);
     assert!(row(&cpu, 31).contains("compiled: out.nex"), "status: {}", row(&cpu, 31));
+    // the build log of the stages, shown in a box at the bottom
+    let log = String::from_utf8_lossy(&fs.files["build.log"]).to_string();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines[0], "LZ80N: compiling prog.lz80n", "{log}");
+    for (i, stage) in ["lexer: ", "codegen: ", "asm: "].iter().enumerate() {
+        assert!(lines[i + 1].starts_with(stage) && lines[i + 1].ends_with(" s)"), "{log}");
+    }
+    let screen: Vec<String> = (0..32).map(|r| row(&cpu, r)).collect();
+    let top = screen.iter().position(|l| l.contains("Build output")).expect("no build output box");
+    assert!(screen[top + 1].contains("LZ80N: compiling prog.lz80n"), "{}", screen[top + 1]);
+    assert!(screen[top + 4].contains("asm: "), "{}", screen[top + 4]);
     assert!(row(&cpu, 0).contains("prog.lz80n"), "menu bar: {}", row(&cpu, 0));
     assert_eq!(row(&cpu, 1), "   1 function sq(word x) -> word");
     assert_eq!(row(&cpu, 4), "   4 print(\"sq\", sq(12))");
@@ -5768,6 +5786,8 @@ fn selfhost_ide() {
     assert!(fs.files.contains_key("codegen.err"));
     let status = row(&cpu, 31);
     assert!(status.contains("error 2:7"), "status: {status}");
+    let log = String::from_utf8_lossy(&fs.files["build.log"]).to_string();
+    assert!(log.lines().last().unwrap().starts_with("error 2:7 "), "{log}");
     assert!(status.contains("Ln     2"), "status: {status}");
     let ses = String::from_utf8_lossy(&fs.files["ide.ses"]).to_string();
     assert!(ses.starts_with("bad.lz80n\n1\n6\n"), "ide.ses: {ses:?}");
@@ -5808,6 +5828,21 @@ fn selfhost_ide_keyboard() {
         vec![(4, 1)],         // 9
         vec![caps, (4, 0)],   // DELETE
         vec![(1, 0)],         // a
+        vec![caps, (3, 4)],   // cursor left (CAPS+5)
+        vec![caps, (3, 4)],
+        vec![(1, 1)],         // s
+        vec![caps, (4, 0)],   // DELETE
+        vec![(6, 2)],         // k
+        vec![caps, (4, 2)],   // cursor right (CAPS+8)
+        vec![(6, 3)],         // j
+        vec![(6, 0)],         // ENTER
+        vec![(6, 1)],         // l
+        vec![caps, (4, 3)],   // cursor up (CAPS+7)
+        vec![(6, 3)],         // j
+        vec![caps, (4, 4)],   // cursor down (CAPS+6)
+        vec![(6, 2)],         // k
+        vec![(8, 1)],         // the Next's cursor left key (NextReg $B0 bit 1)
+        vec![(6, 3)],         // j
     ];
     let mut k = 0;
     let mut phase = 0u32;
@@ -5824,16 +5859,25 @@ fn selfhost_ide_keyboard() {
         phase += 1;
         // 3 frames down, 3 frames up
         cpu.keys = [0xFF; 8];
+        cpu.nextreg[0xB0] = 0;
         if phase % 6 < 3 {
             for &(r, b) in &keys[k] {
-                cpu.keys[r] &= !(1 << b);
+                if r == 8 {
+                    cpu.nextreg[0xB0] |= 1 << b;
+                } else {
+                    cpu.keys[r] &= !(1 << b);
+                }
             }
         } else if phase % 6 == 5 {
             k += 1;
         }
     }
     let row: String = (0..80).map(|c| cpu.mem[0x6000 + 160 + c * 2] as char).collect();
-    assert_eq!(row.trim_end(), "   1 hi=Ta");
+    // hi=Ta, left twice, s, DELETE (the s), k: hi=kTa; right, j: hi=kTja;
+    // ENTER (splits: a), l: la; up (column 1), j: hji=kTj; down, k: lak
+    assert_eq!(row.trim_end(), "   1 hji=kTj");
+    let row2: String = (0..80).map(|c| cpu.mem[0x6000 + 2 * 160 + c * 2] as char).collect();
+    assert_eq!(row2.trim_end(), "   2 lajk");
 }
 
 /// The IDE alone (ide.nex built by lz80nc), on a virtual SD card.
