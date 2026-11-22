@@ -170,7 +170,8 @@ up to 32 KB.
   F G, the backquote on X). EXTEND (CAPS+SYMBOL) then S save, O open, N new,
   B compile, R compile and run, F find, G go to line, M mark (the cursor
   keys then select), A select all, C / X / V copy, cut, paste (the line
-  when nothing is selected), K delete a line, L the build output; cursor left / right / up /
+  when nothing is selected), K delete a line, L the build output, H the manual at the word under
+  the cursor, I format the code (the blocks indented, 4 spaces a level); cursor left / right / up /
   down: start / end of the line, of the text. Keys repeat when held.
   Typing, DELETE or ENTER replaces the selection.
 * The Kempston mouse: a sprite pointer. A click moves the cursor, a drag

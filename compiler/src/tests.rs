@@ -6121,6 +6121,65 @@ fn selfhost_ide_splash() {
     assert_eq!(hi, [33, 29, 33, 33, 33], "item 2 highlighted");
 }
 
+/// Edit -> Format code (EXT I): the blocks indented, the line ends trimmed,
+/// `asm` lines left as they are.
+#[test]
+fn selfhost_ide_format() {
+    let text = [
+        "function f(word x) -> word   ",
+        "if x > 2 then",
+        "  return x -- a comment (with a bracket",
+        "      elseif x == 1 then",
+        "return 1",
+        "        else",
+        "while x < 9 do x += 1 end",
+        "end",
+        "   return 0",
+        " end",
+        "",
+        "byte t[3] = {",
+        "1, 2,",
+        "3 }",
+        "   asm",
+        "label:  ld a, 1",
+        "        ret ; end",
+        "      end",
+        "print(\"do (\", 'x')",
+    ]
+    .join("\n")
+        + "\n";
+    let want = [
+        "function f(word x) -> word",
+        "    if x > 2 then",
+        "        return x -- a comment (with a bracket",
+        "    elseif x == 1 then",
+        "        return 1",
+        "    else",
+        "        while x < 9 do x += 1 end",
+        "    end",
+        "    return 0",
+        "end",
+        "",
+        "byte t[3] = {",
+        "    1, 2,",
+        "    3 }",
+        "asm",
+        "label:  ld a, 1",
+        "        ret ; end",
+        "end",
+        "print(\"do (\", 'x')",
+    ]
+    .join("\n")
+        + "\n";
+    let keys = [0x80 | b'i', 0x80 | b's'];
+    let (mut cpu, end) = ide_cpu(&[("p.lz80n", text.as_bytes()), ("ide.ses", b"p.lz80n\n0\n0\n0\n0\n"), ("ide.key", &keys)]);
+    while cpu.pc != end {
+        cpu.tick().unwrap();
+    }
+    let got = String::from_utf8(cpu.esx.as_ref().unwrap().files["p.lz80n"].clone()).unwrap();
+    assert_eq!(got, want, "status: {}", ide_row(&cpu, 31));
+}
+
 /// Scrolling: the tilemap rows move and only the new rows are drawn; the
 /// screen must be the same as drawn from scratch.
 #[test]
@@ -6211,8 +6270,6 @@ fn selfhost_ide_manual() {
     let cur = (1..31).find(|&r| ide_attr(&cpu, r, 0) == 36).expect("no cursor line");
     assert!(rows[cur - 1].contains("upper("), "{}", rows[cur - 1]);
     assert!(ide_row(&cpu, 31).contains("Manual"), "{}", ide_row(&cpu, 31));
-    std::fs::write("/tmp/scr.bin", &cpu.mem[0x6000..0x7C00]).unwrap();
-    std::fs::write("/tmp/pal.bin", cpu.palettes[3]).unwrap();
     // Help -> Language manual, find the contents line "9. Strings", ENTER
     let mut k = vec![7u8, 4, 4, 4, 2, 13, b'f'];
     k.extend(b"9. Strings\r");
@@ -6333,5 +6390,5 @@ fn dump_selfhost_asm() {
     let prog = std::fs::read_to_string(root.join(std::env::var("PROG").unwrap_or("examples/hello.lz80n".into()))).unwrap();
     let sh = SelfHost::new();
     let (asm, _) = sh.compile_sd(&[("in.lz80n", prog.as_bytes())]).unwrap();
-    std::fs::write("/tmp/sh_out.asm", asm).unwrap();
+    std::fs::write(std::env::temp_dir().join("sh_out.asm"), asm).unwrap();
 }

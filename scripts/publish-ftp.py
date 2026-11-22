@@ -20,6 +20,8 @@ import urllib.request
 WORKFLOW = '.github/workflows/release.yml'
 ARCHIVE = re.compile(r'^lz80n-(\d+)\.(\d+)\.(\d+)-[a-z0-9]+-[a-z0-9]+\.(?:zip|tar\.gz)$', re.IGNORECASE)
 DOCUMENTS = {'README.txt', 'CHANGELOG.md', 'LICENSE', 'SHA256SUMS.txt'}
+REQUIRED_PLATFORMS = ['windows-x64', 'windows-arm64', 'macos-x64', 'macos-arm64',
+                      'linux-x64', 'linux-arm64', 'zxnext-sdcard']
 
 
 def github(path):
@@ -82,6 +84,10 @@ def collect_files(root):
     missing = DOCUMENTS - files.keys()
     if missing:
         raise ValueError('Missing document files: ' + ', '.join(sorted(missing)))
+    # the Next package (release.yml, the zxnext job) must go up with the others
+    missing = [p for p in REQUIRED_PLATFORMS if not any(n.endswith(f'-{p}.zip') or n.endswith(f'-{p}.tar.gz') for n in files)]
+    if missing:
+        raise ValueError('Missing release archives: ' + ', '.join(missing))
     return files, releases.pop()
 
 

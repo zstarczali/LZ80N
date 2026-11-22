@@ -138,36 +138,6 @@ function log_backdrop()
     end
     lfill(31, 0, 80, ' ', LA_STATUS)
     ltext(31, 1, "Compiling...  the IDE comes back when it is done", LA_STATUS)
-    -- the program's first lines (dim, with line numbers)
-    h = file_open("in.lz80n", FILE_READ)
-    if h == FILE_ERROR then return end
-    byte r = 1
-    word c = file_getc(h)
-    while r <= 30 and c ~= FILE_EOF do
-        -- the line number
-        p = lcell(r, 0)
-        byte d0 = r / 10
-        if d0 ~= 0 then memory[p + 4] = '0' + d0 end
-        memory[p + 6] = '0' + r % 10
-        k = 0
-        while k < 4 do
-            memory[p + k * 2 + 1] = LA_GUT
-            k += 1
-        end
-        byte x = 5
-        while c ~= FILE_EOF and c ~= 10 do
-            if x < 80 and c >= 32 and c < 128 then
-                p = lcell(r, x)
-                memory[p] = byte(c)
-                memory[p + 1] = LA_DIM
-                x += 1
-            end
-            c = file_getc(h)
-        end
-        if c == 10 then c = file_getc(h) end
-        r += 1
-    end
-    file_close(h)
 end
 
 -- the screen: 80x32 text mode, the small font, the IDE's look, the window

@@ -17,7 +17,8 @@
 * The **LZ80N IDE** (`ide.nex`): a full-screen editor in the 80-column text
   mode with menus, syntax highlighting, a scroll bar, the Kempston mouse
   (click, drag to select, double click, a right-button menu, the wheel),
-  selections, a clipboard, find and go to line, a file browser, the
+  selections, a clipboard, find and go to line, code formatting (EXTEND I:
+  the blocks indented), a file browser, the
   language manual without the parts about the PC (EXTEND H: at the word
   under the cursor), and Build -> Compile / Compile & run: the compiler's
   messages appear in a window on a screen that looks like the IDE, and in

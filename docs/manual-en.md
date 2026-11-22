@@ -1733,15 +1733,25 @@ keyboard's own cursor, DELETE, EDIT, BREAK and EXTEND keys work too.
 | EXTEND, then F G | find, go to a line |
 | EXTEND, then M A C X V K | mark, select all, copy, cut, paste, delete the line |
 | EXTEND, then L / H | the build output / the manual at the word under the cursor |
+| EXTEND, then I | format the code |
 
 **Compile** (Build -> Compile, EXTEND B) saves the program and starts the
 compiler; it comes back to the IDE with the result. While it works the
-screen still looks like the IDE, with the compiler's messages (and the time
+screen still looks like the IDE (without the program), with the compiler's messages (and the time
 of each stage) in a window; the IDE shows them again afterwards (Build ->
 Build output, EXTEND L). An error is in red and puts the cursor on its line
 (in an included file it opens that file; the main file stays the one that
 is compiled, as the menu bar shows). **Compile & run** starts the program
 when it compiled.
+
+**Edit -> Format code** (EXTEND I) indents every line by its blocks, 4
+spaces a level: `function`, `if`, `while` / `for` ... `do`, `struct`,
+`class`, `interrupt` and `asm` open a level, `end` closes it, `else` and
+`elseif` stand one level back, and the lines inside open brackets (a
+`{...}` list over several lines) are one level in. It also removes the
+spaces at the line ends. The lines of an `asm` block stay as they are;
+strings and comments do not count. The status line tells how many lines
+changed, or that a block or a bracket is not closed.
 
 **File -> Open** is a file browser: the folders and the program files
 (`.lz80n`, `.asm`, `.txt`, `.md`, `.bas`, `.log`) of a folder with their

@@ -4,7 +4,9 @@ name: publish
 # (Actions -> publish -> Run workflow). Leave the run ID empty to take the
 # latest successful release run. Needs the FTP_PASSWORD repository secret.
 #
-# Uploaded: lz80n-<version>-<platform>.zip / .tar.gz, README.txt,
+# Uploaded: lz80n-<version>-<platform>.zip / .tar.gz (the Next package:
+# lz80n-<version>-zxnext-sdcard.zip, listed by the site's
+# downloads/LZ80N/index.php and served by download.php?file=lz80n-zxnext), README.txt,
 # CHANGELOG.md, LICENSE, SHA256SUMS.txt. Archives of older versions are
 # removed from the target directory, everything else there is kept.
 
