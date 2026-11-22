@@ -1,0 +1,188 @@
+-- selfhost/asset_info.lz80n - what an asset file holds, from its header
+-- (included by codegen.lz80n and assets.lz80n): the size of a PNG, the
+-- format of a WAV and the length of the sample made from it. The rules are
+-- those of compiler/src/assets.rs.
+
+byte ai_fh = 255            -- the open file
+bool ai_bad = false
+string ai_err = ""
+
+function ai_fail(string m)
+    if not ai_bad then
+        ai_bad = true
+        ai_err = m
+    end
+end
+
+function ai_rd() -> byte
+    word c = file_getc(ai_fh)
+    if c == FILE_EOF then
+        ai_fail("unexpected end of the file")
+        return 0
+    end
+    return byte(c)
+end
+
+function ai_rd16() -> word
+    word lo = ai_rd()
+    return lo | word(ai_rd()) << 8
+end
+
+function ai_rd32() -> long
+    long lo = ai_rd16()
+    return lo | long(ai_rd16()) << 16
+end
+
+function ai_rd16be() -> word
+    word hi = ai_rd()
+    return hi << 8 | ai_rd()
+end
+
+function ai_rd32be() -> long
+    long hi = ai_rd16be()
+    return hi << 16 | ai_rd16be()
+end
+
+function ai_open(string name) -> bool
+    ai_bad = false
+    ai_err = ""
+    ai_fh = file_open(name, FILE_READ)
+    if ai_fh == FILE_ERROR then
+        ai_fail("cannot read the file")
+        return false
+    end
+    return true
+end
+
+function ai_close()
+    if ai_fh ~= FILE_ERROR then file_close(ai_fh) end
+    ai_fh = FILE_ERROR
+end
+
+-- ---- PNG: the IHDR chunk
+
+word ai_wid = 0
+word ai_hgt = 0
+byte ai_depth = 0
+byte ai_ctype = 0
+byte ai_lace = 0
+byte png_sig[8] = {137, 80, 78, 71, 13, 10, 26, 10}
+
+function png_header() -> bool
+    for i = 0, 7 do
+        if ai_rd() ~= png_sig[i] then
+            ai_fail("not a PNG file")
+            return false
+        end
+    end
+    long ln = ai_rd32be()
+    if ai_rd() ~= 'I' or ai_rd() ~= 'H' or ai_rd() ~= 'D' or ai_rd() ~= 'R' or ln < 13 then
+        ai_fail("not a PNG file (no IHDR)")
+        return false
+    end
+    long w = ai_rd32be()
+    long h = ai_rd32be()
+    ai_depth = ai_rd()
+    ai_ctype = ai_rd()
+    ai_rd()
+    ai_rd()
+    ai_lace = ai_rd()
+    ai_rd32be()
+    if ai_bad then return false end
+    if w > 65535 or h > 65535 then
+        ai_fail("the image is too large")
+        return false
+    end
+    ai_wid = word(w)
+    ai_hgt = word(h)
+    return true
+end
+
+-- ---- WAV: the fmt and data chunks; the sample made from them
+
+word ai_fmt = 0
+word ai_chans = 0
+word ai_bits = 0
+long ai_rate = 0
+long ai_doff = 0            -- the PCM data in the file
+long ai_dlen = 0
+long ai_mono = 0            -- mono frames
+byte ai_presc = 0           -- DMA prescaler (875 kHz / rate)
+long ai_len = 0             -- bytes of the sample
+bool ai_resample = false    -- to 15.6 kHz
+
+function wav_header() -> bool
+    byte id[4]
+    for i = 0, 3 do id[i] = ai_rd() end
+    ai_rd32()
+    byte w0 = ai_rd()
+    byte w1 = ai_rd()
+    byte w2 = ai_rd()
+    byte w3 = ai_rd()
+    if id[0] ~= 'R' or id[1] ~= 'I' or id[2] ~= 'F' or id[3] ~= 'F' or w0 ~= 'W' or w1 ~= 'A' or w2 ~= 'V' or w3 ~= 'E' then
+        ai_fail("not a .wav file")
+        return false
+    end
+    long size = file_size(ai_fh)
+    long o = 12
+    bool got_fmt = false
+    bool got_data = false
+    while o + 8 <= size and not ai_bad do
+        file_seek(ai_fh, o)
+        for i = 0, 3 do id[i] = ai_rd() end
+        long csz = ai_rd32()
+        long body = csz
+        if o + 8 + body > size then body = size - o - 8 end
+        if id[0] == 'f' and id[1] == 'm' and id[2] == 't' and id[3] == ' ' and body >= 16 then
+            ai_fmt = ai_rd16()
+            ai_chans = ai_rd16()
+            ai_rate = ai_rd32()
+            ai_rd32()
+            ai_rd16()
+            ai_bits = ai_rd16()
+            got_fmt = true
+        elseif id[0] == 'd' and id[1] == 'a' and id[2] == 't' and id[3] == 'a' then
+            ai_doff = o + 8
+            ai_dlen = body
+            got_data = true
+        end
+        o += 8 + csz + (csz & 1)
+    end
+    if ai_bad then return false end
+    if not got_fmt then
+        ai_fail("no `fmt ` chunk")
+        return false
+    end
+    if not got_data then
+        ai_fail("no `data` chunk")
+        return false
+    end
+    if ai_fmt ~= 1 or (ai_bits ~= 8 and ai_bits ~= 16) or ai_chans == 0 then
+        ai_fail("only uncompressed 8 or 16 bit PCM is supported")
+        return false
+    end
+    ai_mono = ai_dlen / long(ai_chans * (ai_bits / 8))
+    if ai_mono == 0 then
+        ai_fail("the sample is empty")
+        return false
+    end
+    if ai_rate >= 4000 and ai_rate <= 31250 then
+        ai_presc = byte((875000 + ai_rate / 2) / ai_rate)
+        ai_len = ai_mono
+        ai_resample = false
+    else
+        if ai_rate == 0 then
+            ai_fail("the sample rate is 0")
+            return false
+        end
+        ai_presc = 56
+        ai_len = ai_mono / ai_rate * 15625 + ai_mono % ai_rate * 15625 / ai_rate
+        if ai_len < 1 then ai_len = 1 end
+        ai_resample = true
+    end
+    if ai_len >= 16777216 then
+        ai_fail("the sample is longer than 16 MB")
+        return false
+    end
+    return true
+end

@@ -1,0 +1,323 @@
+-- selfhost/parser.lz80n - the LZ80N parser as a program
+--
+-- Reads tokens.bin (written by lexer.lz80n), builds the syntax tree
+-- (parser_core.lz80n) and writes it to ast.txt in the canonical text form
+-- that the test `selfhost_parser_matches_rust` also produces from
+-- compiler/src/ast.rs. On an error ast.txt holds only
+-- `error LINE:COL message`.
+
+include "parser_core.lz80n"
+
+-- operator names (Rust BinOp / UnOp order)
+string bin_names[] = {
+    "add", "sub", "mul", "div", "mod", "concat", "and", "or", "xor", "shl", "shr",
+    "eq", "ne", "lt", "le", "gt", "ge", "land", "lor"
+}
+string un_names[] = {"neg", "not", "bitnot"}
+
+-- ---------------------------------------------------------------- output
+
+byte outh
+byte obuf[256]
+word olen = 0
+
+function flush()
+    if olen > 0 then
+        file_write(outh, addr(obuf), olen)
+        olen = 0
+    end
+end
+
+function out_byte(byte b)
+    obuf[olen] = b
+    olen += 1
+    if olen == 256 then flush() end
+end
+
+function out_s(string s)
+    byte n = len(s)
+    byte i = 0
+    while i < n do
+        out_byte(asc(s, i))
+        i += 1
+    end
+end
+
+function out_dec(word hi, word lo)
+    dec32(hi, lo)
+    while ndig > 0 do
+        ndig -= 1
+        out_byte(digits[ndig])
+    end
+end
+
+-- `(kind L:C`
+function open(string kind, word n)
+    out_byte('(')
+    out_s(kind)
+    out_byte(' ')
+    out_dec(0, nl[n])
+    out_byte(':')
+    out_dec(0, nc[n])
+end
+
+function close()
+    out_byte(')')
+end
+
+function hex_digit(byte d) -> byte
+    if d < 10 then return '0' + d end
+    return 'A' + d - 10
+end
+
+-- the text of token t, quoted, non-printable bytes as \xHH
+function out_quoted(word t)
+    out_byte('"')
+    word i = 0
+    word o = toff_(t)
+    while i < tlen_(t) do
+        byte c = tpool[o + i]
+        if c < 32 or c > 126 or c == '"' or c == '\\' then
+            out_byte('\\')
+            out_byte('x')
+            out_byte(hex_digit(c >> 4))
+            out_byte(hex_digit(c & 15))
+        else
+            out_byte(c)
+        end
+        i += 1
+    end
+    out_byte('"')
+end
+
+-- ` name` (token t's text), or ` _` for none
+function out_name(word t)
+    out_byte(' ')
+    if t == 0 then
+        out_byte('_')
+        return
+    end
+    word i = 0
+    word o = toff_(t)
+    while i < tlen_(t) do
+        out_byte(tpool[o + i])
+        i += 1
+    end
+end
+
+-- a signed literal: token value, negated
+function out_value(word t, byte neg)
+    out_byte(' ')
+    if neg ~= 0 and (tval_lo(t) ~= 0 or tval_hi(t) ~= 0) then out_byte('-') end
+    out_dec(tval_hi(t), tval_lo(t))
+end
+
+-- ` expr` or ` _`
+function out_opt(word e)
+    if e == 0 then
+        out_s(" _")
+    else
+        out_byte(' ')
+        out_node(e)
+    end
+end
+
+-- every node of a list, each after a space
+function out_list(word n)
+    while n ~= 0 do
+        out_byte(' ')
+        out_node(n)
+        n = nx[n]
+    end
+end
+
+-- ` (body ...)`
+function out_body(word n)
+    out_s(" (body")
+    out_list(n)
+    out_byte(')')
+end
+
+function out_node(word n)
+    byte k = nk[n]
+    if k == E_INT then
+        open("int", n)
+        out_value(n1[n], nf[n])
+    elseif k == E_FIXED then
+        open("fixed", n)
+        out_value(n1[n], nf[n])
+    elseif k == E_BOOL then
+        open("bool", n)
+        if nf[n] ~= 0 then out_s(" true") else out_s(" false") end
+    elseif k == E_STR then
+        open("str", n)
+        out_byte(' ')
+        out_quoted(n1[n])
+    elseif k == E_NAME then
+        open("name", n)
+        out_name(n1[n])
+    elseif k == E_INDEX then
+        open("index", n)
+        out_opt(n1[n])
+        out_opt(n2[n])
+    elseif k == E_FIELD then
+        open("field", n)
+        out_opt(n1[n])
+        out_name(n2[n])
+    elseif k == E_CALL then
+        open("call", n)
+        out_name(n1[n])
+        out_list(n2[n])
+    elseif k == E_METHOD then
+        open("method", n)
+        out_opt(n1[n])
+        out_name(n2[n])
+        out_list(n3[n])
+    elseif k == E_UNARY then
+        open("un", n)
+        out_byte(' ')
+        out_s(un_names[nf[n]])
+        out_opt(n1[n])
+    elseif k == E_BINARY then
+        open("bin", n)
+        out_byte(' ')
+        out_s(bin_names[nf[n]])
+        out_opt(n1[n])
+        out_opt(n2[n])
+    elseif k == E_LIST then
+        open("list", n)
+        out_list(n1[n])
+    elseif k == S_FAR then
+        open("far", n)
+        out_opt(n1[n])
+    elseif k == S_VAR then
+        open("var", n)
+        out_name(n1[n])
+        out_name(n2[n])
+        out_opt(n3[n])
+        out_opt(n4[n])
+        if nf[n] ~= 0 then out_s(" const") else out_s(" -") end
+    elseif k == S_ASSIGN then
+        open("assign", n)
+        out_byte(' ')
+        if nf[n] == 0 then out_byte('=') else out_s(bin_names[nf[n] - 1]) end
+        out_opt(n1[n])
+        out_opt(n2[n])
+    elseif k == S_IF then
+        open("if", n)
+        word a = n1[n]
+        while a ~= 0 do
+            out_s(" (arm")
+            out_opt(n1[a])
+            out_body(n2[a])
+            out_byte(')')
+            a = nx[a]
+        end
+        if nf[n] ~= 0 then
+            out_s(" (else")
+            out_list(n2[n])
+            out_byte(')')
+        end
+    elseif k == S_WHILE then
+        open("while", n)
+        out_opt(n1[n])
+        out_body(n2[n])
+    elseif k == S_FOR then
+        open("for", n)
+        out_name(n1[n])
+        out_opt(n2[n])
+        out_opt(n3[n])
+        out_opt(n1[n4[n]])
+        out_body(n2[n4[n]])
+    elseif k == S_RETURN then
+        open("return", n)
+        out_opt(n1[n])
+    elseif k == S_BREAK then
+        open("break", n)
+    elseif k == S_EXPR then
+        open("expr", n)
+        out_opt(n1[n])
+    elseif k == S_ASM then
+        open("asm", n)
+        out_byte(' ')
+        out_quoted(n1[n])
+    elseif k == S_ASSET then
+        open("asset", n)
+        out_name(n1[n])
+        out_byte(' ')
+        out_quoted(n2[n])
+        if nf[n] ~= 0 then out_s(" image") else out_s(" file") end
+    elseif k == I_FUNC then
+        open("func", n)
+        out_name(n1[n])
+        out_s(" (params")
+        word p = n2[n]
+        while p ~= 0 do
+            out_s(" (p")
+            out_name(n1[p])
+            out_name(n2[p])
+            out_byte(')')
+            p = nx[p]
+        end
+        out_byte(')')
+        out_name(n3[n])
+        out_body(n4[n])
+    elseif k == I_INTERRUPT then
+        open("interrupt", n)
+        if nf[n] ~= 0 then out_opt(n1[n]) else out_s(" frame") end
+        out_body(n2[n])
+    elseif k == I_STRUCT then
+        open("struct", n)
+        out_name(n1[n])
+        out_name(n2[n])
+        out_s(" (fields")
+        word f = n3[n]
+        while f ~= 0 do
+            out_byte(' ')
+            open("f", f)
+            out_name(n1[f])
+            out_name(n2[f])
+            out_opt(n3[f])
+            out_opt(n4[f])
+            out_byte(')')
+            f = nx[f]
+        end
+        out_s(") (methods")
+        out_list(n4[n])
+        out_byte(')')
+    end
+    close()
+end
+
+-- ---------------------------------------------------------------- main
+
+if load_tokens() then
+    if not failed then
+        ti = 1
+        program()
+    end
+    outh = file_open("ast.txt", FILE_WRITE)
+    if failed then
+        out_s("error ")
+        out_dec(0, err_l)
+        out_byte(':')
+        out_dec(0, err_c)
+        out_byte(' ')
+        word i = 0
+        while i < elen do
+            out_byte(emsg[i])
+            i += 1
+        end
+        out_byte(10)
+    else
+        word it = prog_first
+        while it ~= 0 do
+            out_node(it)
+            out_byte(10)
+            it = nx[it]
+        end
+    end
+    flush()
+    file_close(outh)
+    print(ntok - 1, "tokens", nnodes, "nodes")
+end

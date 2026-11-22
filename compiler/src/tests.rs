@@ -27,7 +27,7 @@ fn sjasmplus() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Compile and assemble; checks sjasmplus accepts the generated code.
+/// Compile and assemble; checks the assembler accepts the generated code.
 fn assembles(name: &str, src: &str) {
     build(name, src);
 }
@@ -35,6 +35,17 @@ fn assembles(name: &str, src: &str) {
 /// Compile + assemble, returning (nex bytes, symbols). Panics on failure.
 fn build(name: &str, src: &str) -> Option<(Vec<u8>, HashMap<String, u16>)> {
     build_opts(name, src, false)
+}
+
+/// Compile + assemble a program whose `include`s are relative to `dir`.
+fn build_in(dir: &std::path::Path, src: &str) -> (Vec<u8>, HashMap<String, u16>) {
+    let asm = match crate::compile_opts(src, "t.nex", true, dir, false) {
+        Ok(a) => a,
+        Err(e) => panic!("unexpected errors: {:?}", e.iter().map(|d| d.to_string()).collect::<Vec<_>>()),
+    };
+    let out = crate::asm::assemble(&asm, dir).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
+    let syms = out.symbols16();
+    (out.nex.unwrap().1, syms)
 }
 
 /// `bank_all`: every function in its own code page.
@@ -45,34 +56,20 @@ fn build_opts(name: &str, src: &str, bank_all: bool) -> Option<(Vec<u8>, HashMap
         Ok(a) => a,
         Err(e) => panic!("unexpected errors: {:?}", e.iter().map(|d| d.to_string()).collect::<Vec<_>>()),
     };
-    let sj = sjasmplus()?;
-    let dir = std::env::temp_dir().join(format!("lz80nc_test_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("t.asm"), &asm).unwrap();
-    let out = Command::new(sj)
-        .current_dir(&dir)
-        .args(["--nologo", "--msg=war", "--sym=t.sym", "t.asm"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success() && dir.join("t.nex").exists(),
-        "sjasmplus failed:\n{}{}\n--- asm ---\n{asm}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let mut syms = HashMap::new();
-    for line in std::fs::read_to_string(dir.join("t.sym")).unwrap().lines() {
-        if let Some((name, val)) = line.split_once(": EQU ") {
-            if let Ok(v) = u32::from_str_radix(val.trim().trim_start_matches("0x"), 16) {
-                syms.insert(name.trim().to_string(), v as u16);
-            }
-        }
-    }
-    Some((std::fs::read(dir.join("t.nex")).unwrap(), syms))
+    let _ = name;
+    let out = match crate::asm::assemble(&asm, &base) {
+        Ok(o) => o,
+        Err(e) => panic!(
+            "assembler failed:\n{}\n--- asm ---\n{asm}",
+            e.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")
+        ),
+    };
+    let syms = out.symbols16();
+    let (_, nex) = out.nex.expect("no SAVENEX in the generated code");
+    Some((nex, syms))
 }
 
 /// Run a program in the test emulator and return everything it printed.
-/// Returns None when sjasmplus is not available.
 fn run_with(name: &str, src: &str, setup: impl FnOnce(&mut Cpu)) -> Option<(String, Cpu)> {
     run_opts(name, src, false, setup)
 }
@@ -85,16 +82,20 @@ fn run_opts(name: &str, src: &str, bank_all: bool, setup: impl FnOnce(&mut Cpu))
     let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
     let newline = syms["rt_newline"];
     let end = syms["__main_end"];
+    // an interrupt returning to rt_putc / rt_newline is not a new call
+    let (isr, mut prev) = (syms.get("__isr").copied().unwrap_or(0xFFFF), 0u16);
     let mut out = String::new();
     for _ in 0..50_000_000u64 {
         if cpu.pc == end {
             return Some((out, cpu));
         }
-        if (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+        let from_isr = prev >= isr && prev < isr.saturating_add(512);
+        if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
             out.push(cpu.a as char);
-        } else if cpu.pc == newline {
+        } else if !from_isr && cpu.pc == newline {
             out.push('\n');
         }
+        prev = cpu.pc;
         if let Err(e) = cpu.tick() {
             panic!("emulator: {e}\noutput so far:\n{out}");
         }
@@ -106,10 +107,24 @@ fn run(name: &str, src: &str) -> Option<String> {
     run_with(name, src, |_| {}).map(|r| r.0)
 }
 
-/// Assert the printed output (skipped without sjasmplus).
+/// Assert the printed output. With SELFHOST=1 the program is also compiled
+/// by the self-hosted compiler (selfhost/codegen.lz80n) when it supports it,
+/// and must print the same.
 fn expect(name: &str, src: &str, want: &str) {
     if let Some(out) = run(name, src) {
         assert_eq!(out, want, "program:\n{src}");
+    }
+    if std::env::var("SELFHOST").is_ok() {
+        static SH: std::sync::OnceLock<SelfHost> = std::sync::OnceLock::new();
+        let sh = SH.get_or_init(SelfHost::new);
+        match sh.compile(src) {
+            Ok(asm) => {
+                assert_eq!(run_asm(&asm), want, "self-hosted compiler, program:\n{src}");
+                eprintln!("SELFHOST ok {name}");
+            }
+            Err(e) if e.contains("not supported by the self-hosted compiler") => eprintln!("SELFHOST skip {name}: {e}"),
+            Err(e) => panic!("self-hosted compiler: {e}\nprogram:\n{src}"),
+        }
     }
 }
 
@@ -829,12 +844,8 @@ fn example_sprites_behaviour() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/sprites.lz80n");
     let src = std::fs::read_to_string(&path).unwrap();
     let asm = crate::compile_with(&src, "t.nex", true, path.parent().unwrap()).unwrap();
-    let Some(sj) = sjasmplus() else { return };
-    let dir = std::env::temp_dir().join("lz80nc_test_ex_sprites_b");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("t.asm"), asm).unwrap();
-    assert!(Command::new(sj).current_dir(&dir).args(["--nologo", "t.asm"]).status().unwrap().success());
-    let mut cpu = load_nex(&std::fs::read(dir.join("t.nex")).unwrap()).unwrap();
+    let nex = crate::asm::assemble(&asm, path.parent().unwrap()).unwrap().nex.unwrap().1;
+    let mut cpu = load_nex(&nex).unwrap();
     let pos = |a: &[u8; 5]| ((a[0] as u16) | ((a[2] as u16 & 1) << 8), (a[1] as u16) | ((a[4] as u16 & 1) << 8));
     let mut frames = 0;
     let mut first = None;
@@ -3418,4 +3429,2231 @@ fn run_plot_y_offset() {
         "layer2_visible(true)\nbyte y = 10\nword x = 300\nplot(5, y + 3, 7)\nplot(6, y - 2, 8)\nplot(x - 290, y + 250, 9)\nprint(point(5, 13), point(6, 8), point(10, 4))",
         "7 8 9\n",
     );
+}
+
+/// The built-in assembler must produce exactly the NEX SjASMPlus makes, for
+/// every example (runs only where SjASMPlus is installed: SJASMPLUS or tools/).
+#[test]
+fn builtin_assembler_matches_sjasmplus() {
+    let Some(sj) = sjasmplus() else { return };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "lz80n") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(&path).unwrap();
+        let Ok(asm) = crate::compile_main(&src, Some(&path), "t.nex", true, &dir, false) else { continue };
+        let mine = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("{stem}: {}", e[0])).nex.unwrap().1;
+        let tmp = std::env::temp_dir().join(format!("lz80nc_cmp_{stem}"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("t.asm"), &asm).unwrap();
+        assert!(Command::new(&sj).current_dir(&tmp).args(["--nologo", "t.asm"]).status().unwrap().success());
+        let theirs = std::fs::read(tmp.join("t.nex")).unwrap();
+        assert_eq!(mine.len(), theirs.len(), "{stem}: NEX size differs");
+        if let Some(i) = (0..mine.len()).find(|&i| mine[i] != theirs[i]) {
+            panic!("{stem}: NEX differs at offset {i} (${i:X}): built-in {:02X}, sjasmplus {:02X}", mine[i], theirs[i]);
+        }
+        checked += 1;
+    }
+    assert!(checked > 10);
+}
+
+
+fn run_sd(name: &str, src: &str, files: &[(&str, &[u8])]) -> (String, crate::emu::EsxFs) {
+    let fs = crate::emu::EsxFs::with_files(files);
+    let (out, cpu) = run_with(name, src, move |cpu| cpu.esx = Some(fs)).unwrap();
+    (out, cpu.esx.unwrap())
+}
+
+#[test]
+fn file_write_read_seek_size() {
+    let (out, fs) = run_sd(
+        "file_rw",
+        r#"
+byte buf[16]
+byte h = file_open("out.txt", FILE_WRITE)
+print(h ~= FILE_ERROR, file_status)
+for i = 0, 9 do buf[i] = '0' + i end
+print(file_write(h, addr(buf), 10))
+file_close(h)
+
+h = file_open("out.txt", FILE_READ)
+print(file_size(h))
+file_seek(h, 4)
+print(file_read(h, addr(buf), 16), buf[0] - '0', file_pos(h))
+print(file_read(h, addr(buf), 16))
+file_close(h)
+
+h = file_open("out.txt", FILE_APPEND)
+buf[0] = 'X'
+file_write(h, addr(buf), 1)
+file_close(h)
+
+h = file_open("missing.txt", FILE_READ)
+print(h == FILE_ERROR, file_status)
+print(file_delete("out.txt"), file_delete("out.txt"))
+"#,
+        &[],
+    );
+    assert_eq!(out, "true 0\n10\n10\n6 4 10\n0\ntrue 5\ntrue false\n");
+    assert!(fs.files.is_empty());
+    assert_eq!(fs.open_handles(), 0);
+    assert!(!fs.mmu_not_rom, "esxDOS called with RAM in MMU slot 0/1");
+    assert!(!fs.with_interrupts, "esxDOS called with interrupts enabled");
+}
+
+#[test]
+fn file_append_keeps_contents() {
+    let (_, fs) = run_sd(
+        "file_app",
+        r#"
+byte b[1]
+b[0] = '!'
+byte h = file_open("log.txt", FILE_APPEND)
+file_write(h, addr(b), 1)
+file_close(h)
+"#,
+        &[("log.txt", b"abc")],
+    );
+    assert_eq!(fs.files["log.txt"], b"abc!");
+}
+
+/// Byte-by-byte reading through the buffer, across 256-byte refills, and a
+/// whole file loaded into a far (banked) array in chunks.
+#[test]
+fn file_getc_and_load_into_far_array() {
+    let data: Vec<u8> = (0..3000u32).map(|i| (i * 7 + i / 256) as u8).collect();
+    let sum: u32 = data.iter().map(|&b| b as u32).sum();
+    let (out, _) = run_sd(
+        "file_getc",
+        r#"
+far byte big[20000]
+byte chunk[256]
+
+-- 1: byte by byte
+byte h = file_open("data.bin", FILE_READ)
+word n = 0
+word sum = 0
+word c = file_getc(h)
+while c ~= FILE_EOF do
+    sum += c
+    n += 1
+    c = file_getc(h)
+end
+file_close(h)
+print(n, sum)
+
+-- 2: into banked memory
+h = file_open("data.bin", FILE_READ)
+word total = 0
+word got = file_read(h, addr(chunk), 256)
+while got > 0 do
+    for i = 0, got - 1 do big[total + i] = chunk[i] end
+    total += got
+    got = file_read(h, addr(chunk), 256)
+end
+file_close(h)
+word s2 = 0
+for i = 0, total - 1 do s2 += big[i] end
+print(total, s2, big[2999])
+"#,
+        &[("data.bin", &data)],
+    );
+    assert_eq!(out, format!("3000 {}\n3000 {} {}\n", sum as u16, sum as u16, data[2999]));
+}
+
+/// The Rust lexer's tokens in the record format of selfhost/lexer.lz80n.
+fn token_records(src: &str) -> Vec<u8> {
+    use crate::lexer::Tok::*;
+    let mut out = vec![];
+    let head = |out: &mut Vec<u8>, kind: u8, line: u32, col: u32| {
+        out.push(kind);
+        out.extend((line as u16).to_le_bytes());
+        out.extend((col as u16).to_le_bytes());
+    };
+    let text = |out: &mut Vec<u8>, s: &[u8]| {
+        out.extend((s.len() as u16).to_le_bytes());
+        out.extend(s);
+    };
+    let (toks, err) = crate::lexer::lex_partial(src);
+    for t in &toks {
+        let kind: u8 = match &t.tok {
+            Ident(_) => 0, Int(_) => 1, DotDot => 2, Fixed(_) => 3, Str(_) => 4, AsmBody(_) => 5,
+            And => 6, Or => 7, Not => 8, If => 9, Then => 10, Elseif => 11, Else => 12, End => 13,
+            While => 14, Do => 15, For => 16, Function => 17, Return => 18, Break => 19, Const => 20,
+            Var => 21, True => 22, False => 23, Asm => 24, Struct => 25, Class => 26, Asset => 27,
+            Interrupt => 28, Far => 29, Include => 30,
+            Plus => 31, Minus => 32, Star => 33, Slash => 34, Percent => 35, Amp => 36, Pipe => 37,
+            Tilde => 38, Shl => 39, Shr => 40, EqEq => 41, NotEq => 42, Lt => 43, Le => 44, Gt => 45,
+            Ge => 46, Assign => 47, PlusEq => 48, MinusEq => 49, StarEq => 50, AmpEq => 51,
+            PipeEq => 52, SlashEq => 53, PercentEq => 54, ShlEq => 55, ShrEq => 56,
+            LParen => 57, RParen => 58, LBracket => 59, RBracket => 60, LBrace => 61, RBrace => 62,
+            Comma => 63, Dot => 64, Arrow => 65, Eof => 66,
+        };
+        head(&mut out, kind, t.pos.line, t.pos.col);
+        match &t.tok {
+            Ident(s) | AsmBody(s) => text(&mut out, s.as_bytes()),
+            Str(s) => text(&mut out, &s.chars().map(|c| c as u32 as u8).collect::<Vec<_>>()),
+            Int(v) | Fixed(v) => out.extend((*v as u32).to_le_bytes()),
+            _ => {}
+        }
+    }
+    if let Some(e) = err {
+        head(&mut out, 255, e.pos.line, e.pos.col);
+        let m = e.msg.as_bytes();
+        text(&mut out, &m[..m.len().min(64)]);
+    }
+    out
+}
+
+/// Run selfhost/lexer.lz80n in the emulator on `src`; its tokens.bin.
+fn selfhost_lex(nex: &[u8], syms: &HashMap<String, u16>, src: &str) -> Vec<u8> {
+    let mut cpu = load_nex(nex).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::with_files(&[("in.lz80n", src.as_bytes())]));
+    let end = syms["__main_end"];
+    let mut n = 0u64;
+    while cpu.pc != end {
+        cpu.tick().unwrap();
+        n += 1;
+        assert!(n < 2_000_000_000, "self-hosted lexer did not finish");
+    }
+    cpu.esx.unwrap().files.remove("tokens.bin").expect("no tokens.bin")
+}
+
+#[test]
+fn selfhost_lexer_matches_rust() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_lexer", &lexer_src).unwrap();
+    let mut inputs: Vec<(String, String)> = vec![];
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|e| e == "lz80n") {
+            inputs.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap()));
+        }
+    }
+    inputs.push(("selfhost/lexer.lz80n".into(), lexer_src.clone()));
+    for (name, m) in [
+        ("FILE", crate::prelude::FILE),
+        ("SOUND", crate::prelude::SOUND),
+        ("LAYER2", crate::prelude::LAYER2),
+        ("SPRITES", crate::prelude::SPRITES),
+        ("PALETTE", crate::prelude::PALETTE),
+        ("COPPER", crate::prelude::COPPER),
+    ] {
+        inputs.push((format!("prelude {name}"), m.to_string()));
+    }
+    for (i, s) in [
+        "x = 0x1F + $ff - 0b101 + 1_000 + 4294967295 'a' '\\n' '\\0'",
+        "a <<= 1 b >>= 2 c != d ~= e -> f .. g . h <= >= << >> == = += -= *= /= %= &= |=",
+        "f = 1.5 + 0.1 + 32767.99 + 3.14159265358979 + 0.5",
+        "s = \"tab\\t nl\\n q\\\" bs\\\\ z\\0\"",
+        "--[[ block\n comment ]] x --[[ unterminated",
+        "x = 1 @",
+        "y = 4294967296",
+        "z = 0x",
+        "w = 12ab",
+        "s = \"open",
+        "s = \"bad \\q\"",
+        "c = 'ab'",
+        "f = 32768.5",
+        "asm x\nend",
+        "asm\n  ld a,1  \n  nop ; end\n end ; done\nx",
+        "asm\n  nop\n",
+        "if a then b elseif c else d end while x do end for i = 1, 2 do break end",
+        "! x",
+        "",
+        "   \n\t  -- only a comment",
+    ]
+    .iter()
+    .enumerate()
+    {
+        inputs.push((format!("case {i}: {s:?}"), s.to_string()));
+    }
+    for (name, src) in &inputs {
+        let want = token_records(src);
+        let got = selfhost_lex(&nex, &syms, src);
+        if got != want {
+            let i = (0..want.len().min(got.len())).find(|&i| got[i] != want[i]).unwrap_or(want.len().min(got.len()));
+            panic!(
+                "{name}: token streams differ at byte {i} (lengths {} / {})\n rust: {:?}\n self: {:?}",
+                want.len(),
+                got.len(),
+                &want[i.saturating_sub(8)..(i + 24).min(want.len())],
+                &got[i.saturating_sub(8)..(i + 24).min(got.len())]
+            );
+        }
+    }
+}
+
+
+
+/// The canonical text form of a syntax tree (the output of selfhost/parser.lz80n).
+mod ast_text {
+    use crate::ast::*;
+
+    fn quoted(out: &mut String, bytes: &[u8]) {
+        out.push('"');
+        for &c in bytes {
+            if !(32..=126).contains(&c) || c == b'"' || c == b'\\' {
+                out.push_str(&format!("\\x{c:02X}"));
+            } else {
+                out.push(c as char);
+            }
+        }
+        out.push('"');
+    }
+
+    fn open(out: &mut String, kind: &str, pos: crate::diag::Pos) {
+        out.push_str(&format!("({kind} {}:{}", pos.line, pos.col));
+    }
+
+    fn ty(t: &TypeRef) -> String {
+        match t {
+            TypeRef::Prim(p) => p.name().to_string(),
+            TypeRef::Named(n) => n.clone(),
+        }
+    }
+
+    fn bin(op: BinOp) -> &'static str {
+        use BinOp::*;
+        match op {
+            Add => "add", Sub => "sub", Mul => "mul", Div => "div", Mod => "mod", Concat => "concat",
+            And => "and", Or => "or", Xor => "xor", Shl => "shl", Shr => "shr", Eq => "eq", Ne => "ne",
+            Lt => "lt", Le => "le", Gt => "gt", Ge => "ge", LAnd => "land", LOr => "lor",
+        }
+    }
+
+    fn opt(out: &mut String, e: &Option<Expr>) {
+        match e {
+            Some(e) => {
+                out.push(' ');
+                expr(out, e);
+            }
+            None => out.push_str(" _"),
+        }
+    }
+
+    fn exprs(out: &mut String, list: &[Expr]) {
+        for e in list {
+            out.push(' ');
+            expr(out, e);
+        }
+    }
+
+    pub fn expr(out: &mut String, e: &Expr) {
+        match &e.kind {
+            ExprKind::Int(v) => {
+                open(out, "int", e.pos);
+                out.push_str(&format!(" {v}"));
+            }
+            ExprKind::Fixed(v) => {
+                open(out, "fixed", e.pos);
+                out.push_str(&format!(" {v}"));
+            }
+            ExprKind::Bool(b) => {
+                open(out, "bool", e.pos);
+                out.push_str(if *b { " true" } else { " false" });
+            }
+            ExprKind::Str(s) => {
+                open(out, "str", e.pos);
+                out.push(' ');
+                quoted(out, &s.chars().map(|c| c as u32 as u8).collect::<Vec<_>>());
+            }
+            ExprKind::Name(n) => {
+                open(out, "name", e.pos);
+                out.push_str(&format!(" {n}"));
+            }
+            ExprKind::Index(b, i) => {
+                open(out, "index", e.pos);
+                out.push(' ');
+                expr(out, b);
+                out.push(' ');
+                expr(out, i);
+            }
+            ExprKind::Field(b, n) => {
+                open(out, "field", e.pos);
+                out.push(' ');
+                expr(out, b);
+                out.push_str(&format!(" {n}"));
+            }
+            ExprKind::Call(n, args) => {
+                open(out, "call", e.pos);
+                out.push_str(&format!(" {n}"));
+                exprs(out, args);
+            }
+            ExprKind::MethodCall(o, n, args) => {
+                open(out, "method", e.pos);
+                out.push(' ');
+                expr(out, o);
+                out.push_str(&format!(" {n}"));
+                exprs(out, args);
+            }
+            ExprKind::Unary(op, x) => {
+                open(out, "un", e.pos);
+                out.push_str(match op {
+                    UnOp::Neg => " neg",
+                    UnOp::Not => " not",
+                    UnOp::BitNot => " bitnot",
+                });
+                out.push(' ');
+                expr(out, x);
+            }
+            ExprKind::Binary(op, l, r) => {
+                open(out, "bin", e.pos);
+                out.push_str(&format!(" {}", bin(*op)));
+                out.push(' ');
+                expr(out, l);
+                out.push(' ');
+                expr(out, r);
+            }
+            ExprKind::List(items) => {
+                open(out, "list", e.pos);
+                exprs(out, items);
+            }
+        }
+        out.push(')');
+    }
+
+    fn body(out: &mut String, list: &[Stmt]) {
+        out.push_str(" (body");
+        for s in list {
+            out.push(' ');
+            stmt(out, s);
+        }
+        out.push(')');
+    }
+
+    pub fn stmt(out: &mut String, s: &Stmt) {
+        match &s.kind {
+            StmtKind::Far(inner) => {
+                open(out, "far", s.pos);
+                out.push(' ');
+                stmt(out, inner);
+            }
+            StmtKind::VarDecl { ty: t, name, array, init, is_const } => {
+                open(out, "var", s.pos);
+                out.push_str(&format!(" {}", t.as_ref().map(ty).unwrap_or("_".into())));
+                out.push_str(&format!(" {name}"));
+                opt(out, array);
+                opt(out, init);
+                out.push_str(if *is_const { " const" } else { " -" });
+            }
+            StmtKind::Assign { target, op, value } => {
+                open(out, "assign", s.pos);
+                out.push_str(&format!(" {}", op.map(bin).unwrap_or("=")));
+                out.push(' ');
+                expr(out, target);
+                out.push(' ');
+                expr(out, value);
+            }
+            StmtKind::If { arms, otherwise } => {
+                open(out, "if", s.pos);
+                for (c, b) in arms {
+                    out.push_str(" (arm ");
+                    expr(out, c);
+                    body(out, b);
+                    out.push(')');
+                }
+                if let Some(o) = otherwise {
+                    out.push_str(" (else");
+                    for s in o {
+                        out.push(' ');
+                        stmt(out, s);
+                    }
+                    out.push(')');
+                }
+            }
+            StmtKind::While { cond, body: b } => {
+                open(out, "while", s.pos);
+                out.push(' ');
+                expr(out, cond);
+                body(out, b);
+            }
+            StmtKind::For { var, start, end, step, body: b } => {
+                open(out, "for", s.pos);
+                out.push_str(&format!(" {var} "));
+                expr(out, start);
+                out.push(' ');
+                expr(out, end);
+                opt(out, step);
+                body(out, b);
+            }
+            StmtKind::Return(e) => {
+                open(out, "return", s.pos);
+                opt(out, e);
+            }
+            StmtKind::Break => open(out, "break", s.pos),
+            StmtKind::Expr(e) => {
+                open(out, "expr", s.pos);
+                out.push(' ');
+                expr(out, e);
+            }
+            StmtKind::Asm(b) => {
+                open(out, "asm", s.pos);
+                out.push(' ');
+                quoted(out, b.as_bytes());
+            }
+            StmtKind::Asset { name, path, image } => {
+                open(out, "asset", s.pos);
+                out.push_str(&format!(" {name} "));
+                quoted(out, &path.chars().map(|c| c as u32 as u8).collect::<Vec<_>>());
+                out.push_str(if *image { " image" } else { " file" });
+            }
+        }
+        out.push(')');
+    }
+
+    fn func(out: &mut String, f: &Func) {
+        open(out, "func", f.pos);
+        out.push_str(&format!(" {} (params", f.name));
+        for (n, t) in &f.params {
+            out.push_str(&format!(" (p {n} {})", ty(t)));
+        }
+        out.push(')');
+        let ret = match (&f.ret, f.ret_str, &f.ret_named) {
+            (Some(t), _, _) => t.name().to_string(),
+            (None, true, _) => "string".into(),
+            (None, false, Some(n)) => n.clone(),
+            _ => "_".into(),
+        };
+        out.push_str(&format!(" {ret}"));
+        body(out, &f.body);
+        out.push(')');
+    }
+
+    pub fn program(p: &Program) -> String {
+        let mut out = String::new();
+        for item in &p.items {
+            match item {
+                Item::Func(f) => func(&mut out, f),
+                Item::Interrupt(line, b, pos) => {
+                    open(&mut out, "interrupt", *pos);
+                    match line {
+                        Some(e) => {
+                            out.push(' ');
+                            expr(&mut out, e);
+                        }
+                        None => out.push_str(" frame"),
+                    }
+                    body(&mut out, b);
+                    out.push(')');
+                }
+                Item::Struct(sd) => {
+                    open(&mut out, "struct", sd.pos);
+                    out.push_str(&format!(" {} {} (fields", sd.name, sd.parent.as_deref().unwrap_or("_")));
+                    for f in &sd.fields {
+                        out.push(' ');
+                        open(&mut out, "f", f.pos);
+                        out.push_str(&format!(" {} {}", f.name, ty(&f.ty)));
+                        opt(&mut out, &f.array);
+                        opt(&mut out, &f.init);
+                        out.push(')');
+                    }
+                    out.push_str(") (methods");
+                    for m in &sd.methods {
+                        out.push(' ');
+                        func(&mut out, m);
+                    }
+                    out.push_str("))");
+                }
+                Item::Stmt(s) => stmt(&mut out, s),
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Lex + parse with the Rust front end; the tree or `error L:C message`.
+    pub fn of_source(src: &str) -> String {
+        let r = crate::lexer::lex(src).and_then(crate::parser::parse);
+        match r {
+            Ok(p) => program(&p),
+            Err(d) => format!("error {}:{} {}\n", d.pos.line, d.pos.col, d.msg),
+        }
+    }
+}
+
+/// Run a self-hosted stage (a NEX) on the virtual SD card `files`; the files afterwards.
+fn run_stage(
+    nex: &[u8],
+    syms: &HashMap<String, u16>,
+    files: std::collections::HashMap<String, Vec<u8>>,
+) -> std::collections::HashMap<String, Vec<u8>> {
+    let mut cpu = load_nex(nex).unwrap();
+    let mut fs = crate::emu::EsxFs::default();
+    fs.files = files;
+    cpu.esx = Some(fs);
+    let end = syms["__main_end"];
+    let mut n = 0u64;
+    while cpu.pc != end {
+        if let Err(e) = cpu.tick() {
+            panic!("self-hosted stage crashed: {e}");
+        }
+        n += 1;
+        assert!(n < 4_000_000_000, "self-hosted stage did not finish");
+    }
+    cpu.esx.unwrap().files
+}
+
+#[test]
+fn selfhost_parser_matches_rust() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let parser_src = std::fs::read_to_string(root.join("selfhost/parser.lz80n")).unwrap();
+    let (lex_nex, lex_syms) = build("selfhost_lexer2", &lexer_src).unwrap();
+    let (par_nex, par_syms) = build_in(&root.join("selfhost"), &parser_src);
+    let mut inputs: Vec<(String, String)> = vec![];
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|e| e == "lz80n") {
+            inputs.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap()));
+        }
+    }
+    inputs.push(("selfhost/lexer.lz80n".into(), lexer_src.clone()));
+    inputs.push(("selfhost/parser.lz80n".into(), parser_src.clone()));
+    inputs.push(("selfhost/parser_core.lz80n".into(), std::fs::read_to_string(root.join("selfhost/parser_core.lz80n")).unwrap()));
+    for (name, m) in [
+        ("FILE", crate::prelude::FILE),
+        ("SOUND", crate::prelude::SOUND),
+        ("LAYER2", crate::prelude::LAYER2),
+        ("SPRITES", crate::prelude::SPRITES),
+        ("PALETTE", crate::prelude::PALETTE),
+        ("COPPER", crate::prelude::COPPER),
+    ] {
+        inputs.push((format!("prelude {name}"), m.to_string()));
+    }
+    for (i, s) in [
+        "x = -5 y = --5 z = -1.5 w = -(3) v = - - 2.25",
+        "a = 1 + 2 * 3 - 4 / 5 % 6 .. \"s\" << 1 >> 2 & 3 ~ 4 | 5 == 6 ~= 7 < 8 <= 9 > 10 >= 11 and not b or c",
+        "x += 1 x -= 1 x *= 2 x /= 2 x %= 3 x &= 4 x |= 5 x <<= 1 x >>= 1 a[i].f.g[2] = h(1, 2).m(3)",
+        "if a then b() elseif c then d() elseif e then else f() end if x then end",
+        "for i = 1, 10, 2 do break end for j = a, b do return end while x do return 5 end",
+        "byte a[] = {1, 2, 3} word m[2][3] = {{1,2,3},{4,5,6}} far byte big[1000] const K = 4 var v = K",
+        "Vec2 p = {1, 2} string s = \"x\\ty\" bool b",
+        "struct P\n byte x = 1\n word t[4]\nend\nclass B extends P\n function m(byte a, P o) -> word return a end\n function n() end\nend",
+        "function f(byte a, word b) -> string return \"\" end function g() -> Vec2 end function h() end",
+        "interrupt raster(96) nextreg[0x4A] = 1 end interrupt frame ticks += 1 end",
+        "asset s = \"a.png\" asset i = image(\"b.png\")",
+        "asm\n ld a,1\nend",
+        "x = 4294967295 y = 0x80000000",
+        "x = ",
+        "byte a[] = 5",
+        "byte b = {1}",
+        "byte c[]",
+        "byte d[2][]",
+        "1 = x",
+        "f",
+        "f(1)(2)",
+        "far byte q",
+        "if x then",
+        "function f() function g() end end",
+        "interrupt timer end",
+        "asset a = 5",
+        "asset a = image(5)",
+        "struct S 5 end",
+        "x = {}",
+        "x = (1",
+        "x = 1.5.y",
+        "return",
+        "x = 99999999999",
+        "f(1, )",
+        "a.b.5",
+    ]
+    .iter()
+    .enumerate()
+    {
+        inputs.push((format!("case {i}: {s:?}"), s.to_string()));
+    }
+    for (name, src) in &inputs {
+        let want = ast_text::of_source(src);
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), src.as_bytes().to_vec());
+        let files = run_stage(&lex_nex, &lex_syms, files);
+        let files = run_stage(&par_nex, &par_syms, files);
+        let got = String::from_utf8_lossy(files.get("ast.txt").expect("no ast.txt")).to_string();
+        if got != want {
+            let (mut wl, mut gl) = (want.lines(), got.lines());
+            let mut line = 1;
+            loop {
+                match (wl.next(), gl.next()) {
+                    (Some(a), Some(b)) if a == b => line += 1,
+                    (a, b) => {
+                        let cut = |s: Option<&str>| s.map(|s| s.chars().take(600).collect::<String>()).unwrap_or_default();
+                        let (a, b) = (cut(a), cut(b));
+                        let i = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+                        panic!("{name}: line {line} differs at column {i}\n rust: {}\n self: {}", &a[i.saturating_sub(60).min(a.len())..], &b[i.saturating_sub(60).min(b.len())..]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/// Assemble `asm` with selfhost/asm.lz80n in the emulator: (NEX or the
+/// asm.err text, T-states).
+fn selfhost_assemble(nex: &[u8], syms: &HashMap<String, u16>, asm: &str) -> (Result<Vec<u8>, String>, u64) {
+    let mut cpu = load_nex(nex).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::with_files(&[("in.asm", asm.as_bytes())]));
+    let end = syms["__main_end"];
+    let mut n = 0u64;
+    while cpu.pc != end {
+        if let Err(e) = cpu.tick() {
+            panic!("self-hosted assembler crashed: {e}");
+        }
+        n += 1;
+        assert!(n < 20_000_000_000, "self-hosted assembler did not finish");
+    }
+    let t = cpu.t_states;
+    let mut files = cpu.esx.unwrap().files;
+    if let Some(e) = files.remove("asm.err") {
+        return (Err(String::from_utf8_lossy(&e).to_string()), t);
+    }
+    (files.remove("t.nex").ok_or_else(|| "no t.nex written".to_string()), t)
+}
+
+fn selfhost_asm_check(names: &[&str]) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let asm_src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_asm", &asm_src).unwrap();
+    let dir = root.join("examples");
+    for name in names {
+        let path = dir.join(format!("{name}.lz80n"));
+        let src = std::fs::read_to_string(&path).unwrap();
+        let asm = crate::compile_main(&src, Some(&path), "t.nex", true, &dir, false).unwrap();
+        let want = crate::asm::assemble(&asm, &dir).unwrap().nex.unwrap().1;
+        let (got, t) = selfhost_assemble(&nex, &syms, &asm);
+        let got = got.unwrap_or_else(|e| panic!("{name}: self-hosted assembler: {e}"));
+        eprintln!("{name}: {} lines, {:.1} s at 28 MHz", asm.lines().count(), t as f64 / 28e6);
+        assert_eq!(got.len(), want.len(), "{name}: NEX size differs");
+        if let Some(i) = (0..want.len()).find(|&i| got[i] != want[i]) {
+            let a = i.saturating_sub(6);
+            let r = crate::asm::assemble(&asm, &dir).unwrap();
+            let mut near: Vec<(&String, &i64)> = r.symbols.iter().filter(|(_, v)| **v >= 0x8000 && **v <= 0x8000 + (i as i64 - 512)).collect();
+            near.sort_by_key(|x| *x.1);
+            panic!(
+                "{name}: NEX differs at offset {i} (${i:X}): self-hosted {:02X}, Rust {:02X}\n self {:02X?}\n rust {:02X?}\n after {:?}",
+                got[i], want[i], &got[a..i + 10], &want[a..i + 10], near.last()
+            );
+        }
+    }
+}
+
+/// selfhost/asm.lz80n makes the same NEX as the Rust assembler.
+#[test]
+fn selfhost_asm_matches_rust() {
+    selfhost_asm_check(&["hello", "strings"]);
+}
+
+/// Every example (slow: `cargo test --release selfhost_asm_all -- --ignored`).
+#[test]
+#[ignore]
+fn selfhost_asm_all_examples() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.unwrap().path();
+            (p.extension()? == "lz80n").then(|| p.file_stem().unwrap().to_string_lossy().to_string())
+        })
+        .collect();
+    names.sort();
+    selfhost_asm_check(&names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+}
+
+/// Every instruction form of the Rust encoder's test table, plus data
+/// directives and expressions, through both assemblers.
+#[test]
+fn selfhost_asm_all_instruction_forms() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let enc = std::fs::read_to_string(root.join("compiler/src/asm/encode.rs")).unwrap();
+    let mut body = String::from("    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nlab equ $8010\nlen equ 7\nstart:\n");
+    for line in enc.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("(\"") {
+            if let Some((insn, _)) = rest.split_once("\", &[") {
+                // jr/djnz targets are relative: tested below with a near label
+                if insn.starts_with("jr") || insn.starts_with("djnz") {
+                    continue;
+                }
+                body.push_str(&format!("    {}\n", insn.replace("\\\"", "\"")));
+            }
+        }
+    }
+    body.push_str(
+        r#"    db "text",0,'a','bc',"q\"\n"
+    db -1, 255, %1010, 0b11, 0x1F, 1Fh, 101b, 99d, 'A'+1, high $1234, low($1234), (lab >> 8) & $FF
+    dw lab, -2, $FFFF, lab - start, 2 * 3 + 4, 17 / 5, 17 % 5, 1 << 4 | 1, ~0 & $FF, !0, 3 > 2, 2 <= 1
+    dd 70000, -1
+    ds 5
+    ds 3, $AA
+    align 16
+.local: dw .local, start.local
+    ex (sp),iy
+    in f,(c)
+    bsra de,b
+    bsrf de,b
+    brlc de,b
+    mirror
+    mul
+    sll b
+    sli c
+    ld iyh,5
+    ld (ix-128),b
+    out (c),b
+    jr .local
+    jr nc,.local
+    djnz .local
+    jr $
+    MMU 1 n, 40
+    ORG $3FFE
+    db 1,2,3,4
+    SAVENEX OPEN "t.nex", start, $FDFD, 2
+    SAVENEX CORE 3,1,10
+    SAVENEX CFG 5, $1234, 1
+    SAVENEX AUTO
+    SAVENEX CLOSE
+"#,
+    );
+    let want = crate::asm::assemble(&body, &root).unwrap_or_else(|e| panic!("rust: {}\n{body}", e[0])).nex.unwrap().1;
+    let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_asm_forms", &src).unwrap();
+    let got = selfhost_assemble(&nex, &syms, &body).0.unwrap_or_else(|e| panic!("self-hosted: {e}"));
+    assert_eq!(got.len(), want.len());
+    if let Some(i) = (0..want.len()).find(|&i| got[i] != want[i]) {
+        panic!("differs at offset {i}: self {:02X?} rust {:02X?}", &got[i.saturating_sub(4)..i + 8], &want[i.saturating_sub(4)..i + 8]);
+    }
+}
+
+#[test]
+fn selfhost_asm_errors() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build("selfhost_asm_err", &src).unwrap();
+    for (asm, want) in [
+        ("    ORG $8000\n    ld a,nosuch\n", "2: undefined symbol `nosuch`"),
+        ("    ORG $8000\n    jr far\n    ds 200\nfar: nop\n", "2: jr/djnz target out of range"),
+        ("    ORG $8000\n    frobnicate a\n", "2: unknown instruction `frobnicate`"),
+        ("    ORG $8000\n    ld (hl),(hl)\n", "2: invalid instruction `(hl),(hl)`"),
+        ("x: nop\nx: nop\n", "2: label `x` defined twice"),
+        ("    ORG $8000\n    ld a,300\n", "2: value does not fit in a byte: `300`"),
+        ("    MMU 1 e, 28\n    ORG $3FFF\n    db 1,2\n", "3: data does not fit in an MMU slot"),
+        ("    ASSERT 1 > 2, \"too big\"\n", "1: too big"),
+    ] {
+        let (r, _) = selfhost_assemble(&nex, &syms, asm);
+        assert_eq!(r.err().as_deref().map(str::trim_end), Some(want), "{asm}");
+        assert!(crate::asm::assemble(asm, &root).is_err(), "the Rust assembler accepts {asm}");
+    }
+}
+
+/// The runtime files the self-hosted code generator copies from the SD card.
+fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
+    crate::selfhost_support_files()
+}
+
+struct SelfHost {
+    lex: (Vec<u8>, HashMap<String, u16>),
+    cg: (Vec<u8>, HashMap<String, u16>),
+    assets: (Vec<u8>, HashMap<String, u16>),
+}
+
+impl SelfHost {
+    fn new() -> SelfHost {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+        let cg_src = std::fs::read_to_string(root.join("selfhost/codegen.lz80n")).unwrap();
+        let as_src = std::fs::read_to_string(root.join("selfhost/assets.lz80n")).unwrap();
+        SelfHost {
+            lex: build("sh_lex", &lexer_src).unwrap(),
+            cg: build_in(&root.join("selfhost"), &cg_src),
+            assets: build_in(&root.join("selfhost"), &as_src),
+        }
+    }
+
+    /// Lexer, code generator and (if it lists assets) the asset stage on
+    /// an SD card with these files: the assembly and the SD card after them.
+    fn compile_sd(&self, sources: &[(&str, &[u8])]) -> Result<(String, std::collections::HashMap<String, Vec<u8>>), String> {
+        let mut files = std::collections::HashMap::new();
+        for (n, d) in sources {
+            files.insert(n.to_string(), d.to_vec());
+        }
+        for (n, d) in selfhost_runtime_files() {
+            files.insert(n, d);
+        }
+        let mut files = run_stage(&self.lex.0, &self.lex.1, files);
+        if files.contains_key("assets.on") {
+            files = run_stage(&self.assets.0, &self.assets.1, files);
+            if let Some(e) = files.get("assets.err") {
+                return Err(String::from_utf8_lossy(e).trim_end().to_string());
+            }
+        }
+        let files = run_stage(&self.cg.0, &self.cg.1, files);
+        if let Some(e) = files.get("codegen.err") {
+            return Err(String::from_utf8_lossy(e).trim_end().to_string());
+        }
+        let asm = String::from_utf8_lossy(files.get("out.asm").expect("no out.asm")).to_string();
+        Ok((asm, files))
+    }
+
+    /// The assembly the self-hosted compiler makes for `src`, or its error.
+    fn compile(&self, src: &str) -> Result<String, String> {
+        self.compile_files(&[("in.lz80n", src.as_bytes())])
+    }
+
+    /// Like compile, with more source files on the SD card (includes).
+    fn compile_files(&self, sources: &[(&str, &[u8])]) -> Result<String, String> {
+        let mut files = std::collections::HashMap::new();
+        for (n, d) in sources {
+            files.insert(n.to_string(), d.to_vec());
+        }
+        for (n, d) in selfhost_runtime_files() {
+            files.insert(n, d);
+        }
+        let files = run_stage(&self.lex.0, &self.lex.1, files);
+        let files = run_stage(&self.cg.0, &self.cg.1, files);
+        if let Some(e) = files.get("codegen.err") {
+            return Err(String::from_utf8_lossy(e).trim_end().to_string());
+        }
+        Ok(String::from_utf8_lossy(files.get("out.asm").expect("no out.asm")).to_string())
+    }
+}
+
+/// Run an assembled program in the emulator: what it prints.
+fn run_asm(asm: &str) -> String {
+    run_asm_cpu(asm).0
+}
+
+/// Run an assembled program in the emulator: what it prints, and the machine.
+fn run_asm_cpu(asm: &str) -> (String, Cpu) {
+    let out = crate::asm::assemble(asm, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
+    let syms = out.symbols16();
+    let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::default());
+    let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+    let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+    let (isr, mut prev) = (syms.get("__isr").copied().unwrap_or(0xFFFF), 0u16);
+    let mut s = String::new();
+    for _ in 0..200_000_000u64 {
+        if cpu.pc == end {
+            return (s, cpu);
+        }
+        let from_isr = prev >= isr && prev < isr.saturating_add(512);
+        if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+            s.push(cpu.a as char);
+        } else if !from_isr && cpu.pc == newline {
+            s.push('\n');
+        }
+        prev = cpu.pc;
+        cpu.tick().unwrap_or_else(|e| panic!("emulator: {e}\noutput so far:\n{s}"));
+    }
+    panic!("program did not terminate; output so far:\n{s}");
+}
+
+/// Programs compiled by selfhost/codegen.lz80n print what the same programs
+/// compiled by the Rust compiler print.
+#[test]
+fn selfhost_codegen_runs_like_rust() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"print("Hi", 42, true, false, 300, 70000 - 4465)"#,
+        r#"
+byte a = 200
+byte b = 100
+word w = a + b
+byte c = a + b
+print(w, c, a * 2, a / 3, a % 7, a - b, b - a)
+sbyte s = -5
+sword t = -1000
+print(s, t, s * 3, t / 7, t % 7, s - 120, -s, 0 - t)
+print(a & 0x0F, a | 1, a ~ 0xFF, ~a, a << 2, a >> 3, s >> 1, t >> 2, w << 7)
+word big = 65535
+print(big + 1, big * big, word(s), sword(big), byte(t), sbyte(200), sword(s))
+"#,
+        r#"
+const K = 3 * 4
+const NEG = -7
+byte x = K
+print(K, NEG, x + NEG, K << 2)
+var v = 1000
+var u = 7
+print(v, u)
+"#,
+        r#"
+byte a = 5
+word w = 300
+sbyte s = -3
+print(a < 6, a <= 5, a > 5, a >= 6, a == 5, a ~= 5, w > a, s < a, s < 0, w == 300)
+print(a > 3 and w < 1000, a > 9 or s < 0, not (a == 5), not true)
+bool b = a > 4
+print(b, not b)
+"#,
+        r#"
+byte n = 7
+if n > 5 then
+    print("big")
+elseif n > 2 then
+    print("mid")
+else
+    print("small")
+end
+for i = 1, 5 do write(i, " ") end
+print("")
+for i = 10, 0, -3 do write(i, " ") end
+print("")
+for i = 250, 255 do write(i, " ") end
+print("")
+for i = 0, 20, 7 do write(i, " ") end
+print("")
+for i = -3, 3 do write(i, " ") end
+print("")
+word k = 0
+while true do
+    k += 1
+    if k == 4 then break end
+end
+print(k)
+byte total = 0
+for i = 1, 10 do
+    if i == 8 then break end
+    total += i
+end
+print(total)
+"#,
+        r#"
+function add(byte x, word y) -> word
+    return x + y
+end
+function sq(byte x) -> word
+    return x * x
+end
+function neg(sword v) -> sword
+    return -v
+end
+function even(byte v) -> bool
+    return v % 2 == 0
+end
+function hello()
+    print("hello")
+end
+hello()
+print(add(5, 1000), sq(200), neg(-300), neg(7), even(4), even(7), add(byte(sq(3)), sq(byte(sq(2)))))
+"#,
+        r#"
+byte t[5]
+word ws[] = {100, 200, 300}
+byte pr[] = {2, 3, 5, 7, 11}
+for i = 0, 4 do t[i] = i * i end
+t[2] += 10
+print(t[0], t[1], t[2], t[3], t[4], ws[0] + ws[2], pr[4], ws[1])
+word sum = 0
+for i = 0, 4 do sum += pr[i] * t[i] end
+print(sum)
+memory[0xC000] = 77
+print(memory[0xC000])
+function fill(byte v)
+    byte loc[3]
+    for i = 0, 2 do loc[i] = v + i end
+    print(loc[0], loc[1], loc[2])
+end
+fill(9)
+"#,
+        r#"
+word f0 = 0
+word f1 = 1
+for i = 1, 20 do
+    word f2 = f0 + f1
+    f0 = f1
+    f1 = f2
+end
+print(f1)
+function gcd(word a, word b) -> word
+    while b ~= 0 do
+        word t = a % b
+        a = b
+        b = t
+    end
+    return a
+end
+print(gcd(1071, 462), gcd(17, 5))
+word primes = 0
+for n = 2, 200 do
+    bool p = true
+    for d = 2, 14 do
+        if d < n and n % d == 0 then
+            p = false
+            break
+        end
+    end
+    if p then primes += 1 end
+end
+print(primes)
+"#,
+        r#"
+byte r
+asm
+    ld a,42
+    ld (g_r),a
+end
+print(r)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let want = run(&format!("sh_cg_{i}"), src).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let got = run_asm(&asm);
+        assert_eq!(got, want, "program {i}:\n{src}");
+    }
+}
+
+/// Strings, long, far arrays, addr(), the file module, includes and code
+/// banking through the self-hosted compiler.
+#[test]
+fn selfhost_codegen_strings_long_far_files() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+string a = "Hello"
+string b = a .. ", " .. "Next" .. "!"
+print(b, len(b), asc(b, 1), asc(b, 99))
+string c = chr(65) .. chr(66) .. 7 .. true .. -3
+print(c, str(1234) .. "x", c == "AB7true-3", c ~= b, "abc" < "abd", "b" > "abc", "ab" <= "ab", "" < "a")
+string arr[] = {"zero", "one", "two"}
+arr[1] = arr[1] .. "!"
+print(arr[0], arr[1], arr[2], len(arr[2]))
+function shout(string s, byte n) -> byte
+    s = s .. "?"
+    return len(s) + n
+end
+string m = "hm"
+print(shout(m, 1), m)
+string w = ""
+for i = 0, 9 do w = w .. i end
+print(w)
+"#,
+        r#"
+long x = 100000
+long y = -70000
+print(x + y, x - y, x * 3, y / 7, y % 7, -x, x / 3 * 3, x > y, y < 0, x == 100000)
+long big = 0x7FFFFFFF
+print(big, big + 1, x << 4, y >> 3, x & 0xFFFF, x | 1, x ~ 255)
+word w = 65535
+long z = w + 1
+print(z, long(w) * long(w), word(z + 5), byte(x), sword(y))
+function sq(long v) -> long
+    return v * v
+end
+print(sq(46340), sq(-3))
+long acc = 0
+for i = 1, 1000 do acc += i * i end
+print(acc)
+"#,
+        r#"
+far byte big[20000]
+far word ws[5000]
+for i = 0, 19999, 997 do big[i] = byte(i % 251) end
+ws[4999] = 12345
+ws[0] = ws[4999] + 1
+word s = 0
+for i = 0, 19999, 997 do s += big[i] end
+print(s, ws[0], ws[4999], big[1])
+byte buf[4]
+buf[2] = 9
+print(addr(buf) + 2 == addr(buf[2]), memory[addr(buf) + 2])
+"#,
+        r#"
+byte b[8]
+byte h = file_open("t.txt", FILE_WRITE)
+for i = 0, 7 do b[i] = 'a' + i end
+print(file_write(h, addr(b), 8))
+file_close(h)
+h = file_open("t.txt", FILE_READ)
+print(file_size(h))
+word c = file_getc(h)
+string got = ""
+while c ~= FILE_EOF do
+    got = got .. chr(byte(c))
+    c = file_getc(h)
+end
+file_close(h)
+print(got, file_delete("t.txt"), file_open("t.txt", FILE_READ) == FILE_ERROR)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, _) = run_sd(&format!("sh_cg2_{i}"), src, &[]);
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let got = run_asm(&asm);
+        assert_eq!(got, want, "program {i}:\n{src}");
+    }
+
+    // include (each file once)
+    let main = "include \"lib.lz80n\"\ninclude \"lib.lz80n\"\nprint(twice(21), K)\n";
+    let lib = "const K = 5\nfunction twice(byte x) -> word\n    return x * 2\nend\n";
+    let asm = sh.compile_files(&[("in.lz80n", main.as_bytes()), ("lib.lz80n", lib.as_bytes())]).unwrap();
+    assert_eq!(run_asm(&asm), "42 5\n");
+
+    // code banking: more code than the resident area holds
+    let mut big = String::new();
+    for f in 0..50 {
+        big.push_str(&format!("function f{f}(word x) -> word\n    word r = x\n"));
+        for k in 0..10 {
+            big.push_str(&format!("    r = r * 3 + {k} - (r >> 2) + (r & {f})\n"));
+        }
+        big.push_str("    return r\nend\n");
+    }
+    big.push_str("word t = 0\n");
+    for f in 0..50 {
+        big.push_str(&format!("t = t + f{f}({f})\n"));
+    }
+    big.push_str("print(t)\n");
+    let want = run("sh_cg2_big", &big).unwrap();
+    let asm = sh.compile(&big).unwrap_or_else(|e| panic!("big: {e}"));
+    assert!(asm.contains("MMU 2 e"), "no banked code");
+    assert_eq!(run_asm(&asm), want);
+}
+
+/// Run a NEX made from `asm` with SD card `files`; the files afterwards.
+fn run_asm_files(asm: &str, files: std::collections::HashMap<String, Vec<u8>>) -> std::collections::HashMap<String, Vec<u8>> {
+    let out = crate::asm::assemble(asm, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembler: {}", e[0]));
+    let syms = out.symbols16();
+    run_stage(&out.nex.unwrap().1, &syms, files)
+}
+
+/// The self-hosted compiler compiles the self-hosted lexer; that lexer
+/// makes the same tokens as the lexer compiled by lz80nc.
+#[test]
+fn selfhost_compiles_lexer() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let sh = SelfHost::new();
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let asm = sh.compile(&lexer_src).unwrap_or_else(|e| panic!("self-hosted compiler: {e}"));
+    for input in ["examples/hello.lz80n", "examples/shooter.lz80n", "selfhost/lexer.lz80n"] {
+        let src = std::fs::read(root.join(input)).unwrap();
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), src.clone());
+        let want = run_stage(&sh.lex.0, &sh.lex.1, files.clone()).remove("tokens.bin").unwrap();
+        let got = run_asm_files(&asm, files).remove("tokens.bin").expect("no tokens.bin");
+        assert_eq!(got.len(), want.len(), "{input}: token stream length");
+        assert!(got == want, "{input}: token streams differ");
+    }
+}
+
+/// The self-hosted compiler compiles the self-hosted parser and assembler;
+/// they give the same results as their lz80nc-compiled versions.
+#[test]
+fn selfhost_compiles_parser_and_assembler() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let sh = SelfHost::new();
+    let rd = |p: &str| std::fs::read(root.join(p)).unwrap();
+    // parser
+    let asm = sh
+        .compile_files(&[("in.lz80n", &rd("selfhost/parser.lz80n")), ("parser_core.lz80n", &rd("selfhost/parser_core.lz80n"))])
+        .unwrap_or_else(|e| panic!("self-hosted compiler (parser): {e}"));
+    let (par_nex, par_syms) = build_in(&root.join("selfhost"), &String::from_utf8(rd("selfhost/parser.lz80n")).unwrap());
+    for input in ["examples/hello.lz80n", "examples/shooter.lz80n"] {
+        let mut files = std::collections::HashMap::new();
+        files.insert("in.lz80n".to_string(), rd(input));
+        let toks = run_stage(&sh.lex.0, &sh.lex.1, files);
+        let want = run_stage(&par_nex, &par_syms, toks.clone()).remove("ast.txt").unwrap();
+        let got = run_asm_files(&asm, toks).remove("ast.txt").expect("no ast.txt");
+        assert!(got == want, "{input}: syntax trees differ");
+    }
+    // assembler
+    let asm_src = String::from_utf8(rd("selfhost/asm.lz80n")).unwrap();
+    let asm = sh.compile(&asm_src).unwrap_or_else(|e| panic!("self-hosted compiler (asm): {e}"));
+    let dir = root.join("examples");
+    let path = dir.join("hello.lz80n");
+    let prog = crate::compile_main(&std::fs::read_to_string(&path).unwrap(), Some(&path), "t.nex", true, &dir, false).unwrap();
+    let want = crate::asm::assemble(&prog, &dir).unwrap().nex.unwrap().1;
+    let mut files = std::collections::HashMap::new();
+    files.insert("in.asm".to_string(), prog.into_bytes());
+    let got = run_asm_files(&asm, files);
+    assert!(got.get("asm.err").is_none(), "{}", String::from_utf8_lossy(&got["asm.err"]));
+    assert!(got["t.nex"] == want, "hello: NEX differs");
+}
+
+/// Bootstrap: the code generator compiled by lz80nc (stage 1) compiles its
+/// own source (stage 2). Stage 2 must make the same assembly as stage 1,
+/// for test programs and for its own source (a fixed point).
+#[test]
+fn selfhost_bootstrap() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let rd = |p: &str| std::fs::read(root.join(p)).unwrap();
+    let mut sh = SelfHost::new();
+    let sources: Vec<(&str, Vec<u8>)> = vec![("in.lz80n", rd("selfhost/codegen.lz80n")), ("parser_core.lz80n", rd("selfhost/parser_core.lz80n")), ("asset_info.lz80n", rd("selfhost/asset_info.lz80n"))];
+    let as_refs = |v: &Vec<(&'static str, Vec<u8>)>| v.iter().map(|(n, d)| (*n, d.clone())).collect::<Vec<_>>();
+    let srcs = as_refs(&sources);
+    let refs: Vec<(&str, &[u8])> = srcs.iter().map(|(n, d)| (*n, d.as_slice())).collect();
+    let t = std::time::Instant::now();
+    let asm2 = sh.compile_files(&refs).unwrap_or_else(|e| panic!("stage 1 compiling codegen.lz80n: {e}"));
+    eprintln!("stage 1 -> stage 2: {} lines of assembly, {:.1} s", asm2.lines().count(), t.elapsed().as_secs_f64());
+    let out = crate::asm::assemble(&asm2, std::path::Path::new(".")).unwrap_or_else(|e| panic!("assembling stage 2: {}", e[0]));
+    let stage1 = std::mem::replace(&mut sh.cg, (out.nex.clone().unwrap().1, out.symbols16()));
+    // test programs: same assembly from both stages
+    let progs = [
+        "print(\"Hi\", 42)",
+        "function f(byte n) -> word\n    if n < 2 then return 1 end\n    return n * f(n - 1)\nend\nstring s = \"x\" .. f(5)\nlong l = 100000 * 3\nprint(s, l)\n",
+    ];
+    for p in progs {
+        let a2 = sh.compile(p).unwrap();
+        let sh1 = SelfHost { lex: sh.lex.clone(), cg: stage1.clone(), assets: sh.assets.clone() };
+        let a1 = sh1.compile(p).unwrap();
+        assert!(a1 == a2, "stage 1 and stage 2 differ for:\n{p}");
+    }
+    // the fixed point
+    let t = std::time::Instant::now();
+    let asm3 = sh.compile_files(&refs).unwrap_or_else(|e| panic!("stage 2 compiling codegen.lz80n: {e}"));
+    eprintln!("stage 2 -> stage 3: {:.1} s", t.elapsed().as_secs_f64());
+    assert!(asm3 == asm2, "stage 2 compiles itself differently from stage 1");
+}
+
+
+/// lz80nc --export-selfhost, then the whole chain on the virtual SD card:
+/// lexer.nex starts codegen.nex, which starts asm.nex (M_EXECCMD
+/// `nexload`), which writes out.nex; out.nex prints what it should.
+#[test]
+fn selfhost_export_and_chain() {
+    let dir = std::env::temp_dir().join("lz80n_export_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let built = crate::export_selfhost(&dir).unwrap();
+    let mut base = crate::emu::EsxFs::default();
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        base.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
+    }
+    // each stage starts the next one (M_EXECCMD "nexload ...")
+    let chain = |mut fs: crate::emu::EsxFs| {
+        let mut next = "lexer.nex".to_string();
+        let mut stages = vec![];
+        loop {
+            let (_, nex, syms) = built.iter().find(|b| b.0 == next).unwrap_or_else(|| panic!("no {next}"));
+            stages.push(next.clone());
+            let mut cpu = load_nex(nex).unwrap();
+            fs.exec.clear();
+            cpu.esx = Some(fs);
+            let end = syms["__main_end"] as u16;
+            let mut n = 0u64;
+            while cpu.pc != end {
+                cpu.tick().unwrap();
+                n += 1;
+                assert!(n < 4_000_000_000, "{next} did not finish");
+                if !cpu.esx.as_ref().unwrap().exec.is_empty() {
+                    break;
+                }
+            }
+            fs = cpu.esx.unwrap();
+            match fs.exec.first().and_then(|c| c.strip_prefix("nexload ")) {
+                Some(n) => next = n.to_string(),
+                None => break,
+            }
+        }
+        for err in ["codegen.err", "assets.err", "asm.err"] {
+            assert!(fs.files.get(err).is_none(), "{}", String::from_utf8_lossy(&fs.files[err]));
+        }
+        (stages, fs)
+    };
+    let prog = "function sq(word x) -> word\n    return x * x\nend\nstring s = \"sq\" .. sq(12)\nprint(s, 1000000 / 3)\n";
+    let mut fs = base.clone();
+    fs.files.insert("in.lz80n".into(), prog.as_bytes().to_vec());
+    let (stages, fs) = chain(fs);
+    assert_eq!(stages, ["lexer.nex", "codegen.nex", "asm.nex"]);
+    let asm = String::from_utf8(fs.files["out.asm"].clone()).unwrap();
+    let rust = crate::asm::assemble(&asm, &dir).unwrap();
+    assert!(fs.files["out.nex"] == rust.nex.as_ref().unwrap().1, "out.nex differs from the Rust assembler's");
+    let want = run("sh_chain", prog).unwrap();
+    assert_eq!(run_asm(&asm), want);
+
+    // with assets: lexer -> codegen -> assets -> asm; out.nex run as it is
+    let ex = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/assets");
+    let prog = "asset sheet = \"assets/sprites.png\"\nasset pic = image(\"assets/badge.png\")\nasset zap = \"assets/zap.wav\"\nsprite_load(0, sheet)\nsprite[0].show(1)\nlayer2_visible(true)\ndraw_image(pic, 10, 20)\nsample_play(zap)\nprint(sprite[0].pattern, image_width(pic), sample_playing())\n";
+    let mut fs = base.clone();
+    fs.files.insert("in.lz80n".into(), prog.as_bytes().to_vec());
+    for f in ["sprites.png", "badge.png", "zap.wav"] {
+        fs.files.insert(format!("assets/{f}"), std::fs::read(ex.join(f)).unwrap());
+    }
+    let (stages, fs) = chain(fs);
+    assert_eq!(stages, ["lexer.nex", "assets.nex", "codegen.nex", "asm.nex"]);
+    let (want, rcpu) = run_with("sh_chain_assets", prog, |_| {}).unwrap();
+    let mut cpu = load_nex(&fs.files["out.nex"]).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::default());
+    // the symbols of the program, from the Rust assembler on the same files
+    let adir = std::env::temp_dir().join("lz80n_export_assets");
+    let _ = std::fs::remove_dir_all(&adir);
+    for (n, d) in &fs.files {
+        let p = adir.join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, d).unwrap();
+    }
+    let asm = String::from_utf8(fs.files["out.asm"].clone()).unwrap();
+    let syms = crate::asm::assemble(&asm, &adir).unwrap().symbols16();
+    let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+    let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+    // (an interrupt returning to rt_putc / rt_newline is not a new call)
+    let (isr, mut prev) = (syms["__isr"], 0u16);
+    let mut got = String::new();
+    while cpu.pc != end {
+        let from_isr = prev >= isr && prev < isr + 512;
+        if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+            got.push(cpu.a as char);
+        } else if !from_isr && cpu.pc == newline {
+            got.push('\n');
+        }
+        prev = cpu.pc;
+        cpu.tick().unwrap();
+    }
+    assert_eq!(got, want);
+    assert_eq!(rcpu.patterns, cpu.patterns, "patterns");
+    for page in 16u8..28 {
+        assert_eq!(rcpu.pages.get(&page), cpu.pages.get(&page), "Layer 2 page {page}");
+    }
+}
+
+/// Layer 2 graphics, palettes and hardware registers through the
+/// self-hosted compiler: the same pictures as with lz80nc.
+#[test]
+fn selfhost_codegen_layer2() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+layer2_visible(true)
+layer2_clear(rgb(0, 0, 1))
+for i = 0, 255 do plot(i, i % 192, byte(i)) end
+hline(10, 100, 200, rgb(7, 7, 0))
+vline(5, 0, 192, 0x1C)
+line(0, 0, 255, 191, 0xE0)
+line(255, 0, 0, 191, 0x03)
+rect(20, 20, 60, 40, 0xFF)
+fill_rect(100, 120, 50, 30, 0x92)
+circle(128, 96, 50, 0x1F)
+fill_circle(60, 150, 20, 0xE3)
+ellipse(180, 60, 40, 20, 0x6D)
+fill_ellipse(200, 150, 30, 15, 0x49)
+triangle(10, 180, 60, 130, 110, 185, 0xFC)
+fill_triangle(150, 10, 240, 40, 170, 90, 0x1C)
+print(point(10, 100), point(0, 0), point(128, 46), rgb(7, 7, 3), TRANSPARENT)
+print(layer2_width(), layer2_height())
+"#,
+        r#"
+layer2_mode(L2_320)
+layer2_clear(0)
+for y = 0, 255, 17 do hline(0, byte(y), 320, byte(y)) end
+for x = 0, 319, 13 do plot(x, 128, 0xFF) end
+circle(160, 128, 100, 0xE0)
+print(layer2_width(), layer2_height(), point(300, 128))
+"#,
+        r#"
+palette(PAL_LAYER2, 5, rgb(1, 2, 3))
+palette9(PAL_TEXT, 3, rgb9(7, 0, 7))
+nextreg[0x4A] = 0x1C
+byte r = 0x4A
+print(nextreg[r], nextreg[0x4A] + 1)
+border(3)
+copper_begin()
+copper_wait(96)
+copper_move(0x4A, 0xE0)
+copper_start()
+port[0x123B] = 2
+print(abs(-5), abs(7), min(3, 9), max(3, 9), min(-2, 5), max(word(70000 - 4465), 7))
+print(frames() < 1000, kempston() & 0, key(KEY_A), random(1))
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_l2_{i}"), src, |_| {}).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let (got, scpu) = run_asm_cpu(&asm);
+        assert_eq!(got, want, "program {i}: output\n{src}");
+        // the Layer 2 buffers (banks 8..17: pages 16..35)
+        for page in 16u8..36 {
+            let a = rcpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            let b = scpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            if let Some(k) = (0..8192).find(|&k| a[k] != b[k]) {
+                panic!("program {i}: Layer 2 page {page} differs at {k}: lz80nc {:02X}, self-hosted {:02X}", a[k], b[k]);
+            }
+        }
+        assert_eq!(rcpu.palettes, scpu.palettes, "program {i}: palettes");
+        assert_eq!(rcpu.nextreg[0x4A], scpu.nextreg[0x4A], "program {i}: NextReg $4A");
+        assert_eq!(rcpu.copper, scpu.copper, "program {i}: copper list");
+        assert_eq!(rcpu.border, scpu.border, "program {i}: border");
+    }
+}
+
+/// Structs and classes (fields, defaults, methods, `self`, inheritance,
+/// `super`, struct arrays and values) and sprites compiled by the
+/// self-hosted compiler: the same output and sprite attributes as with lz80nc.
+#[test]
+fn selfhost_codegen_structs() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+struct Point
+    sword x
+    sword y
+end
+struct Rect
+    Point a
+    Point b
+    byte tag = 7
+    string name
+    word w[3]
+end
+Point p = {3, -4}
+Point q
+q = p
+q.x += 10
+print(p.x, p.y, q.x, q.y)
+Rect r
+print(r.tag, len(r.name))
+r = {{1, 2}, {30, 40}, 9, "box", {5, 6, 7}}
+print(r.a.x, r.b.y, r.tag, r.name, r.w[0] + r.w[1] + r.w[2])
+r.b = p
+r.name = r.name .. "!"
+print(r.b.x, r.b.y, r.name)
+Point pts[4]
+for i = 0, 3 do
+    pts[i].x = sword(i) * 10
+    pts[i].y = -sword(i)
+end
+sword sum = 0
+for i = 0, 3 do sum += pts[i].x + pts[i].y end
+print(sum, pts[2].x)
+p = {p.y, p.x}
+print(p.x, p.y)
+function swap(Point a) -> Point
+    return {a.y, a.x}
+end
+function area(Rect x) -> word
+    return word(x.b.x - x.a.x) * word(x.b.y - x.a.y)
+end
+Point s = swap(q)
+print(s.x, s.y, area(r), area({{0, 0}, {4, 5}}))
+function name_of(Rect x) -> string
+    return "R:" .. x.name
+end
+print(name_of(r), len(name_of(r)))
+"#,
+        r#"
+class Counter
+    word n = 100
+    byte step = 1
+    function bump()
+        self.n += self.step
+    end
+    function get() -> word
+        return self.n
+    end
+    function add(Counter other) -> word
+        return self.n + other.n
+    end
+end
+Counter c
+c.bump()
+c.bump()
+print(c.get(), c.n)
+Counter d = Counter(5, 2)
+d.bump()
+print(d.n, c.add(d), d.add(Counter(1, 1)))
+Counter many[3]
+many[1].bump()
+for i = 0, 2 do write(many[i].get(), " ") end
+print("")
+class Ball
+    word x
+    word y
+    sbyte dx = 1
+    function init(word px, word py)
+        self.x = px
+        self.y = py
+        self.dx = -1
+    end
+    function move()
+        self.x = word(sword(self.x) + self.dx)
+    end
+    function describe() -> string
+        return "ball " .. self.x .. "," .. self.y
+    end
+end
+Ball b = Ball(10, 20)
+b.move()
+print(b.describe(), b.dx)
+class Bouncy extends Ball
+    byte bounces
+    function move()
+        super.move()
+        self.bounces += 1
+    end
+    function fact(byte n) -> word
+        if n <= 1 then return 1 end
+        return word(n) * self.fact(n - 1)
+    end
+end
+Bouncy y = Bouncy(50, 60)
+y.move()
+y.move()
+Ball.move(y)
+print(y.x, y.y, y.bounces, y.describe(), y.fact(6))
+Ball copy = y
+print(copy.x, copy.dx)
+"#,
+        r#"
+for i = 0, 3 do
+    sprite[i].position(word(i) * 20 + 32, 100)
+    sprite[i].show(i)
+end
+sprite[1].mirror_x = true
+sprite[1].update()
+sprite[2].hide()
+sprite[3].scale = 1
+sprite[3].update()
+print(sprite[0].id, sprite[3].id, sprite[0].x, sprite[1].x, sprite[0].overlaps(sprite[1]), sprite[3].visible)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_st_{i}"), src, |_| {}).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let (got, scpu) = run_asm_cpu(&asm);
+        assert_eq!(got, want, "program {i}: output\n{src}");
+        assert_eq!(rcpu.sprite_attr, scpu.sprite_attr, "program {i}: sprite attributes");
+    }
+}
+
+
+
+
+/// Which examples the self-hosted compiler compiles (and assembles); a
+/// report, not a check: `cargo test --release selfhost_codegen_examples -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn selfhost_codegen_examples() {
+    let sh = SelfHost::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    let mut names: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "lz80n"))
+        .collect();
+    names.sort();
+    // the assets and included files of the examples on the SD card
+    let mut extra: Vec<(String, Vec<u8>)> = vec![];
+    for sub in ["assets", "lib"] {
+        for e in std::fs::read_dir(root.join(sub)).unwrap() {
+            let p = e.unwrap().path();
+            if p.metadata().unwrap().len() < 200_000 {
+                extra.push((format!("{sub}/{}", p.file_name().unwrap().to_string_lossy()), std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let dir = std::env::temp_dir().join("lz80n_sh_examples");
+    for p in names {
+        let src = std::fs::read_to_string(&p).unwrap();
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        let mut srcs: Vec<(&str, &[u8])> = vec![("in.lz80n", src.as_bytes())];
+        for (n, d) in &extra {
+            srcs.push((n, d));
+        }
+        match sh.compile_sd(&srcs) {
+            Ok((asm, files)) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                for (n, d) in &files {
+                    let p = dir.join(n);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(p, d).unwrap();
+                }
+                match crate::asm::assemble(&asm, &dir) {
+                    Ok(_) => eprintln!("EXAMPLE ok {name}"),
+                    Err(e) => eprintln!("EXAMPLE asm-error {name}: {}", e[0]),
+                }
+            }
+            Err(e) => eprintln!("EXAMPLE skip {name}: {e}"),
+        }
+    }
+}
+
+/// A PNG with uncompressed (stored) deflate blocks, made by hand.
+fn stored_png(w: u32, h: u32, ctype: u8, depth: u8, raw: &[u8]) -> Vec<u8> {
+    fn crc32(d: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for &b in d {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, t: &[u8], body: &[u8]) {
+        out.extend((body.len() as u32).to_be_bytes());
+        let mut c = t.to_vec();
+        c.extend(body);
+        out.extend(&c);
+        out.extend(crc32(&c).to_be_bytes());
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(100).collect();
+    for (i, b) in blocks.iter().enumerate() {
+        z.push((i + 1 == blocks.len()) as u8);
+        z.extend((b.len() as u16).to_le_bytes());
+        z.extend((!(b.len() as u16)).to_le_bytes());
+        z.extend(*b);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in raw {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend((b << 16 | a).to_be_bytes());
+    let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend(h.to_be_bytes());
+    ihdr.extend([depth, ctype, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    // the image data in two IDAT chunks
+    let half = z.len() / 2;
+    chunk(&mut out, b"IDAT", &z[..half]);
+    chunk(&mut out, b"IDAT", &z[half..]);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// PNG files of many kinds, made with the png crate.
+fn test_pngs() -> Vec<(String, Vec<u8>)> {
+    let mut v = vec![];
+    let mk = |w: u32, h: u32, color: png::ColorType, depth: png::BitDepth, data: &[u8], pal: Option<(&[u8], &[u8])>, trns: Option<&[u8]>, comp: png::Compression, filt: png::FilterType| {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(color);
+            enc.set_depth(depth);
+            enc.set_compression(comp);
+            enc.set_filter(filt);
+            if let Some((p, t)) = pal {
+                enc.set_palette(p.to_vec());
+                if !t.is_empty() {
+                    enc.set_trns(t.to_vec());
+                }
+            }
+            if let Some(t) = trns {
+                enc.set_trns(t.to_vec());
+            }
+            let mut wr = enc.write_header().unwrap();
+            wr.write_image_data(data).unwrap();
+        }
+        out
+    };
+    let mut seed = 12345u32;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        (seed >> 16) as u8
+    };
+    use png::{BitDepth as D, ColorType as C, Compression as Z, FilterType as F};
+    let (w, h) = (32u32, 16u32);
+    let rgba: Vec<u8> = (0..w * h * 4).map(|i| if i % 4 == 3 { if i % 7 == 0 { 0 } else { 255 } } else { rnd() }).collect();
+    let rgb: Vec<u8> = (0..w * h * 3).map(|_| rnd()).collect();
+    let rgb16: Vec<u8> = (0..w * h * 6).map(|_| rnd()).collect();
+    let rgba16: Vec<u8> = (0..w * h * 8).map(|_| rnd()).collect();
+    let ga: Vec<u8> = (0..w * h * 2).map(|_| rnd()).collect();
+    let gray: Vec<u8> = (0..w * h).map(|i| (i * 3) as u8).collect();
+    let smooth: Vec<u8> = (0..w * h * 3).map(|i| (i / 40) as u8).collect();
+    for (k, (filt, comp)) in [(F::NoFilter, Z::Fast), (F::Sub, Z::Best), (F::Up, Z::Default), (F::Avg, Z::Best), (F::Paeth, Z::Fast)].into_iter().enumerate() {
+        v.push((format!("rgba{k}.png"), mk(w, h, C::Rgba, D::Eight, &rgba, None, None, comp, filt)));
+        v.push((format!("smooth{k}.png"), mk(w, h, C::Rgb, D::Eight, &smooth, None, None, comp, filt)));
+    }
+    v.push(("rgb.png".into(), mk(w, h, C::Rgb, D::Eight, &rgb, None, Some(&[0, rgb[0], 0, rgb[1], 0, rgb[2]]), Z::Default, F::Paeth)));
+    v.push(("rgb16.png".into(), mk(w, h, C::Rgb, D::Sixteen, &rgb16, None, None, Z::Default, F::Avg)));
+    v.push(("rgba16.png".into(), mk(w, h, C::Rgba, D::Sixteen, &rgba16, None, None, Z::Best, F::Up)));
+    v.push(("ga.png".into(), mk(w, h, C::GrayscaleAlpha, D::Eight, &ga, None, None, Z::Default, F::Sub)));
+    v.push(("gray.png".into(), mk(w, h, C::Grayscale, D::Eight, &gray, None, Some(&[0, 9]), Z::Default, F::Paeth)));
+    for (d, bits) in [(D::One, 1u32), (D::Two, 2), (D::Four, 4)] {
+        let n = (w * bits).div_ceil(8) * h;
+        let data: Vec<u8> = (0..n).map(|_| rnd()).collect();
+        v.push((format!("gray{bits}.png"), mk(w, h, C::Grayscale, d, &data, None, None, Z::Default, F::Up)));
+        let pal: Vec<u8> = (0..(3 << bits)).map(|_| rnd()).collect();
+        let trns: Vec<u8> = (0..(1u32 << bits).min(3)).map(|i| (i * 100) as u8).collect();
+        v.push((format!("pal{bits}.png"), mk(w, h, C::Indexed, d, &data, Some((&pal, &trns)), None, Z::Fast, F::NoFilter)));
+    }
+    let idx: Vec<u8> = (0..w * h).map(|_| rnd()).collect();
+    let pal: Vec<u8> = (0..768).map(|_| rnd()).collect();
+    v.push(("pal8.png".into(), mk(w, h, C::Indexed, D::Eight, &idx, Some((&pal, &[])), None, Z::Best, F::NoFilter)));
+    // a stored (uncompressed) deflate stream
+    let mut raw = vec![];
+    for y in 0..h {
+        raw.push((y % 5) as u8);
+        raw.extend(&rgb[(y * w * 3) as usize..((y + 1) * w * 3) as usize]);
+    }
+    v.push(("stored.png".into(), stored_png(w, h, 2, 8, &raw)));
+    v
+}
+
+/// The asset stage (selfhost/assets.lz80n) converts PNG and WAV files like
+/// compiler/src/assets.rs: sprite patterns, pictures and samples.
+#[test]
+fn selfhost_assets_match_rust() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = std::fs::read_to_string(root.join("selfhost/assets.lz80n")).unwrap();
+    let stage = build_in(&root.join("selfhost"), &src);
+    let mut files = std::collections::HashMap::new();
+    let mut list = String::new();
+    let mut want: Vec<(String, Vec<u8>)> = vec![];
+    let mut n = 0;
+    let dir = std::env::temp_dir().join("lz80n_assets_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut pngs = test_pngs();
+    for f in ["sprites.png", "ships.png", "badge.png", "landscape.png"] {
+        pngs.push((format!("assets/{f}"), std::fs::read(root.join("examples/assets").join(f)).unwrap()));
+    }
+    for (name, data) in &pngs {
+        let p = dir.join(name.replace('/', "_"));
+        std::fs::write(&p, data).unwrap();
+        // patterns, when it is a sheet of 16x16 cells
+        if let Ok(a) = crate::assets::load(&p) {
+            n += 1;
+            list.push_str(&format!("p t{n} {name}\n"));
+            want.push((format!("a_t{n}.bin"), a.bytes));
+        }
+        let img = crate::assets::load_image(&p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        n += 1;
+        list.push_str(&format!("i t{n} {name}\n"));
+        want.push((format!("a_t{n}.bin"), img.pages.concat()));
+        want.push((format!("a_t{n}.msk"), vec![img.masked as u8]));
+        files.insert(name.clone(), data.clone());
+    }
+    let mut wavs: Vec<(String, Vec<u8>)> = vec![];
+    for f in ["boom.wav", "zap.wav", "hum.wav"] {
+        wavs.push((format!("assets/{f}"), std::fs::read(root.join("examples/assets").join(f)).unwrap()));
+    }
+    // other formats and rates: 16-bit stereo, 44.1 kHz (resampled), 3 kHz
+    let wav = |rate: u32, chans: u16, bits: u16, n: usize| {
+        let data: Vec<u8> = (0..n * chans as usize * bits as usize / 8).map(|i| (i * 37 % 251) as u8).collect();
+        let mut w = Vec::new();
+        w.extend(b"RIFF");
+        w.extend(&(36 + data.len() as u32).to_le_bytes());
+        w.extend(b"WAVEfmt ");
+        w.extend(&16u32.to_le_bytes());
+        w.extend(&1u16.to_le_bytes());
+        w.extend(&chans.to_le_bytes());
+        w.extend(&rate.to_le_bytes());
+        w.extend(&(rate * chans as u32 * bits as u32 / 8).to_le_bytes());
+        w.extend(&(chans * bits / 8).to_le_bytes());
+        w.extend(&bits.to_le_bytes());
+        w.extend(b"LIST\x03\x00\x00\x00abc\x00");
+        w.extend(b"data");
+        w.extend(&(data.len() as u32).to_le_bytes());
+        w.extend(data);
+        w
+    };
+    wavs.push(("s16.wav".into(), wav(22050, 2, 16, 3000)));
+    wavs.push(("s44.wav".into(), wav(44100, 1, 16, 5000)));
+    wavs.push(("s3.wav".into(), wav(3000, 2, 8, 700)));
+    for (name, data) in &wavs {
+        let smp = crate::assets::wav_to_sample(data).unwrap();
+        n += 1;
+        list.push_str(&format!("w t{n} {name}\n"));
+        want.push((format!("a_t{n}.bin"), smp.bytes));
+        files.insert(name.clone(), data.clone());
+    }
+    // the declarations in a program: lexed, then the asset stage
+    let mut prog = String::new();
+    for line in list.lines() {
+        let mut it = line.splitn(3, ' ');
+        let (k, n, p) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+        if k == "i" {
+            prog.push_str(&format!("asset {n} = image(\"{p}\")\n"));
+        } else {
+            prog.push_str(&format!("asset {n} = \"{p}\"\n"));
+        }
+    }
+    files.insert("in.lz80n".into(), prog.into_bytes());
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let lex = build("sh_lex_assets", &lexer_src).unwrap();
+    let files = run_stage(&lex.0, &lex.1, files);
+    assert!(files.contains_key("assets.on"), "the lexer should mark the assets");
+    let out = run_stage(&stage.0, &stage.1, files);
+    if let Some(e) = out.get("assets.err") {
+        panic!("asset stage: {}\n{list}", String::from_utf8_lossy(e));
+    }
+    for (f, bytes) in want {
+        let got = out.get(&f).unwrap_or_else(|| panic!("no {f}\n{list}"));
+        if let Some(k) = (0..bytes.len().max(got.len())).find(|&k| bytes.get(k) != got.get(k)) {
+            panic!("{f}: differs at {k} (lz80nc {:?}, self-hosted {:?}), lengths {} / {}\n{list}", bytes.get(k), got.get(k), bytes.len(), got.len());
+        }
+    }
+}
+
+/// Assets compiled by the self-hosted compiler (PNG patterns, .spr files,
+/// pictures, samples): the same output, patterns, sprites and Layer 2
+/// pages as with lz80nc.
+#[test]
+fn selfhost_codegen_assets() {
+    let sh = SelfHost::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let ex = root.join("examples");
+    let spr: Vec<u8> = (0..512).map(|i| (i * 7) as u8).collect();
+    std::fs::write(ex.join("assets/test_tmp.spr"), &spr).unwrap();
+    let programs: &[&str] = &[
+        r#"
+asset sheet = "assets/sprites.png"
+asset ships = "assets/ships.png"
+asset more = "assets/test_tmp.spr"
+sprite_load(0, sheet)
+sprite_load(2, ships)
+sprite_load(60, more)
+sprites_visible(true, false)
+for i = 0, 3 do
+    sprite[i].position(word(i) * 40 + 32, 80)
+    sprite[i].show(i)
+end
+print(sprite[1].pattern, sprite[3].x)
+"#,
+        r#"
+asset landscape = image("assets/landscape.png")
+asset badge = image("assets/badge.png")
+const W = image_width(badge)
+layer2_visible(true)
+layer2_clear(0)
+draw_image(landscape, 0, 40)
+draw_image(badge, 100, 20)
+draw_image(badge, -10, 180)
+print(W, image_height(badge), image_width(landscape), image_height(landscape))
+far byte big[20000]
+big[19999] = 5
+print(big[19999] + 1)
+"#,
+        r#"
+asset boom = "assets/boom.wav"
+asset hum = "assets/hum.wav"
+print(sample_playing())
+sample_play(boom)
+print(sample_playing())
+sample_stop()
+print(sample_playing())
+sample_loop(hum)
+vsync()
+print(sample_playing())
+sample_stop()
+"#,
+    ];
+    let mut sd: Vec<(String, Vec<u8>)> = vec![];
+    for f in ["sprites.png", "ships.png", "test_tmp.spr", "landscape.png", "badge.png", "boom.wav", "hum.wav"] {
+        sd.push((format!("assets/{f}"), std::fs::read(ex.join("assets").join(f)).unwrap()));
+    }
+    let dir = std::env::temp_dir().join("lz80n_sh_assets");
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_as_{i}"), src, |_| {}).unwrap();
+        let mut srcs: Vec<(&str, &[u8])> = vec![("in.lz80n", src.as_bytes())];
+        for (n, d) in &sd {
+            srcs.push((n, d));
+        }
+        let (asm, files) = sh.compile_sd(&srcs).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (n, d) in &files {
+            let p = dir.join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, d).unwrap();
+        }
+        let out = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("program {i}: assembler: {}", e[0]));
+        let syms = out.symbols16();
+        let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+        cpu.esx = Some(crate::emu::EsxFs::default());
+        let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+        let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+        let (isr, mut prev) = (syms["__isr"], 0u16);
+        let mut got = String::new();
+        let mut n = 0u64;
+        while cpu.pc != end {
+            let from_isr = prev >= isr && prev < isr + 512;
+            if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+                got.push(cpu.a as char);
+            } else if !from_isr && cpu.pc == newline {
+                got.push('\n');
+            }
+            prev = cpu.pc;
+            cpu.tick().unwrap();
+            n += 1;
+            assert!(n < 500_000_000, "program {i} did not finish");
+        }
+        assert_eq!(got, want, "program {i}: output\n{src}");
+        assert_eq!(rcpu.patterns, cpu.patterns, "program {i}: patterns");
+        assert_eq!(rcpu.sprite_attr, cpu.sprite_attr, "program {i}: sprites");
+        for page in 16u8..28 {
+            let a = rcpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            let b = cpu.pages.get(&page).cloned().unwrap_or_else(|| vec![0; 8192]);
+            if let Some(k) = (0..8192).find(|&k| a[k] != b[k]) {
+                panic!("program {i}: Layer 2 page {page} differs at {k}: lz80nc {:02X}, self-hosted {:02X}", a[k], b[k]);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(ex.join("assets/test_tmp.spr"));
+}
+
+
+/// Arrays of more dimensions (globals, locals, far, struct fields,
+/// initializer rows), string constants and the string / number built-ins
+/// compiled by the self-hosted compiler: the same output as with lz80nc.
+#[test]
+fn selfhost_codegen_arrays_strings() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+byte m[3][4] = {{1, 2, 3}, {4, 5, 6, 7}, {8}}
+word w[2][2][3]
+sword flat[][3] = {1, 2, 3, 4, 5, 6, 7}
+for y = 0, 2 do
+    for x = 0, 3 do write(m[y][x], " ") end
+end
+print("")
+for a = 0, 1 do
+    for b = 0, 1 do
+        for c = 0, 2 do w[a][b][c] = word(a) * 100 + word(b) * 10 + word(c) end
+    end
+end
+print(w[1][0][2], w[0][1][1], w[1][1][2], flat[2][0], flat[1][2])
+m[2][3] += 40
+print(m[2][3], addr(m[1][0]) - addr(m))
+far word big[100][50]
+big[99][49] = 1234
+big[3][7] = 37
+print(big[99][49], big[3][7], big[3][8])
+function local_grid() -> word
+    byte g[2][3] = {{9, 8, 7}, {6, 5}}
+    g[1][2] = 4
+    return word(g[0][0]) * 100 + word(g[1][1]) * 10 + g[1][2]
+end
+print(local_grid())
+struct Board
+    byte cells[3][3]
+    byte turn
+end
+Board bd
+bd.cells[1][2] = 5
+bd.cells[2][2] = 9
+bd.turn = 1
+print(bd.cells[1][2] + bd.cells[2][2], bd.turn)
+Board boards[2]
+boards[1].cells[0][1] = 3
+print(boards[1].cells[0][1], boards[0].cells[0][1])
+string names[2][2] = {{"a", "b"}, {"c"}}
+print(names[0][1], names[1][0], len(names[1][1]))
+"#,
+        r#"
+const TITLE = "LZ80N"
+const N = 3
+string parts[] = {TITLE, "next"}
+print(TITLE, len(TITLE), parts[0] .. "/" .. parts[1])
+string s = "Hello, World"
+print(upper(s), lower(s), sub(s, 7, 5), sub(s, 10, 9), len(sub(s, 20, 3)))
+print(find(s, "World"), find(s, "xyz"), find(upper(s), lower("LD")), find(s, sub("o, W", 0, 2)))
+print(val("-45"), val("7up"), val(""), val(sub("x123", 1, 3)) + 1)
+print(clamp(5, 1, 3), clamp(-5, -2, 9), clamp(200, 10, 100), clamp(word(70), 1, 50))
+print(sqrt(0), sqrt(16), sqrt(1000), sqrt(65535))
+string t = upper("abc") .. sub(TITLE, 2, N)
+print(t)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let want = run(&format!("sh_ar_{i}"), src).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        assert_eq!(run_asm(&asm), want, "program {i}\n{src}");
+    }
+}
+
+/// `fixed` / `fixed16` arithmetic, conversions, constants, arrays, fields
+/// and the math built-ins compiled by the self-hosted compiler: the same
+/// output as with lz80nc.
+#[test]
+fn selfhost_codegen_fixed() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+const G = 0.25
+const BIG = 300.5
+fixed v = 1.5
+fixed g = G
+word n = 3
+v += g * 2
+print(v, v * n, v / 2, -v, v * 1.5, v / 0.75, v % 1, v >> 1, v << 2)
+print(fixed(n) + 0.5, sword(-1.25), byte(v), round(2.5), round(-2.5), round(v))
+print(v > 1, v < g, v == 2, abs(-v), min(v, g), max(v, 3), clamp(v, 0, 1.75))
+fixed arr[] = {0.5, 1, -2.25}
+print(arr[0] + arr[1] + arr[2])
+struct Body
+    fixed x
+    fixed vy
+    byte tag = 3
+end
+Body b
+b.x = 1.5
+b.vy = -0.5
+for i = 1, 4 do
+    b.vy += G
+    b.x += b.vy
+end
+print(b.x, b.vy)
+function half(fixed f) -> fixed
+    return f / 2
+end
+print(half(5), half(v) * half(v))
+string s = "v=" .. v .. " g=" .. g
+print(s)
+print(sin(0), sin(64), cos(0), sin(32), cos(128), atan2(1, 1), atan2(-1.0, -1.0), atan2(0, 5))
+print(sqrt(2.0), sqrt(16.0), sqrt(-1.0), sqrt(100))
+"#,
+        r#"
+fixed16 sum = 0
+for k = 1, 1000 do sum += 0.001 end
+print(sum)
+fixed16 a = 1000.25
+fixed16 b = -3.5
+print(a + b, a - b, a * b, a / b, a * 3, a / 4, -a, a > b, a == 1000.25)
+fixed f = 2.75
+print(fixed16(f) + a, fixed(b), long(a), sword(b), fixed16(7), fixed16(20000) / 2)
+long l = 5
+print(fixed16(l) * 1.5, BIG16, a >> 2, b << 1)
+const BIG16 = 12345.5
+fixed16 t[] = {1.5, -2, 30000.125}
+print(t[0] + t[1] + t[2], min(a, b), max(a, b), abs(b))
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let want = run(&format!("sh_fx_{i}"), src).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        assert_eq!(run_asm(&asm), want, "program {i}\n{src}");
+    }
+}
+
+/// Interrupt handlers (frame, raster lines, the frame line itself, 32-bit
+/// code in a handler) compiled by the self-hosted compiler: the same output
+/// and raster state as with lz80nc.
+#[test]
+fn selfhost_codegen_interrupts() {
+    let sh = SelfHost::new();
+    let programs: &[&str] = &[
+        r#"
+byte hits = 0
+byte ticks = 0
+interrupt raster(0)
+    nextreg[0x4A] = 0xE0
+end
+interrupt raster(100)
+    nextreg[0x4A] = 0x1C
+    hits += 1
+end
+interrupt frame
+    ticks += 1
+end
+word f0 = frames()
+pause(10)
+print(frames() - f0, hits >= 9 and hits <= 11, ticks >= 9 and ticks <= 11)
+"#,
+        "byte n = 0\ninterrupt frame\n    n += 1\nend\npause(5)\nprint(n, frames())",
+        r#"
+long total = 0
+word calls = 0
+function bump(word k)
+    calls += k
+end
+interrupt raster(192)
+    total += 100000
+    bump(2)
+end
+interrupt raster(250)
+    nextreg[0x4A] = 3
+end
+long x = 7
+pause(4)
+x = x * 1000 + 5
+print(x, total >= 300000, calls >= 6)
+"#,
+    ];
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_irq_{i}"), src, |_| {}).unwrap();
+        let asm = sh.compile(src).unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}\n{src}"));
+        let (got, scpu) = run_asm_cpu(&asm);
+        assert_eq!(got, want, "program {i}\n{src}");
+        assert_eq!(rcpu.nextreg[0x22] & 0b110, scpu.nextreg[0x22] & 0b110, "program {i}: line interrupt");
+        for line in [50usize, 150, 200, 260] {
+            assert_eq!(rcpu.line_state[line].0[0x4A], scpu.line_state[line].0[0x4A], "program {i}: line {line}");
+        }
+    }
+}
+
+/// A main program too large for the resident area: the self-hosted
+/// compiler moves its statements into code pages (chunks called in order).
+#[test]
+fn selfhost_codegen_large_main() {
+    let sh = SelfHost::new();
+    let mut src = String::from("word x = 1\nword y = 0\n");
+    for b in 0..80 {
+        src.push_str("if x ~= 12345 then\n");
+        for k in 0..20 {
+            src.push_str(&format!("    x = x * 3 + {}\n    y = y ~ x\n", b * 20 + k));
+        }
+        src.push_str("end\n");
+        if b % 10 == 0 {
+            src.push_str("print(x, y)\n");
+        }
+    }
+    src.push_str("print(x, y)\n");
+    let want = run("sh_big", &src).unwrap();
+    let asm = sh.compile(&src).unwrap_or_else(|e| panic!("self-hosted compiler: {e}"));
+    assert!(asm.contains("__mc_0_bank:"), "the main program should be in code pages");
+    assert_eq!(run_asm(&asm), want);
+}
+
+/// Music: the asset stage renders a .pt3 module into the same AY register
+/// stream as compiler/src/pt3.rs, and a program playing it compiled by the
+/// self-hosted compiler leaves the AY chips as with lz80nc.
+#[test]
+fn selfhost_codegen_music() {
+    let sh = SelfHost::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let tune = std::fs::read(root.join("examples/assets/tune.pt3")).unwrap();
+    let (want_bytes, want_loop) = crate::pt3::encode(&crate::pt3::render(&tune).unwrap());
+    let programs: &[&str] = &[
+        "asset tune = \"assets/tune.pt3\"\nmusic_play(tune, 1)\nfor i = 1, 150 do vsync() end\nprint(music_playing())\nmusic_stop()\nprint(music_playing())\n",
+        "asset tune = \"assets/tune.pt3\"\ncpu_speed(0)\nmusic_once(tune)\nword t = frames()\nwhile music_playing() do vsync() end\nprint(frames() - t)\n",
+    ];
+    let dir = std::env::temp_dir().join("lz80n_sh_music");
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_mus_{i}"), src, |_| {}).unwrap();
+        let (asm, files) = sh
+            .compile_sd(&[("in.lz80n", src.as_bytes()), ("assets/tune.pt3", &tune)])
+            .unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}"));
+        let got_bytes = &files["a_tune.bin"];
+        if let Some(k) = (0..want_bytes.len().max(got_bytes.len())).find(|&k| want_bytes.get(k) != got_bytes.get(k)) {
+            panic!("the rendered stream differs at {k}: pt3.rs {:?}, assets.lz80n {:?}", want_bytes.get(k), got_bytes.get(k));
+        }
+        let inf = &files["a_tune.inf"];
+        assert_eq!(u32::from_le_bytes(inf[4..8].try_into().unwrap()) as usize, want_loop, "loop offset");
+        let _ = std::fs::remove_dir_all(&dir);
+        for (n, d) in &files {
+            let p = dir.join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, d).unwrap();
+        }
+        let out = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("program {i}: assembler: {}", e[0]));
+        let syms = out.symbols16();
+        let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+        cpu.esx = Some(crate::emu::EsxFs::default());
+        let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+        let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+        let (isr, mut prev) = (syms["__isr"], 0u16);
+        let mut got = String::new();
+        let mut n = 0u64;
+        while cpu.pc != end {
+            let from_isr = prev >= isr && prev < isr + 512;
+            if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+                got.push(cpu.a as char);
+            } else if !from_isr && cpu.pc == newline {
+                got.push('\n');
+            }
+            prev = cpu.pc;
+            cpu.tick().unwrap();
+            n += 1;
+            assert!(n < 2_000_000_000, "program {i} did not finish");
+        }
+        assert_eq!(got, want, "program {i}: output");
+        assert_eq!(rcpu.ay, cpu.ay, "program {i}: AY registers");
+    }
 }

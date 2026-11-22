@@ -1,0 +1,1174 @@
+-- selfhost/parser_core.lz80n - the LZ80N parser (included by parser.lz80n
+-- and codegen.lz80n)
+--
+-- load_tokens() reads tokens.bin (written by lexer.lz80n); program() builds
+-- the syntax tree in far arrays, from prog_first. It follows
+-- compiler/src/parser.rs: the same tree, the same positions and the same
+-- error messages (failed, err_l, err_c, emsg).
+--
+-- The tree: node n (1 ..) has a kind (nk), a position (nl, nc), four
+-- fields n1 .. n4 (child nodes or token numbers, by kind), a flag byte (nf)
+-- and the next node of the list it is in (nx). Names, strings and numbers
+-- stay in the tokens: a node refers to its token.
+
+-- token kinds (lexer.lz80n)
+const T_IDENT = 0
+const T_INT = 1
+const T_DOTDOT = 2
+const T_FIXED = 3
+const T_STR = 4
+const T_ASM_BODY = 5
+const T_AND = 6
+const T_OR = 7
+const T_NOT = 8
+const T_IF = 9
+const T_THEN = 10
+const T_ELSEIF = 11
+const T_ELSE = 12
+const T_END = 13
+const T_WHILE = 14
+const T_DO = 15
+const T_FOR = 16
+const T_FUNCTION = 17
+const T_RETURN = 18
+const T_BREAK = 19
+const T_CONST = 20
+const T_VAR = 21
+const T_TRUE = 22
+const T_FALSE = 23
+const T_ASM = 24
+const T_STRUCT = 25
+const T_CLASS = 26
+const T_ASSET = 27
+const T_INTERRUPT = 28
+const T_FAR = 29
+const T_PLUS = 31
+const T_MINUS = 32
+const T_STAR = 33
+const T_SLASH = 34
+const T_PERCENT = 35
+const T_AMP = 36
+const T_PIPE = 37
+const T_TILDE = 38
+const T_SHL = 39
+const T_SHR = 40
+const T_EQEQ = 41
+const T_NOTEQ = 42
+const T_LT = 43
+const T_LE = 44
+const T_GT = 45
+const T_GE = 46
+const T_ASSIGN = 47
+const T_PLUSEQ = 48
+const T_MINUSEQ = 49
+const T_STAREQ = 50
+const T_AMPEQ = 51
+const T_PIPEEQ = 52
+const T_SLASHEQ = 53
+const T_PERCENTEQ = 54
+const T_SHLEQ = 55
+const T_SHREQ = 56
+const T_LPAREN = 57
+const T_RPAREN = 58
+const T_LBRACKET = 59
+const T_RBRACKET = 60
+const T_LBRACE = 61
+const T_RBRACE = 62
+const T_COMMA = 63
+const T_DOT = 64
+const T_ARROW = 65
+const T_EOF = 66
+const T_ERROR = 255
+
+-- debug names of the token kinds (as Rust's `{:?}`, lower case)
+-- the names of the token kinds (for messages), separated by spaces
+const NTOKW = 7
+string tok_words[] = {
+    "ident int dotdot fixed str asmbody and or not if then elseif",
+    "else end while do for function return break const var true false",
+    "asm struct class asset interrupt far include plus minus star",
+    "slash percent amp pipe tilde shl shr eqeq noteq lt le gt ge",
+    "assign pluseq minuseq stareq ampeq pipeeq slasheq percenteq",
+    "shleq shreq lparen rparen lbracket rbracket lbrace rbrace comma",
+    "dot arrow eof"
+}
+
+-- the name of token kind k into the message
+function msg_tokname(byte k)
+    byte n = 0
+    byte w = 0
+    while w < NTOKW do
+        string c = tok_words[w]
+        string t = ""
+        byte i = 0
+        while i < len(c) do
+            byte ch = asc(c, i)
+            if ch == ' ' then
+                if n == k then
+                    msg(t)
+                    return
+                end
+                n += 1
+                t = ""
+            else
+                t = t .. chr(ch)
+            end
+            i += 1
+        end
+        if n == k then
+            msg(t)
+            return
+        end
+        n += 1
+        w += 1
+    end
+end
+
+-- node kinds
+const E_INT = 1         -- n1 = token, nf = negated
+const E_FIXED = 2       -- n1 = token, nf = negated
+const E_BOOL = 3        -- nf = value
+const E_STR = 4         -- n1 = token
+const E_NAME = 5        -- n1 = token
+const E_INDEX = 6       -- n1 = base, n2 = index
+const E_FIELD = 7       -- n1 = base, n2 = name token
+const E_CALL = 8        -- n1 = name token, n2 = arguments
+const E_METHOD = 9      -- n1 = object, n2 = name token, n3 = arguments
+const E_UNARY = 10      -- nf = U_*, n1 = operand
+const E_BINARY = 11     -- nf = B_*, n1, n2
+const E_LIST = 12       -- n1 = items
+const S_FAR = 20        -- n1 = the declaration
+const S_VAR = 21        -- n1 = type token (0: none), n2 = name token, n3 = size, n4 = init, nf = const
+const S_ASSIGN = 22     -- nf = B_* + 1 (0: `=`), n1 = target, n2 = value
+const S_IF = 23         -- n1 = arms, n2 = else body, nf = has else
+const S_ARM = 24        -- n1 = condition, n2 = body
+const S_WHILE = 25      -- n1 = condition, n2 = body
+const S_FOR = 26        -- n1 = variable token, n2 = start, n3 = end, n4 = step; nx of n4 ... see S_FOR_BODY
+const S_RETURN = 27     -- n1 = value
+const S_BREAK = 28
+const S_EXPR = 29       -- n1 = the call
+const S_ASM = 30        -- n1 = body token
+const S_ASSET = 31      -- n1 = name token, n2 = path token, nf = image
+const I_FUNC = 40       -- n1 = name token, n2 = params, n3 = return type token, n4 = body
+const I_PARAM = 41      -- n1 = name token, n2 = type token
+const I_INTERRUPT = 42  -- n1 = line (raster), n2 = body, nf = raster
+const I_STRUCT = 43     -- n1 = name token, n2 = parent token, n3 = fields, n4 = methods
+const I_FIELD = 44      -- n1 = name token, n2 = type token, n3 = size, n4 = init
+
+-- operators (Rust BinOp / UnOp order)
+const B_ADD = 0
+const B_SUB = 1
+const B_MUL = 2
+const B_DIV = 3
+const B_MOD = 4
+const B_CONCAT = 5
+const B_AND = 6
+const B_OR = 7
+const B_XOR = 8
+const B_SHL = 9
+const B_SHR = 10
+const B_EQ = 11
+const B_NE = 12
+const B_LT = 13
+const B_LE = 14
+const B_GT = 15
+const B_GE = 16
+const B_LAND = 17
+const B_LOR = 18
+
+-- ---------------------------------------------------------------- tokens
+
+const MAX_TOKENS = 48000
+far byte tk[48000]          -- kind
+-- (words as two byte arrays: a far array holds at most 64K bytes, so a
+-- word array at most 32767 elements)
+far byte tl_lo[48000]       -- line
+far byte tl_hi[48000]
+far byte tc_[48000]         -- column (at most 255)
+far byte to_lo[48000]       -- text: offset in tpool (numbers: their 4 bytes there)
+far byte to_hi[48000]
+far byte tn_lo[48000]       -- text: length
+far byte tn_hi[48000]
+
+function tline(word t) -> word
+    return word(tl_hi[t]) << 8 | tl_lo[t]
+end
+
+function tcol(word t) -> byte
+    return tc_[t]
+end
+
+function toff_(word t) -> word
+    return word(to_hi[t]) << 8 | to_lo[t]
+end
+
+function set_toff(word t, word o)
+    to_lo[t] = byte(o)
+    to_hi[t] = byte(o >> 8)
+end
+
+function tlen_(word t) -> word
+    return word(tn_hi[t]) << 8 | tn_lo[t]
+end
+
+-- the value of a number token, low and high word
+function tval_lo(word t) -> word
+    word o = toff_(t)
+    return word(tpool[o]) | word(tpool[o + 1]) << 8
+end
+
+function tval_hi(word t) -> word
+    word o = toff_(t)
+    return word(tpool[o + 2]) | word(tpool[o + 3]) << 8
+end
+far byte tpool[60000]
+-- identifiers are interned: equal names share their text (and offset)
+far word ihead[4096]
+far word ioff[8000]
+far word ilen[8000]
+far word inext[8000]
+word nint = 0
+word ntok = 1                -- token 0 is unused: 0 means "none"
+word pool_len = 0
+
+byte inh
+bool eof_in = false
+
+function in_byte() -> byte
+    word g = file_getc(inh)
+    if g == FILE_EOF then
+        eof_in = true
+        return 0
+    end
+    return byte(g)
+end
+
+function in_word() -> word
+    word lo = in_byte()
+    return lo | word(in_byte()) << 8
+end
+
+-- ---------------------------------------------------------------- errors
+
+bool failed = false
+word err_l
+word err_c
+byte emsg[400]
+word elen = 0
+
+function msg(string s)
+    byte n = len(s)
+    byte i = 0
+    while i < n do
+        if elen < 400 then
+            emsg[elen] = asc(s, i)
+            elen += 1
+        end
+        i += 1
+    end
+end
+
+-- start an error at token t (the first error wins)
+function fail_at(word l, word c) -> bool
+    if failed then return false end
+    failed = true
+    err_l = l
+    err_c = c
+    elen = 0
+    return true
+end
+
+function fail_tok(word t) -> bool
+    return fail_at(tline(t), tcol(t))
+end
+
+-- the text of token t into the message
+function msg_text(word t)
+    word i = 0
+    word o = toff_(t)
+    while i < tlen_(t) do
+        if elen < 400 then
+            emsg[elen] = tpool[o + i]
+            elen += 1
+        end
+        i += 1
+    end
+end
+
+-- unsigned 32-bit hi:lo in decimal
+byte digits[12]
+byte ndig
+function dec32(word hi, word lo)
+    ndig = 0
+    long v = long(hi) << 16 | long(lo)
+    -- v may be "negative" (>= 2^31): divide once by 10 unsigned first
+    bool big = v < 0
+    if big then
+        long half = (v >> 1) & 0x7FFFFFFF
+        long q = half / 5
+        long r = v - q * 10
+        while r >= 10 do
+            q += 1
+            r -= 10
+        end
+        digits[0] = byte(r) + '0'
+        ndig = 1
+        v = q
+    end
+    if v == 0 and ndig == 0 then
+        digits[0] = '0'
+        ndig = 1
+    end
+    while v > 0 do
+        digits[ndig] = byte(v % 10) + '0'
+        ndig += 1
+        v = v / 10
+    end
+end
+
+function msg_dec(word hi, word lo)
+    dec32(hi, lo)
+    while ndig > 0 do
+        ndig -= 1
+        if elen < 400 then
+            emsg[elen] = digits[ndig]
+            elen += 1
+        end
+    end
+end
+
+-- Rust's tok_name
+function msg_tok(word t)
+    byte k = tk[t]
+    if k == T_IDENT then
+        msg("identifier `")
+        msg_text(t)
+        msg("`")
+    elseif k == T_INT then
+        msg("number `")
+        msg_dec(tval_hi(t), tval_lo(t))
+        msg("`")
+    elseif k == T_STR then
+        msg("string")
+    elseif k == T_EOF then
+        msg("end of file")
+    elseif k == T_FIXED then
+        msg("`fixed(")
+        msg_dec(tval_hi(t), tval_lo(t))
+        msg(")`")
+    else
+        msg("`")
+        msg_tokname(k)
+        msg("`")
+    end
+end
+
+-- ---------------------------------------------------------------- nodes
+
+const MAX_NODES = 32000
+far byte nk[32000]
+far byte nf[32000]
+far word nl[32000]
+far byte nc[32000]       -- (at most 255)
+far word n1[32000]
+far word n2[32000]
+far word n3[32000]
+far word n4[32000]
+far word nx[32000]
+word nnodes = 0
+
+function node(byte kind, word t) -> word
+    if nnodes >= MAX_NODES - 1 then
+        if fail_tok(t) then msg("program too large: too many syntax tree nodes") end
+        return 0
+    end
+    nnodes += 1
+    word n = nnodes
+    nk[n] = kind
+    nl[n] = tline(t)
+    nc[n] = tcol(t)
+    return n
+end
+
+-- lists: append node n to the list whose first and last nodes are given;
+-- returns the new last node
+function append(word first_holder, word last, word n) -> word
+    if last == 0 then return n end
+    nx[last] = n
+    return n
+end
+
+-- ---------------------------------------------------------------- parser
+
+word ti = 1                 -- current token
+
+function peek() -> byte
+    return tk[ti]
+end
+
+function peek2() -> byte
+    word j = ti + 1
+    if j >= ntok then j = ntok - 1 end
+    return tk[j]
+end
+
+function is_at(byte k) -> bool
+    return tk[ti] == k
+end
+
+-- advance (never past the last token, Eof); the token passed
+function next() -> word
+    word t = ti
+    if ti < ntok - 1 then ti += 1 end
+    return t
+end
+
+function eat(byte k) -> bool
+    if tk[ti] == k then
+        next()
+        return true
+    end
+    return false
+end
+
+function expect(byte k, string what) -> bool
+    if eat(k) then return true end
+    if fail_tok(ti) then
+        msg("expected ")
+        msg(what)
+        msg(", found ")
+        msg_tok(ti)
+    end
+    return false
+end
+
+-- an identifier: its token, or 0 after an error
+function ident() -> word
+    if tk[ti] == T_IDENT then return next() end
+    if fail_tok(ti) then
+        msg("expected identifier, found ")
+        msg_tok(ti)
+    end
+    return 0
+end
+
+-- is token t the identifier s?
+function text_is(word t, string s) -> bool
+    byte n = len(s)
+    if tk[t] ~= T_IDENT or tlen_(t) ~= n then return false end
+    word o = toff_(t)
+    byte i = 0
+    while i < n do
+        if tpool[o + i] ~= asc(s, i) then return false end
+        i += 1
+    end
+    return true
+end
+
+function is_term(byte k, byte t1, byte t2, byte t3) -> bool
+    return k == t1 or k == t2 or k == t3
+end
+
+-- statements until one of the terminators (not consumed): the first node
+function block(byte t1, byte t2, byte t3) -> word
+    word first = 0
+    word last = 0
+    while not failed and not is_term(tk[ti], t1, t2, t3) do
+        if is_at(T_EOF) then
+            if fail_tok(ti) then msg("unexpected end of file (missing `end`?)") end
+            return 0
+        end
+        if is_at(T_FUNCTION) or is_at(T_INTERRUPT) then
+            if fail_tok(ti) then msg("functions and interrupts can only be declared at top level") end
+            return 0
+        end
+        word s = stmt()
+        if failed then return 0 end
+        if first == 0 then first = s end
+        last = append(first, last, s)
+    end
+    return first
+end
+
+-- `{ expr, ... }`
+function list() -> word
+    word t0 = ti
+    word n = node(E_LIST, t0)
+    if not expect(T_LBRACE, "`{`") then return 0 end
+    word first = 0
+    word last = 0
+    while not failed and not is_at(T_RBRACE) do
+        word item = 0
+        if is_at(T_LBRACE) then
+            item = list()
+        else
+            item = expr()
+        end
+        if failed then return 0 end
+        if first == 0 then first = item end
+        last = append(first, last, item)
+        if not eat(T_COMMA) then break end
+    end
+    if not expect(T_RBRACE, "`}`") then return 0 end
+    if first == 0 then
+        if fail_tok(t0) then msg("an initializer list needs at least one value") end
+        return 0
+    end
+    n1[n] = first
+    return n
+end
+
+-- `[size]`, `[]`, `[a][b]...`: the size expression (a list for more
+-- dimensions, an empty list for `[]`), 0 when there is none
+function array_suffix() -> word
+    if not eat(T_LBRACKET) then return 0 end
+    word e = 0
+    if is_at(T_RBRACKET) then
+        e = node(E_LIST, ti)
+    else
+        e = expr()
+    end
+    if not expect(T_RBRACKET, "`]`") then return 0 end
+    if not is_at(T_LBRACKET) then return e end
+    word dims = node(E_LIST, ti)
+    nl[dims] = nl[e]
+    nc[dims] = nc[e]
+    n1[dims] = e
+    word last = e
+    while not failed and eat(T_LBRACKET) do
+        if is_at(T_RBRACKET) then
+            if fail_tok(ti) then msg("only the first size can be `[]`") end
+            return 0
+        end
+        word d = expr()
+        if not expect(T_RBRACKET, "`]`") then return 0 end
+        last = append(dims, last, d)
+    end
+    return dims
+end
+
+function func() -> word
+    word t0 = ti
+    word f = node(I_FUNC, t0)
+    if not expect(T_FUNCTION, "`function`") then return 0 end
+    n1[f] = ident()
+    if not expect(T_LPAREN, "`(`") then return 0 end
+    word first = 0
+    word last = 0
+    if not is_at(T_RPAREN) then
+        while not failed do
+            word ty = ident()
+            word pn = ident()
+            if failed then return 0 end
+            word p = node(I_PARAM, pn)
+            n1[p] = pn
+            n2[p] = ty
+            if first == 0 then first = p end
+            last = append(first, last, p)
+            if not eat(T_COMMA) then break end
+        end
+    end
+    n2[f] = first
+    if not expect(T_RPAREN, "`)`") then return 0 end
+    if eat(T_ARROW) then n3[f] = ident() end
+    n4[f] = block(T_END, T_END, T_END)
+    if not expect(T_END, "`end`") then return 0 end
+    return f
+end
+
+function struct_decl() -> word
+    word s = node(I_STRUCT, ti)
+    next()
+    n1[s] = ident()
+    if text_is(ti, "extends") then
+        next()
+        n2[s] = ident()
+    end
+    word ff = 0
+    word fl = 0
+    word mf = 0
+    word ml = 0
+    while not failed do
+        if is_at(T_END) then
+            next()
+            break
+        elseif is_at(T_FUNCTION) then
+            word m = func()
+            if failed then return 0 end
+            if mf == 0 then mf = m end
+            ml = append(mf, ml, m)
+        elseif is_at(T_IDENT) then
+            word fd = node(I_FIELD, ti)
+            n2[fd] = ident()
+            n1[fd] = ident()
+            n3[fd] = array_suffix()
+            if eat(T_ASSIGN) then n4[fd] = expr() end
+            if failed then return 0 end
+            if ff == 0 then ff = fd end
+            fl = append(ff, fl, fd)
+        else
+            if fail_tok(ti) then
+                msg("expected a field, `function` or `end`, found ")
+                msg_tok(ti)
+            end
+            return 0
+        end
+    end
+    n3[s] = ff
+    n4[s] = mf
+    return s
+end
+
+function if_stmt(word s)
+    next()
+    word first = 0
+    word last = 0
+    while not failed do
+        word arm = node(S_ARM, ti)
+        n1[arm] = expr()
+        if not expect(T_THEN, "`then`") then return end
+        n2[arm] = block(T_END, T_ELSE, T_ELSEIF)
+        if failed then return end
+        if first == 0 then first = arm end
+        last = append(first, last, arm)
+        word t = next()
+        if tk[t] == T_ELSE then
+            nf[s] = 1
+            n2[s] = block(T_END, T_END, T_END)
+            next()
+            break
+        elseif tk[t] ~= T_ELSEIF then
+            break
+        end
+    end
+    n1[s] = first
+end
+
+function is_list(word e) -> bool
+    return e ~= 0 and nk[e] == E_LIST
+end
+
+function stmt() -> word
+    word t0 = ti
+    byte k = tk[ti]
+    word s = 0
+    if k == T_IF then
+        s = node(S_IF, t0)
+        if_stmt(s)
+    elseif k == T_WHILE then
+        s = node(S_WHILE, t0)
+        next()
+        n1[s] = expr()
+        if not expect(T_DO, "`do`") then return 0 end
+        n2[s] = block(T_END, T_END, T_END)
+        next()
+    elseif k == T_FOR then
+        s = node(S_FOR, t0)
+        next()
+        n1[s] = ident()
+        if not expect(T_ASSIGN, "`=`") then return 0 end
+        n2[s] = expr()
+        if not expect(T_COMMA, "`,`") then return 0 end
+        n3[s] = expr()
+        word step = 0
+        if eat(T_COMMA) then step = expr() end
+        if not expect(T_DO, "`do`") then return 0 end
+        -- the body hangs off a hidden arm node in n4: (step, body)
+        word holder = node(S_ARM, t0)
+        n1[holder] = step
+        n2[holder] = block(T_END, T_END, T_END)
+        n4[s] = holder
+        next()
+    elseif k == T_RETURN then
+        s = node(S_RETURN, t0)
+        next()
+        byte p = peek()
+        if p ~= T_END and p ~= T_ELSE and p ~= T_ELSEIF and p ~= T_EOF then
+            n1[s] = expr()
+        end
+    elseif k == T_BREAK then
+        s = node(S_BREAK, t0)
+        next()
+    elseif k == T_ASM then
+        s = node(S_ASM, t0)
+        next()
+        word b = next()
+        if tk[b] ~= T_ASM_BODY then
+            if fail_tok(t0) then msg("malformed asm block") end
+            return 0
+        end
+        n1[s] = b
+        if not expect(T_END, "`end`") then return 0 end
+    elseif k == T_FAR then
+        s = node(S_FAR, t0)
+        next()
+        word inner = stmt()
+        if failed then return 0 end
+        if nk[inner] ~= S_VAR or n1[inner] == 0 or n3[inner] == 0 or nf[inner] ~= 0 then
+            if fail_tok(t0) then msg("`far` needs an array declaration: `far byte name[1000]`") end
+            return 0
+        end
+        n1[s] = inner
+    elseif k == T_ASSET then
+        s = node(S_ASSET, t0)
+        next()
+        n1[s] = ident()
+        if not expect(T_ASSIGN, "`=`") then return 0 end
+        word t = next()
+        if tk[t] == T_STR then
+            n2[s] = t
+        elseif text_is(t, "image") then
+            if not expect(T_LPAREN, "`(`") then return 0 end
+            word p = next()
+            if tk[p] ~= T_STR then
+                if fail_tok(t0) then msg("expected a file name: `image(\"picture.png\")`") end
+                return 0
+            end
+            if not expect(T_RPAREN, "`)`") then return 0 end
+            n2[s] = p
+            nf[s] = 1
+        else
+            if fail_tok(t0) then msg("expected a file name after `asset name =` (or `image(\"file.png\")`)") end
+            return 0
+        end
+    elseif k == T_CONST or k == T_VAR then
+        s = node(S_VAR, t0)
+        word kw = next()
+        if tk[kw] == T_CONST then nf[s] = 1 end
+        n2[s] = ident()
+        if not expect(T_ASSIGN, "`=`") then return 0 end
+        n4[s] = expr()
+    elseif k == T_IDENT and peek2() == T_IDENT then
+        -- `Type name ...`: a declaration
+        s = node(S_VAR, t0)
+        n1[s] = ident()
+        n2[s] = ident()
+        word arr = array_suffix()
+        n3[s] = arr
+        word init = 0
+        if eat(T_ASSIGN) then
+            if is_at(T_LBRACE) then
+                init = list()
+            else
+                init = expr()
+            end
+        end
+        n4[s] = init
+        if failed then return 0 end
+        if arr ~= 0 and init ~= 0 and not is_list(init) then
+            if fail_tok(t0) then msg("an array is initialised with a list: `= {1, 2, 3}`") end
+            return 0
+        end
+        if arr == 0 and is_list(init) and is_prim(n1[s]) then
+            if fail_at(nl[init], nc[init]) then msg("a `{...}` list needs an array: `name[] = {...}`") end
+            return 0
+        end
+        if init == 0 and is_list(arr) then
+            word first = n1[arr]
+            if first == 0 or (nk[first] == E_LIST and n1[first] == 0) then
+                if fail_at(nl[arr], nc[arr]) then msg("`[]` needs an initializer list to take its size from") end
+                return 0
+            end
+        end
+    else
+        word e = expr()
+        if failed then return 0 end
+        byte op = 255
+        k = tk[ti]
+        if k == T_ASSIGN then
+            op = 0
+        elseif k == T_PLUSEQ then
+            op = B_ADD + 1
+        elseif k == T_MINUSEQ then
+            op = B_SUB + 1
+        elseif k == T_STAREQ then
+            op = B_MUL + 1
+        elseif k == T_AMPEQ then
+            op = B_AND + 1
+        elseif k == T_PIPEEQ then
+            op = B_OR + 1
+        elseif k == T_SLASHEQ then
+            op = B_DIV + 1
+        elseif k == T_PERCENTEQ then
+            op = B_MOD + 1
+        elseif k == T_SHLEQ then
+            op = B_SHL + 1
+        elseif k == T_SHREQ then
+            op = B_SHR + 1
+        end
+        if op ~= 255 then
+            next()
+            byte ek = nk[e]
+            if ek ~= E_NAME and ek ~= E_INDEX and ek ~= E_FIELD then
+                if fail_tok(t0) then msg("invalid assignment target") end
+                return 0
+            end
+            s = node(S_ASSIGN, t0)
+            nf[s] = op
+            n1[s] = e
+            n2[s] = expr()
+        else
+            if nk[e] ~= E_CALL and nk[e] ~= E_METHOD then
+                if fail_tok(t0) then msg("expression statement must be a function call") end
+                return 0
+            end
+            s = node(S_EXPR, t0)
+            n1[s] = e
+        end
+    end
+    if failed then return 0 end
+    return s
+end
+
+-- is the type token t a primitive type?
+function is_prim(word t) -> bool
+    return text_is(t, "bool") or text_is(t, "byte") or text_is(t, "sbyte") or text_is(t, "word") or text_is(t, "sword") or text_is(t, "fixed") or text_is(t, "long") or text_is(t, "fixed16")
+end
+
+-- ---- expressions
+
+function expr() -> word
+    return binary(0)
+end
+
+byte bop                        -- binop_info results
+byte bprec
+
+function binop_info(byte k) -> bool
+    bprec = 0
+    if k == T_OR then
+        bop = B_LOR
+        bprec = 1
+    elseif k == T_AND then
+        bop = B_LAND
+        bprec = 2
+    elseif k == T_EQEQ then
+        bop = B_EQ
+        bprec = 3
+    elseif k == T_NOTEQ then
+        bop = B_NE
+        bprec = 3
+    elseif k == T_LT then
+        bop = B_LT
+        bprec = 3
+    elseif k == T_LE then
+        bop = B_LE
+        bprec = 3
+    elseif k == T_GT then
+        bop = B_GT
+        bprec = 3
+    elseif k == T_GE then
+        bop = B_GE
+        bprec = 3
+    elseif k == T_PIPE then
+        bop = B_OR
+        bprec = 4
+    elseif k == T_TILDE then
+        bop = B_XOR
+        bprec = 5
+    elseif k == T_AMP then
+        bop = B_AND
+        bprec = 6
+    elseif k == T_SHL then
+        bop = B_SHL
+        bprec = 7
+    elseif k == T_SHR then
+        bop = B_SHR
+        bprec = 7
+    elseif k == T_DOTDOT then
+        bop = B_CONCAT
+        bprec = 8
+    elseif k == T_PLUS then
+        bop = B_ADD
+        bprec = 9
+    elseif k == T_MINUS then
+        bop = B_SUB
+        bprec = 9
+    elseif k == T_STAR then
+        bop = B_MUL
+        bprec = 10
+    elseif k == T_SLASH then
+        bop = B_DIV
+        bprec = 10
+    elseif k == T_PERCENT then
+        bop = B_MOD
+        bprec = 10
+    end
+    return bprec > 0
+end
+
+function binary(byte minp) -> word
+    word lhs = unary()
+    while not failed and binop_info(tk[ti]) do
+        if bprec <= minp then break end
+        byte op = bop
+        byte prec = bprec
+        word b = node(E_BINARY, ti)
+        next()
+        word rhs = binary(prec)
+        nf[b] = op
+        n1[b] = lhs
+        n2[b] = rhs
+        lhs = b
+    end
+    if failed then return 0 end
+    return lhs
+end
+
+function unary() -> word
+    word t0 = ti
+    byte k = tk[ti]
+    byte op = 255
+    if k == T_MINUS then
+        op = 0
+    elseif k == T_NOT then
+        op = 1
+    elseif k == T_TILDE then
+        op = 2
+    end
+    if op == 255 then return postfix() end
+    next()
+    word e = unary()
+    if failed then return 0 end
+    -- fold negative literals right away
+    if op == 0 and (nk[e] == E_INT or nk[e] == E_FIXED) then
+        nf[e] = 1 - nf[e]
+        nl[e] = tline(t0)
+        nc[e] = tcol(t0)
+        return e
+    end
+    word u = node(E_UNARY, t0)
+    nf[u] = op
+    n1[u] = e
+    return u
+end
+
+-- arguments after `(`, consuming the `)`: the first node
+function args() -> word
+    word first = 0
+    word last = 0
+    if not is_at(T_RPAREN) then
+        while not failed do
+            word a = expr()
+            if failed then return 0 end
+            if first == 0 then first = a end
+            last = append(first, last, a)
+            if not eat(T_COMMA) then break end
+        end
+    end
+    expect(T_RPAREN, "`)`")
+    return first
+end
+
+function postfix() -> word
+    word e = primary()
+    while not failed do
+        word t0 = ti
+        if eat(T_LBRACKET) then
+            word ix = node(E_INDEX, t0)
+            n1[ix] = e
+            n2[ix] = expr()
+            if not expect(T_RBRACKET, "`]`") then return 0 end
+            e = ix
+        elseif is_at(T_LPAREN) then
+            if nk[e] ~= E_NAME then
+                if fail_tok(ti) then msg("only named functions can be called") end
+                return 0
+            end
+            next()
+            -- Call keeps the position of the name
+            nk[e] = E_CALL
+            n2[e] = args()
+        elseif eat(T_DOT) then
+            word name = ident()
+            if failed then return 0 end
+            if eat(T_LPAREN) then
+                word m = node(E_METHOD, t0)
+                n1[m] = e
+                n2[m] = name
+                n3[m] = args()
+                e = m
+            else
+                word fd = node(E_FIELD, t0)
+                n1[fd] = e
+                n2[fd] = name
+                e = fd
+            end
+        else
+            return e
+        end
+    end
+    return 0
+end
+
+function primary() -> word
+    if is_at(T_LBRACE) then return list() end
+    word t = next()
+    byte k = tk[t]
+    word e = 0
+    if k == T_INT then
+        e = node(E_INT, t)
+        n1[e] = t
+    elseif k == T_FIXED then
+        e = node(E_FIXED, t)
+        n1[e] = t
+    elseif k == T_TRUE or k == T_FALSE then
+        e = node(E_BOOL, t)
+        if k == T_TRUE then nf[e] = 1 end
+    elseif k == T_STR then
+        e = node(E_STR, t)
+        n1[e] = t
+    elseif k == T_IDENT then
+        e = node(E_NAME, t)
+        n1[e] = t
+    elseif k == T_LPAREN then
+        e = expr()
+        if not expect(T_RPAREN, "`)`") then return 0 end
+    else
+        if fail_tok(t) then
+            msg("expected expression, found ")
+            msg_tok(t)
+        end
+        return 0
+    end
+    return e
+end
+
+-- ---- top level
+
+word prog_first = 0
+
+function program()
+    word last = 0
+    while not failed and not is_at(T_EOF) do
+        word item = 0
+        if is_at(T_FUNCTION) then
+            item = func()
+        elseif is_at(T_INTERRUPT) then
+            word t0 = ti
+            item = node(I_INTERRUPT, t0)
+            next()
+            word kind = ident()
+            if failed then return end
+            if text_is(kind, "raster") then
+                if not expect(T_LPAREN, "`(`") then return end
+                n1[item] = expr()
+                if not expect(T_RPAREN, "`)`") then return end
+                nf[item] = 1
+            elseif not text_is(kind, "frame") then
+                if fail_tok(t0) then msg("expected `interrupt raster(line)` or `interrupt frame`") end
+                return
+            end
+            n2[item] = block(T_END, T_END, T_END)
+            if not expect(T_END, "`end`") then return end
+        elseif is_at(T_STRUCT) or is_at(T_CLASS) then
+            item = struct_decl()
+        else
+            item = stmt()
+        end
+        if failed then return end
+        if prog_first == 0 then prog_first = item end
+        last = append(prog_first, last, item)
+    end
+end
+
+-- ---------------------------------------------------------------- loading
+
+-- an identifier just read at the end of the pool: refer it to an equal
+-- one read before, or remember it
+function intern(word t, word h)
+    word n = tlen_(t)
+    word e = ihead[h]
+    while e ~= 0 do
+        if ilen[e] == n then
+            word o = ioff[e]
+            word i = 0
+            while i < n and tpool[o + i] == tpool[pool_len + i] do i += 1 end
+            if i == n then
+                set_toff(t, o)
+                return
+            end
+        end
+        e = inext[e]
+    end
+    if nint < 7999 then
+        nint += 1
+        ioff[nint] = pool_len
+        ilen[nint] = n
+        inext[nint] = ihead[h]
+        ihead[h] = nint
+    end
+end
+
+function load_tokens() -> bool
+    inh = file_open("tokens.bin", FILE_READ)
+    if inh == FILE_ERROR then
+        print("cannot open tokens.bin, error", file_status)
+        return false
+    end
+    while not eof_in do
+        byte k = in_byte()
+        if eof_in then break end
+        if ntok >= MAX_TOKENS then
+            fail_at(0, 0)
+            msg("not supported by the self-hosted compiler yet: programs of more than 48000 tokens")
+            break
+        end
+        word t = ntok
+        ntok += 1
+        tk[t] = k
+        word ln = in_word()
+        tl_lo[t] = byte(ln)
+        tl_hi[t] = byte(ln >> 8)
+        word cl = in_word()
+        if cl > 255 then cl = 255 end
+        tc_[t] = byte(cl)
+        set_toff(t, 0)
+        tn_lo[t] = 0
+        tn_hi[t] = 0
+        if k == T_INT or k == T_FIXED then
+            -- the value: 4 bytes in the pool
+            if pool_len + 4 > 60000 then
+                if fail_at(ln, cl) then msg("program too large: more than 60000 bytes of names and texts") end
+                break
+            end
+            set_toff(t, pool_len)
+            word vl = in_word()
+            word vh = in_word()
+            tpool[pool_len] = byte(vl)
+            tpool[pool_len + 1] = byte(vl >> 8)
+            tpool[pool_len + 2] = byte(vh)
+            tpool[pool_len + 3] = byte(vh >> 8)
+            pool_len += 4
+        elseif k == T_IDENT or k == T_STR or k == T_ASM_BODY or k == T_ERROR then
+            word n = in_word()
+            set_toff(t, pool_len)
+            tn_lo[t] = byte(n)
+            tn_hi[t] = byte(n >> 8)
+            word i = 0
+            word h = 0
+            while i < n do
+                byte c = in_byte()
+                h = (h << 5) - h + c
+                if pool_len + i < 60000 then tpool[pool_len + i] = c end
+                i += 1
+            end
+            if pool_len + n > 60000 then
+                if fail_at(tline(t), tcol(t)) then msg("program too large: more than 60000 bytes of names and texts") end
+                break
+            end
+            if k == T_IDENT then intern(t, h & 4095) end
+            if toff_(t) == pool_len then pool_len += n end
+        end
+        if k == T_ERROR then
+            -- the lexer stopped: its error is the result
+            fail_tok(t)
+            msg_text(t)
+            break
+        end
+        if k == T_EOF then break end
+    end
+    file_close(inh)
+    return true
+end
+

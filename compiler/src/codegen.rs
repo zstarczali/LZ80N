@@ -234,9 +234,47 @@ const INTRINSICS: &[&str] = &[
     "music_play", "music_once", "music_stop", "music_playing",
 ];
 
+/// The trigonometry routines and their tables (sine, arctangent).
+pub(crate) fn trig_asm() -> String {
+    let mut out = String::from(runtime::TRIG);
+    out.push_str("rt_sin_tab:\n");
+    for chunk in (0..256).collect::<Vec<_>>().chunks(8) {
+        let row: Vec<String> = chunk
+            .iter()
+            .map(|&i| {
+                let v = ((i as f64) * std::f64::consts::PI * 2.0 / 256.0).sin() * 256.0;
+                format!("{}", (v.round() as i64) & 0xFFFF)
+            })
+            .collect();
+        out.push_str(&format!("    dw {}\n", row.join(",")));
+    }
+    out.push_str("rt_atan_tab:\n");
+    let row: Vec<String> = (0..=64)
+        .map(|i| format!("{}", ((i as f64 / 64.0).atan() * 128.0 / std::f64::consts::PI).round() as i64))
+        .collect();
+    out.push_str(&format!("    db {}\n", row.join(",")));
+    out
+}
+
+/// The note routine and its table of AY tone periods.
+pub(crate) fn notes_asm() -> String {
+    let mut out = String::from(runtime::NOTES);
+    out.push_str("; AY tone periods (1.75 MHz clock), notes 0..107 = C0..B8\nrt_note_tab:\n");
+    let per: Vec<String> = (0..108)
+        .map(|n| {
+            let f = 440.0 * 2f64.powf((n as f64 - 57.0) / 12.0);
+            ((1_750_000.0 / (16.0 * f)).round() as i64).min(4095).to_string()
+        })
+        .collect();
+    for c in per.chunks(12) {
+        out.push_str(&format!("    dw {}\n", c.join(",")));
+    }
+    out
+}
+
 /// Built-in constants. Keys are encoded as `row * 8 + bit` of the
 /// Spectrum keyboard matrix (row = address line A8..A15 of port $xxFE).
-fn builtin_consts() -> Vec<(String, i64)> {
+pub(crate) fn builtin_consts() -> Vec<(String, i64)> {
     let rows = [
         ["CAPS", "Z", "X", "C", "V"],
         ["A", "S", "D", "F", "G"],
@@ -5568,17 +5606,7 @@ impl Gen {
             out.push_str(&runtime::long());
         }
         if self.uses_notes {
-            out.push_str(runtime::NOTES);
-            out.push_str("; AY tone periods (1.75 MHz clock), notes 0..107 = C0..B8\nrt_note_tab:\n");
-            let per: Vec<String> = (0..108)
-                .map(|n| {
-                    let f = 440.0 * 2f64.powf((n as f64 - 57.0) / 12.0);
-                    ((1_750_000.0 / (16.0 * f)).round() as i64).min(4095).to_string()
-                })
-                .collect();
-            for c in per.chunks(12) {
-                let _ = writeln!(out, "    dw {}", c.join(","));
-            }
+            out.push_str(&notes_asm());
         }
         let zero = self.zero_pages();
         if !zero.is_empty() {
@@ -5599,23 +5627,7 @@ impl Gen {
             }
         }
         if self.uses_trig {
-            out.push_str(runtime::TRIG);
-            out.push_str("rt_sin_tab:\n");
-            for chunk in (0..256).collect::<Vec<_>>().chunks(8) {
-                let row: Vec<String> = chunk
-                    .iter()
-                    .map(|&i| {
-                        let v = ((i as f64) * std::f64::consts::PI * 2.0 / 256.0).sin() * 256.0;
-                        format!("{}", (v.round() as i64) & 0xFFFF)
-                    })
-                    .collect();
-                let _ = writeln!(out, "    dw {}", row.join(","));
-            }
-            out.push_str("rt_atan_tab:\n");
-            let row: Vec<String> = (0..=64)
-                .map(|i| format!("{}", ((i as f64 / 64.0).atan() * 128.0 / std::f64::consts::PI).round() as i64))
-                .collect();
-            let _ = writeln!(out, "    db {}", row.join(","));
+            out.push_str(&trig_asm());
         }
         out.push_str(&self.data);
         let _ = write!(

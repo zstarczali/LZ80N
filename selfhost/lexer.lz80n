@@ -1,0 +1,794 @@
+-- selfhost/lexer.lz80n - the LZ80N lexer, written in LZ80N
+--
+-- Reads in.lz80n from the SD card and writes its tokens to tokens.bin.
+-- It follows compiler/src/lexer.rs exactly; the test
+-- `selfhost_lexer_matches_rust` compares the two outputs byte for byte.
+--
+-- Record: kind (byte), line (word), column (word), then
+--   T_IDENT, T_STR, T_ASM_BODY: length (word) + the bytes
+--   T_INT, T_FIXED: 4 bytes (little endian; fixed = raw 16.16)
+--   T_ERROR (255): length (word) + the message; nothing follows it
+-- The last record is T_EOF.
+--
+-- When the file expand.on exists (the self-hosted compiler's pipeline),
+-- `include "file"` is expanded (each file once, the main file counts) and
+-- the standard modules (lib_*.lz80n) the main file mentions are lexed
+-- first, as compiler/src/main.rs does.
+
+const T_IDENT = 0
+const T_INT = 1
+const T_DOTDOT = 2
+const T_FIXED = 3
+const T_STR = 4
+const T_ASM_BODY = 5
+const T_AND = 6                 -- keywords: T_AND + index in `keywords`
+const T_END = 13
+const T_ASM = 24
+const T_INCLUDE = 30
+const T_PLUS = 31
+const T_MINUS = 32
+const T_STAR = 33
+const T_SLASH = 34
+const T_PERCENT = 35
+const T_AMP = 36
+const T_PIPE = 37
+const T_TILDE = 38
+const T_SHL = 39
+const T_SHR = 40
+const T_EQEQ = 41
+const T_NOTEQ = 42
+const T_LT = 43
+const T_LE = 44
+const T_GT = 45
+const T_GE = 46
+const T_ASSIGN = 47
+const T_PLUSEQ = 48
+const T_MINUSEQ = 49
+const T_STAREQ = 50
+const T_AMPEQ = 51
+const T_PIPEEQ = 52
+const T_SLASHEQ = 53
+const T_PERCENTEQ = 54
+const T_SHLEQ = 55
+const T_SHREQ = 56
+const T_LPAREN = 57
+const T_RPAREN = 58
+const T_LBRACKET = 59
+const T_RBRACKET = 60
+const T_LBRACE = 61
+const T_RBRACE = 62
+const T_COMMA = 63
+const T_DOT = 64
+const T_ARROW = 65
+const T_EOF = 66
+const T_ERROR = 255
+
+const NKEYWORDS = 25
+string keywords[] = {
+    "and", "or", "not", "if", "then", "elseif", "else", "end", "while", "do",
+    "for", "function", "return", "break", "const", "var", "true", "false",
+    "asm", "struct", "class", "asset", "interrupt", "far", "include"
+}
+
+-- ---------------------------------------------------------------- input
+
+byte inh                        -- input file
+long size                       -- its length
+long pos                        -- index of c0
+byte c0                         -- current character (0 past the end)
+byte c1                         -- the one after it
+word lno = 1
+word cno = 1
+bool failed = false
+bool expand = false             -- expand includes and modules (expand.on)
+
+function next_in() -> byte
+    word g = file_getc(inh)
+    if g == FILE_EOF then return 0 end
+    return byte(g)
+end
+
+function at_end() -> bool
+    return pos >= size
+end
+
+-- consume c0
+function bump() -> byte
+    byte c = c0
+    if pos < size then pos += 1 end
+    if c == 10 then
+        lno += 1
+        cno = 1
+    else
+        cno += 1
+    end
+    c0 = c1
+    c1 = 0
+    if pos + 1 < size then c1 = next_in() end
+    return c
+end
+
+function is_digit(byte c) -> bool
+    return c >= '0' and c <= '9'
+end
+
+function is_alpha(byte c) -> bool
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
+end
+
+function is_alnum(byte c) -> bool
+    return is_alpha(c) or is_digit(c)
+end
+
+function is_hex(byte c) -> bool
+    return is_digit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+end
+
+-- Rust's is_ascii_whitespace (no vertical tab)
+function is_ascii_ws(byte c) -> bool
+    return c == ' ' or c == 9 or c == 10 or c == 12 or c == 13
+end
+
+-- whitespace for trimming (also vertical tab)
+function is_space(byte c) -> bool
+    return c == ' ' or c == 9 or c == 10 or c == 11 or c == 12 or c == 13
+end
+
+-- ---------------------------------------------------------------- output
+
+byte outh
+byte obuf[256]
+word olen = 0
+far byte text[32000]            -- text of the current token
+word tlen = 0
+
+function flush()
+    if olen > 0 then
+        file_write(outh, addr(obuf), olen)
+        olen = 0
+    end
+end
+
+function out_byte(byte b)
+    obuf[olen] = b
+    olen += 1
+    if olen == 256 then flush() end
+end
+
+function out_word(word w)
+    out_byte(byte(w))
+    out_byte(byte(w >> 8))
+end
+
+function out_long(long v)
+    out_word(word(v))
+    out_word(word(v >> 16))
+end
+
+function text_add(byte c)
+    if tlen < 32000 then
+        text[tlen] = c
+        tlen += 1
+    end
+end
+
+const T_ASSET = 27
+bool has_assets = false     -- an `asset` declaration: assets.nex runs next
+
+function out_head(byte kind, word l, word c)
+    if kind == T_ASSET then has_assets = true end
+    out_byte(kind)
+    out_word(l)
+    out_word(c)
+end
+
+function out_text()
+    out_word(tlen)
+    word i = 0
+    while i < tlen do
+        out_byte(text[i])
+        i += 1
+    end
+end
+
+-- an error record ends the output
+function error(word l, word c, string msg)
+    if failed then return end
+    failed = true
+    out_head(T_ERROR, l, c)
+    tlen = 0
+    byte n = len(msg)
+    byte i = 0
+    while i < n do
+        text_add(asc(msg, i))
+        i += 1
+    end
+    out_text()
+end
+
+-- ---------------------------------------------------------------- lexing
+
+function skip_ws_and_comments()
+    while not failed do
+        if c0 == ' ' or c0 == 9 or c0 == 13 or c0 == 10 then
+            bump()
+        elseif c0 == '-' and c1 == '-' then
+            word l = lno
+            word c = cno
+            bump()
+            bump()
+            if c0 == '[' and c1 == '[' then
+                while true do
+                    if at_end() then
+                        error(l, c, "unterminated block comment")
+                        return
+                    end
+                    if c0 == ']' and c1 == ']' then
+                        bump()
+                        bump()
+                        break
+                    end
+                    bump()
+                end
+            else
+                while not at_end() and c0 ~= 10 do bump() end
+            end
+        else
+            return
+        end
+    end
+end
+
+-- an identifier or keyword: the kind (T_IDENT: the name is in text)
+function word_tok() -> byte
+    tlen = 0
+    string w = ""
+    while is_alnum(c0) or c0 == '_' do
+        byte c = bump()
+        text_add(c)
+        if tlen <= 64 then w = w .. chr(c) end
+    end
+    if tlen <= 9 then
+        for k = 0, NKEYWORDS - 1 do
+            if w == keywords[k] then return T_AND + k end
+        end
+    end
+    return T_IDENT
+end
+
+function digit_value(byte c) -> byte
+    if is_digit(c) then return c - '0' end
+    if c >= 'a' and c <= 'z' then return c - 'a' + 10 end
+    if c >= 'A' and c <= 'Z' then return c - 'A' + 10 end
+    return 255
+end
+
+-- a number literal: writes its record
+function number(word l, word c)
+    byte radix = 10
+    if c0 == '$' then
+        radix = 16
+        bump()
+    elseif c0 == '0' and (c1 | 0x20) == 'x' then
+        radix = 16
+        bump()
+        bump()
+    elseif c0 == '0' and (c1 | 0x20) == 'b' then
+        radix = 2
+        bump()
+        bump()
+    end
+    string t = ""
+    bool ok = true
+    bool any = false
+    long hi = 0                 -- the value as two 16-bit halves
+    long lo = 0
+    while is_alnum(c0) or c0 == '_' do
+        byte ch = bump()
+        if ch ~= '_' then
+            any = true
+            t = t .. chr(ch)
+            byte d = digit_value(ch)
+            if d >= radix then ok = false end
+            if ok then
+                lo = lo * radix + d
+                hi = hi * radix + (lo >> 16)
+                lo = lo & 0xFFFF
+                if hi > 0xFFFF then ok = false end
+            end
+        end
+    end
+    if radix == 10 and c0 == '.' and is_digit(c1) then
+        bump()
+        string f = ""
+        long num = 0            -- first 9 fraction digits
+        long den = 1
+        byte nd = 0
+        while is_digit(c0) do
+            byte ch = bump()
+            f = f .. chr(ch)
+            if nd < 9 then
+                num = num * 10 + (ch - '0')
+                den = den * 10
+                nd += 1
+            end
+        end
+        if not any or not ok then
+            error(l, c, "invalid number literal `" .. t .. "." .. f .. "`")
+            return
+        end
+        -- 17 bits of num / den, rounded to 16
+        long fr = 0
+        for k = 1, 17 do
+            num = num << 1
+            fr = fr << 1
+            if num >= den then
+                num -= den
+                fr |= 1
+            end
+        end
+        fr = (fr + 1) >> 1
+        long ip = hi << 16 | lo
+        if ip > 32767 or (ip == 32767 and fr > 0xFFFF) then
+            error(l, c, "`" .. t .. "." .. f .. "` does not fit in `fixed16` (-32768 .. 32767.99)")
+            return
+        end
+        out_head(T_FIXED, l, c)
+        out_long((ip << 16) + fr)
+        return
+    end
+    if not any or not ok then
+        error(l, c, "invalid number literal `" .. t .. "`")
+        return
+    end
+    out_head(T_INT, l, c)
+    out_word(word(lo))
+    out_word(word(hi))
+end
+
+bool str_emit = true
+
+-- a string literal into text (no record)
+function string_lit_text()
+    str_emit = false
+    string_lit(lno, cno)
+    str_emit = true
+end
+
+function string_lit(word l, word c)
+    bump()
+    tlen = 0
+    while true do
+        byte ch = bump()
+        if ch == 0 or ch == 10 then
+            error(l, c, "unterminated string literal")
+            return
+        end
+        if ch == '"' then
+            if str_emit then
+                out_head(T_STR, l, c)
+                out_text()
+            end
+            return
+        end
+        if ch == '\\' then
+            byte e = bump()
+            if e == 'n' then
+                text_add(10)
+            elseif e == 't' then
+                text_add(9)
+            elseif e == '\\' then
+                text_add('\\')
+            elseif e == '"' then
+                text_add('"')
+            elseif e == '0' then
+                text_add(0)
+            else
+                error(l, c, "unknown escape `\\" .. chr(e) .. "`")
+                return
+            end
+        else
+            text_add(ch)
+        end
+    end
+end
+
+-- the body of an `asm` block: raw lines up to a lno that is only `end`
+byte lbuf[1024]
+word llen
+
+function asm_body()
+    word l = lno
+    word c = cno
+    while not at_end() and c0 ~= 10 do
+        byte ch = bump()
+        if not is_ascii_ws(ch) then
+            error(l, c, "`asm` must be followed by a newline")
+            return
+        end
+    end
+    tlen = 0
+    while true do
+        if at_end() then
+            error(l, c, "unterminated `asm` block (missing `end`)")
+            return
+        end
+        bump()                  -- the newline
+        llen = 0
+        while not at_end() and c0 ~= 10 do
+            byte ch = bump()
+            if llen < 1024 then
+                lbuf[llen] = ch
+                llen += 1
+            end
+        end
+        -- the code part: up to `;`, trimmed
+        word a = 0
+        word b = 0
+        while b < llen and lbuf[b] ~= ';' do b += 1 end
+        while a < b and is_space(lbuf[a]) do a += 1 end
+        while b > a and is_space(lbuf[b - 1]) do b -= 1 end
+        if b - a == 3 and lbuf[a] == 'e' and lbuf[a + 1] == 'n' and lbuf[a + 2] == 'd' then
+            out_head(T_ASM_BODY, l, c)
+            out_text()
+            out_head(T_END, lno, cno)
+            return
+        end
+        word e = llen
+        while e > 0 and is_space(lbuf[e - 1]) do e -= 1 end
+        word i = 0
+        while i < e do
+            text_add(lbuf[i])
+            i += 1
+        end
+        text_add(10)
+    end
+end
+
+-- one token at the current position (not at the end, no space before it)
+function token()
+    word l = lno
+    word c = cno
+    if is_alpha(c0) or c0 == '_' then
+        byte kind = word_tok()
+        if kind == T_INCLUDE and expand then
+            include_file(l, c)
+            return
+        end
+        out_head(kind, l, c)
+        if kind == T_IDENT then out_text() end
+        if kind == T_ASM then asm_body() end
+        return
+    end
+    if is_digit(c0) or (c0 == '$' and is_hex(c1)) then
+        number(l, c)
+        return
+    end
+    if c0 == '"' then
+        string_lit(l, c)
+        return
+    end
+    if c0 == 39 then            -- '
+        bump()
+        byte ch = bump()
+        if ch == '\\' then
+            ch = bump()
+            if ch == 'n' then
+                ch = 10
+            elseif ch == 't' then
+                ch = 9
+            elseif ch == '0' then
+                ch = 0
+            end
+        end
+        if c0 ~= 39 then
+            error(l, c, "character literal must be one character in single quotes")
+            return
+        end
+        bump()
+        out_head(T_INT, l, c)
+        out_long(long(ch))
+        return
+    end
+    byte ch = bump()
+    byte n = c0
+    byte k = 255
+    if ch == '+' then
+        k = T_PLUS
+        if n == '=' then k = T_PLUSEQ end
+    elseif ch == '-' then
+        k = T_MINUS
+        if n == '=' then k = T_MINUSEQ end
+        if n == '>' then k = T_ARROW end
+    elseif ch == '*' then
+        k = T_STAR
+        if n == '=' then k = T_STAREQ end
+    elseif ch == '/' then
+        k = T_SLASH
+        if n == '=' then k = T_SLASHEQ end
+    elseif ch == '%' then
+        k = T_PERCENT
+        if n == '=' then k = T_PERCENTEQ end
+    elseif ch == '<' then
+        k = T_LT
+        if n == '<' and c1 == '=' then
+            bump()
+            k = T_SHLEQ
+        elseif n == '=' then
+            k = T_LE
+        elseif n == '<' then
+            k = T_SHL
+        end
+    elseif ch == '>' then
+        k = T_GT
+        if n == '>' and c1 == '=' then
+            bump()
+            k = T_SHREQ
+        elseif n == '=' then
+            k = T_GE
+        elseif n == '>' then
+            k = T_SHR
+        end
+    elseif ch == '&' then
+        k = T_AMP
+        if n == '=' then k = T_AMPEQ end
+    elseif ch == '|' then
+        k = T_PIPE
+        if n == '=' then k = T_PIPEEQ end
+    elseif ch == '=' then
+        k = T_ASSIGN
+        if n == '=' then k = T_EQEQ end
+    elseif ch == '~' then
+        k = T_TILDE
+        if n == '=' then k = T_NOTEQ end
+    elseif ch == '!' and n == '=' then
+        k = T_NOTEQ
+    elseif ch == '(' then
+        k = T_LPAREN
+    elseif ch == ')' then
+        k = T_RPAREN
+    elseif ch == '[' then
+        k = T_LBRACKET
+    elseif ch == ']' then
+        k = T_RBRACKET
+    elseif ch == '{' then
+        k = T_LBRACE
+    elseif ch == '}' then
+        k = T_RBRACE
+    elseif ch == ',' then
+        k = T_COMMA
+    elseif ch == '.' then
+        k = T_DOT
+        if n == '.' then k = T_DOTDOT end
+    end
+    if k == 255 then
+        error(l, c, "unexpected character `" .. chr(ch) .. "`")
+        return
+    end
+    -- two-character operators consume their second character
+    if k == T_PLUSEQ or k == T_MINUSEQ or k == T_ARROW or k == T_STAREQ or k == T_SLASHEQ or
+            k == T_PERCENTEQ or k == T_SHLEQ or k == T_SHREQ or k == T_LE or k == T_SHL or k == T_GE or
+            k == T_SHR or k == T_AMPEQ or k == T_PIPEEQ or k == T_EQEQ or k == T_NOTEQ or
+            k == T_DOTDOT then
+        bump()
+    end
+    out_head(k, l, c)
+end
+
+-- ---------------------------------------------------------------- files
+
+word ntokens = 0
+string included[16]
+string cur_dir = ""         -- the directory of the file being read
+byte nincluded = 0
+
+-- lex one file (no T_EOF); false if it cannot be opened
+function lex_file(string name) -> bool
+    inh = file_open(name, FILE_READ)
+    if inh == FILE_ERROR then return false end
+    size = file_size(inh)
+    pos = 0
+    c0 = 0
+    c1 = 0
+    lno = 1
+    cno = 1
+    if size > 0 then c0 = next_in() end
+    if size > 1 then c1 = next_in() end
+    while not failed do
+        skip_ws_and_comments()
+        if failed or at_end() then break end
+        token()
+        ntokens += 1
+    end
+    file_close(inh)
+    return true
+end
+
+-- `include "path"` (the keyword is read): lex that file here, once
+function include_file(word l, word c)
+    skip_ws_and_comments()
+    if c0 ~= '"' then
+        error(l, c, "expected a file name after `include`")
+        return
+    end
+    word sl = lno
+    word sc = cno
+    string_lit_text()
+    if failed then return end
+    -- relative to the including file
+    string path = cur_dir
+    word i = 0
+    if tlen > 0 and text[0] == '/' then path = "" end
+    while i < tlen and len(path) < 64 do
+        path = path .. chr(text[i])
+        i += 1
+    end
+    byte k = 0
+    while k < nincluded do
+        if included[k] == path then return end
+        k += 1
+    end
+    if nincluded < 16 then
+        included[nincluded] = path
+        nincluded += 1
+    end
+    -- the state of this file, then the other file, then back
+    byte h = inh
+    long sz = size
+    long p = pos
+    byte a = c0
+    byte b = c1
+    word ln = lno
+    word cn = cno
+    string dir = cur_dir
+    -- the directory of the included file
+    cur_dir = ""
+    byte j = len(path)
+    while j > 0 and asc(path, j - 1) ~= '/' do j -= 1 end
+    byte q = 0
+    while q < j do
+        cur_dir = cur_dir .. chr(asc(path, q))
+        q += 1
+    end
+    if not lex_file(path) then
+        error(sl, sc, "cannot read the included file")
+        return
+    end
+    cur_dir = dir
+    inh = h
+    size = sz
+    pos = p
+    c0 = a
+    c1 = b
+    lno = ln
+    cno = cn
+    file_seek(inh, pos + 2)
+end
+
+-- the standard modules, in the order compiler/src/main.rs puts them in
+-- front of the program, and the words that pull each one in
+const NMODULES = 6
+-- (a `|` keeps the words out of this source, which would otherwise pull the
+-- modules into itself; drop_bars removes it)
+string module_files[] = {
+    "lib_s|prites.lz80n", "lib_l|ayer2.lz80n", "lib_p|alette.lz80n",
+    "lib_file.lz80n", "lib_c|opper.lz80n", "lib_sound.lz80n"
+}
+const NPATTERNS = 28
+string patterns[] = {
+    "s|prite", "S|prite",
+    "l|ayer2", "p|lot", "p|oint", "h|line", "v|line", "l|ine(", "r|ect", "r|gb(", "T|RANSPARENT", "c|ircle", "e|llipse", "t|riangle",
+    "p|alette", "P|AL_", "r|gb9",
+    "f|ile_", "F|ILE_",
+    "c|opper",
+    "p|lay(", "b|eep(", "t|one(", "n|oise(", "v|olume(", "s|ound_", "p|laying(", "p|lay_loop("
+}
+byte pattern_module[] = {
+    0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2,
+    3, 3,
+    4,
+    5, 5, 5, 5, 5, 5, 5, 5
+}
+bool module_used[6]
+
+-- w without its `|` -> unbarred
+string unbarred
+function drop_bars(string w)
+    unbarred = ""
+    byte n = len(w)
+    byte i = 0
+    while i < n do
+        if asc(w, i) ~= '|' then unbarred = unbarred .. chr(asc(w, i)) end
+        i += 1
+    end
+end
+
+function drop_all_bars()
+    for k = 0, NPATTERNS - 1 do
+        drop_bars(patterns[k])
+        patterns[k] = unbarred
+    end
+    for k = 0, NMODULES - 1 do
+        drop_bars(module_files[k])
+        module_files[k] = unbarred
+    end
+end
+
+-- which modules does the main file mention? (a plain text search, as
+-- compiler/src/prelude.rs does: comments and strings count too)
+function find_modules()
+    byte h = file_open("in.lz80n", FILE_READ)
+    if h == FILE_ERROR then return end
+    byte prog[28]               -- characters of each pattern matched so far
+    for k = 0, NPATTERNS - 1 do prog[k] = 0 end
+    word g = file_getc(h)
+    while g ~= FILE_EOF do
+        byte ch = byte(g)
+        for k = 0, NPATTERNS - 1 do
+            byte m = prog[k]
+            if asc(patterns[k], m) == ch then
+                m += 1
+                if m == len(patterns[k]) then
+                    module_used[pattern_module[k]] = true
+                    m = 0
+                end
+            elseif asc(patterns[k], 0) == ch then
+                m = 1
+            else
+                m = 0
+            end
+            prog[k] = m
+        end
+        g = file_getc(h)
+    end
+    file_close(h)
+end
+
+-- ---------------------------------------------------------------- main
+
+byte probe = file_open("expand.on", FILE_READ)
+if probe ~= FILE_ERROR then
+    expand = true
+    file_close(probe)
+end
+outh = file_open("tokens.bin", FILE_WRITE)
+if expand then
+    -- the built-in constants (KEY_A, BLACK, ...) come first
+    if not lex_file("lib_consts.lz80n") then error(1, 1, "cannot read lib_consts.lz80n") end
+    drop_all_bars()
+    find_modules()
+    for k = 0, NMODULES - 1 do
+        if module_used[k] and not failed then
+            if not lex_file(module_files[k]) then error(1, 1, "cannot read " .. module_files[k]) end
+        end
+    end
+end
+included[0] = "in.lz80n"
+nincluded = 1
+if not failed then
+    if not lex_file("in.lz80n") then
+        print("cannot open in.lz80n, error", file_status)
+    end
+end
+if not failed then out_head(T_EOF, lno, cno) end
+flush()
+file_close(outh)
+print("lexer:", ntokens, "tokens")
+-- assets.on: the program declares assets (assets.nex converts them before
+-- the code generator reads them)
+if has_assets and not failed then
+    byte ah = file_open("assets.on", FILE_WRITE)
+    if ah ~= FILE_ERROR then file_close(ah) end
+elseif file_exists("assets.on") then
+    file_delete("assets.on")
+end
+-- the next stage (lexer -> [assets ->] codegen -> asm)
+if expand and file_exists("chain.on") then
+    if has_assets and not failed then
+        if not file_exec("nexload assets.nex") then print("cannot start assets.nex, error", file_status) end
+    elseif not file_exec("nexload codegen.nex") then
+        print("cannot start codegen.nex, error", file_status)
+    end
+end

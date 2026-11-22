@@ -1,0 +1,2384 @@
+-- selfhost/asm.lz80n - the LZ80N assembler, written in LZ80N
+--
+-- Assembles in.asm (or out.asm from codegen.lz80n; Z80N, the sjasmplus
+-- subset lz80nc generates) into the
+-- NEX file named by its `SAVENEX OPEN`. It follows compiler/src/asm/
+-- (expressions, encoder, pseudo-ops, NEX writer); the test
+-- `selfhost_asm_matches_rust` compares the NEX byte for byte with the one
+-- the Rust assembler makes. On an error asm.err holds `LINE: message`.
+--
+-- Passes: a layout pass, then final passes until no symbol changes value
+-- (instruction sizes never depend on operand values: usually 2 passes).
+-- The output image is kept in 8K pages in far arrays (35 pages).
+
+-- ---------------------------------------------------------------- line
+
+byte lbuf[514]
+word llen
+word lno = 0                -- line number
+byte inh
+bool in_eof = false
+
+-- read the next line into lbuf (without the newline); false at the end
+function read_text_ln() -> bool
+    llen = 0
+    if in_eof then return false end
+    bool any = false
+    while true do
+        word g = file_getc(inh)
+        if g == FILE_EOF then
+            in_eof = true
+            return any
+        end
+        any = true
+        if g == 10 then return true end
+        if g ~= 13 and llen < 512 then
+            lbuf[llen] = byte(g)
+            llen += 1
+        end
+    end
+    return any
+end
+
+function lc(byte c) -> byte
+    if c >= 'A' and c <= 'Z' then return c + 32 end
+    return c
+end
+
+function is_digit(byte c) -> bool
+    return c >= '0' and c <= '9'
+end
+
+function is_hexd(byte c) -> bool
+    return is_digit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+end
+
+function is_ident_start(byte c) -> bool
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '.' or c == '@'
+end
+
+function is_ident_char(byte c) -> bool
+    return is_ident_start(c) or is_digit(c) or c == '?' or c == '!'
+end
+
+function is_blank(byte c) -> bool
+    return c == ' ' or c == 9
+end
+
+-- is lbuf[s..e) the lower-case word w (case-insensitive)?
+function rng_is(word s, word e, string w) -> bool
+    byte n = len(w)
+    if e - s ~= n then return false end
+    byte i = 0
+    while i < n do
+        if lc(lbuf[s + i]) ~= asc(w, i) then return false end
+        i += 1
+    end
+    return true
+end
+
+-- does lbuf[s..e) start with w (case-insensitive)?
+function rng_starts(word s, word e, string w) -> bool
+    byte n = len(w)
+    if e - s < n then return false end
+    byte i = 0
+    while i < n do
+        if lc(lbuf[s + i]) ~= asc(w, i) then return false end
+        i += 1
+    end
+    return true
+end
+
+word ts                     -- trim results
+word te
+function trim(word s, word e)
+    while s < e and (is_blank(lbuf[s])) do s += 1 end
+    while e > s and (is_blank(lbuf[e - 1])) do e -= 1 end
+    ts = s
+    te = e
+end
+
+-- ---------------------------------------------------------------- errors
+
+bool failed = false
+word err_line
+byte emsg[200]
+word elen = 0
+bool strict = false
+
+function msg(string s)
+    byte n = len(s)
+    byte i = 0
+    while i < n do
+        if elen < 200 then
+            emsg[elen] = asc(s, i)
+            elen += 1
+        end
+        i += 1
+    end
+end
+
+function msg_rng(word s, word e)
+    while s < e do
+        if elen < 200 then
+            emsg[elen] = lbuf[s]
+            elen += 1
+        end
+        s += 1
+    end
+end
+
+-- start an error (only the first one, only in a final pass)
+function fail() -> bool
+    if failed or not strict then return false end
+    failed = true
+    err_line = lno
+    elen = 0
+    return true
+end
+
+-- ---------------------------------------------------------------- symbols
+
+const HSIZE = 4096
+const MAXSYM = 6000
+far word hhead[4096]
+far word snext[6000]
+far word soff[6000]
+far byte slen[6000]
+far word svl[6000]
+far word svh[6000]
+far word spass[6000]        -- pass in which it was last defined
+far byte spool[65000]
+word nsym = 0
+word spool_len = 0
+word pass = 0
+bool changed = false
+
+byte qbuf[160]              -- a full symbol name
+byte qlen
+byte gbuf[128]              -- the last global label (for `.local`)
+byte glen = 0
+
+function qhash() -> word
+    word h = 0
+    byte i = 0
+    while i < qlen do
+        h = (h << 5) - h + qbuf[i]
+        i += 1
+    end
+    return h & (HSIZE - 1)
+end
+
+-- the symbol named qbuf, 0 if there is none
+function sym_find() -> word
+    word s = hhead[qhash()]
+    while s ~= 0 do
+        if slen[s] == qlen then
+            word o = soff[s]
+            byte i = 0
+            while i < qlen and spool[o + i] == qbuf[i] do i += 1 end
+            if i == qlen then return s end
+        end
+        s = snext[s]
+    end
+    return 0
+end
+
+-- qbuf = name lbuf[s..e), qualified: `.x` -> last global + `.x`, `@x` -> x
+function qualify(word s, word e)
+    qlen = 0
+    if lbuf[s] == '.' then
+        byte i = 0
+        while i < glen do
+            qbuf[qlen] = gbuf[i]
+            qlen += 1
+            i += 1
+        end
+    elseif lbuf[s] == '@' then
+        s += 1
+    end
+    while s < e and qlen < 159 do
+        qbuf[qlen] = lbuf[s]
+        qlen += 1
+        s += 1
+    end
+end
+
+function sym_value(word s) -> long
+    return long(svh[s]) << 16 | long(svl[s])
+end
+
+-- define the label lbuf[s..e) = v
+function define(word s, word e, long v)
+    qualify(s, e)
+    if lbuf[s] ~= '.' then
+        glen = qlen
+        byte i = 0
+        while i < qlen do
+            gbuf[i] = qbuf[i]
+            i += 1
+        end
+    end
+    word sym = sym_find()
+    if sym == 0 then
+        if nsym >= MAXSYM - 1 or spool_len + qlen > 65000 then
+            if fail() then msg("too many symbols") end
+            return
+        end
+        nsym += 1
+        sym = nsym
+        word h = qhash()
+        snext[sym] = hhead[h]
+        hhead[h] = sym
+        soff[sym] = spool_len
+        slen[sym] = qlen
+        byte i = 0
+        while i < qlen do
+            spool[spool_len] = qbuf[i]
+            spool_len += 1
+            i += 1
+        end
+        changed = true
+    else
+        if spass[sym] == pass then
+            if fail() then
+                msg("label `")
+                msg_rng(s, e)
+                msg("` defined twice")
+            end
+            return
+        end
+        if sym_value(sym) ~= v then changed = true end
+    end
+    spass[sym] = pass
+    svl[sym] = word(v)
+    svh[sym] = word(v >> 16)
+end
+
+-- ---------------------------------------------------------------- expressions
+
+word ep                     -- cursor in lbuf
+word eend
+bool undef                  -- an undefined symbol was used
+word miss_s                 -- the first one: lbuf[miss_s..miss_e)
+word miss_e
+long here = 0               -- `$`
+
+function ech() -> byte
+    if ep < eend then return lbuf[ep] end
+    return 0
+end
+
+function ech1() -> byte
+    if ep + 1 < eend then return lbuf[ep + 1] end
+    return 0
+end
+
+function eskip()
+    while ep < eend and is_blank(lbuf[ep]) do ep += 1 end
+end
+
+function eerr(string m)
+    if fail() then msg(m) end
+end
+
+function unescape(byte e) -> byte
+    if e == 'n' then return 10 end
+    if e == 'r' then return 13 end
+    if e == 't' then return 9 end
+    if e == '0' then return 0 end
+    if e == 'a' then return 7 end
+    if e == 'b' then return 8 end
+    if e == 'e' then return 27 end
+    if e == 'f' then return 12 end
+    if e == 'v' then return 11 end
+    return e
+end
+
+function digit_of(byte c) -> byte
+    if is_digit(c) then return c - '0' end
+    if c >= 'a' and c <= 'z' then return c - 'a' + 10 end
+    if c >= 'A' and c <= 'Z' then return c - 'A' + 10 end
+    return 255
+end
+
+-- digits of radix r (and `_`) at ep
+function radix(byte r) -> long
+    long v = 0
+    bool any = false
+    while ep < eend do
+        byte c = lbuf[ep]
+        if c ~= '_' then
+            byte d = digit_of(c)
+            if d >= r then break end
+            v = v * r + d
+            any = true
+        end
+        ep += 1
+    end
+    if not any then eerr("missing digits") end
+    return v
+end
+
+function number() -> long
+    byte c1 = ech1()
+    if ech() == '0' and (c1 | 0x20) == 'x' and ep + 2 < eend then
+        ep += 2
+        return radix(16)
+    end
+    if ech() == '0' and (c1 | 0x20) == 'b' and ep + 2 < eend and (lbuf[ep + 2] == '0' or lbuf[ep + 2] == '1') then
+        ep += 2
+        return radix(2)
+    end
+    word s = ep
+    while ep < eend and (is_hexd(lbuf[ep]) or lbuf[ep] == '_') do ep += 1 end
+    word e = ep
+    if ep < eend and (lbuf[ep] | 0x20) == 'h' then
+        ep += 1
+        long v = 0
+        word i = s
+        while i < e do
+            if lbuf[i] ~= '_' then v = v * 16 + digit_of(lbuf[i]) end
+            i += 1
+        end
+        return v
+    end
+    -- a trailing b / d: binary / decimal suffix
+    if e - s >= 2 then
+        byte last = lbuf[e - 1] | 0x20
+        if last == 'b' or last == 'd' then
+            byte r = 2
+            if last == 'd' then r = 10 end
+            bool ok = true
+            long v = 0
+            word i = s
+            while i < e - 1 do
+                if lbuf[i] ~= '_' then
+                    byte d = digit_of(lbuf[i])
+                    if d >= r then ok = false end
+                    v = v * r + d
+                end
+                i += 1
+            end
+            if ok then return v end
+        end
+    end
+    long v = 0
+    word i = s
+    while i < e do
+        if lbuf[i] ~= '_' then
+            byte d = digit_of(lbuf[i])
+            if d >= 10 then
+                if fail() then
+                    msg("bad number `")
+                    msg_rng(s, e)
+                    msg("`")
+                end
+                return 0
+            end
+            v = v * 10 + d
+        end
+        i += 1
+    end
+    return v
+end
+
+function char_lit(byte q) -> long
+    ep += 1
+    long v = 0
+    byte n = 0
+    while ep < eend do
+        byte c = lbuf[ep]
+        ep += 1
+        if c == q then
+            if n == 0 then eerr("empty character constant") end
+            return v
+        end
+        if c == '\\' and q == '"' and ep < eend then
+            c = unescape(lbuf[ep])
+            ep += 1
+        end
+        v = (v << 8) | c
+        n += 1
+    end
+    eerr("unterminated character constant")
+    return 0
+end
+
+function eprim() -> long
+    eskip()
+    byte c = ech()
+    if c == 0 then
+        eerr("missing operand")
+        return 0
+    end
+    if c == '(' then
+        ep += 1
+        long v = ex(0)
+        eskip()
+        if ech() ~= ')' then
+            eerr("missing `)`")
+            return 0
+        end
+        ep += 1
+        return v
+    end
+    if c == 39 or c == '"' then return char_lit(c) end
+    if c == '$' then
+        ep += 1
+        if is_hexd(ech()) then return radix(16) end
+        if ech() == '$' then
+            ep += 1
+            return 0
+        end
+        return here
+    end
+    if c == '#' then
+        ep += 1
+        return radix(16)
+    end
+    if c == '%' then
+        ep += 1
+        return radix(2)
+    end
+    if is_digit(c) then return number() end
+    if is_ident_start(c) then
+        word s = ep
+        while ep < eend and is_ident_char(lbuf[ep]) do ep += 1 end
+        word e = ep
+        bool hi = rng_is(s, e, "high")
+        if hi or rng_is(s, e, "low") then
+            eskip()
+            byte d = ech()
+            if d == '(' or d == '$' or d == '#' or d == '%' or d == 39 or is_digit(d) or is_ident_start(d) then
+                long v = eun()
+                if hi then return (v >> 8) & 255 end
+                return v & 255
+            end
+        end
+        qualify(s, e)
+        word sym = sym_find()
+        if sym ~= 0 then return sym_value(sym) end
+        if not undef then
+            undef = true
+            miss_s = s
+            miss_e = e
+        end
+        return 0
+    end
+    if fail() then
+        msg("unexpected `")
+        msg_rng(ep, ep + 1)
+        msg("`")
+    end
+    return 0
+end
+
+function eun() -> long
+    eskip()
+    byte c = ech()
+    if c == '-' then
+        ep += 1
+        return 0 - eun()
+    end
+    if c == '+' then
+        ep += 1
+        return eun()
+    end
+    if c == '~' then
+        ep += 1
+        return ~eun()
+    end
+    if c == '!' then
+        ep += 1
+        if eun() == 0 then return 1 end
+        return 0
+    end
+    return eprim()
+end
+
+-- precedence climbing (sjasmplus / C precedence)
+function b2l(bool b) -> long
+    if b then return 1 end
+    return 0
+end
+
+function ex(byte minp) -> long
+    long lhs = eun()
+    while not failed do
+        eskip()
+        byte c = ech()
+        byte d = ech1()
+        byte op = 0
+        byte prec = 0
+        byte w = 1
+        if c == '|' and d == '|' then
+            op = 1
+            prec = 1
+            w = 2
+        elseif c == '&' and d == '&' then
+            op = 2
+            prec = 2
+            w = 2
+        elseif c == '<' and d == '<' then
+            op = 3
+            prec = 8
+            w = 2
+        elseif c == '>' and d == '>' then
+            op = 4
+            prec = 8
+            w = 2
+        elseif c == '<' and d == '=' then
+            op = 5
+            prec = 7
+            w = 2
+        elseif c == '>' and d == '=' then
+            op = 6
+            prec = 7
+            w = 2
+        elseif c == '=' and d == '=' then
+            op = 7
+            prec = 6
+            w = 2
+        elseif (c == '!' and d == '=') or (c == '<' and d == '>') then
+            op = 8
+            prec = 6
+            w = 2
+        elseif c == '|' then
+            op = 9
+            prec = 3
+        elseif c == '^' then
+            op = 10
+            prec = 4
+        elseif c == '&' then
+            op = 11
+            prec = 5
+        elseif c == '<' then
+            op = 12
+            prec = 7
+        elseif c == '>' then
+            op = 13
+            prec = 7
+        elseif c == '=' then
+            op = 7
+            prec = 6
+        elseif c == '+' then
+            op = 14
+            prec = 9
+        elseif c == '-' then
+            op = 15
+            prec = 9
+        elseif c == '*' then
+            op = 16
+            prec = 10
+        elseif c == '/' then
+            op = 17
+            prec = 10
+        elseif c == '%' then
+            op = 18
+            prec = 10
+        end
+        if prec == 0 or prec < minp then break end
+        ep += w
+        long r = ex(prec + 1)
+        if op == 1 then
+            lhs = b2l(lhs ~= 0 or r ~= 0)
+        elseif op == 2 then
+            lhs = b2l(lhs ~= 0 and r ~= 0)
+        elseif op == 3 then
+            lhs = lhs << byte(r)
+        elseif op == 4 then
+            lhs = lhs >> byte(r)
+        elseif op == 5 then
+            lhs = b2l(lhs <= r)
+        elseif op == 6 then
+            lhs = b2l(lhs >= r)
+        elseif op == 7 then
+            lhs = b2l(lhs == r)
+        elseif op == 8 then
+            lhs = b2l(lhs ~= r)
+        elseif op == 9 then
+            lhs = lhs | r
+        elseif op == 10 then
+            lhs = lhs ~ r
+        elseif op == 11 then
+            lhs = lhs & r
+        elseif op == 12 then
+            lhs = b2l(lhs < r)
+        elseif op == 13 then
+            lhs = b2l(lhs > r)
+        elseif op == 14 then
+            lhs = lhs + r
+        elseif op == 15 then
+            lhs = lhs - r
+        elseif op == 16 then
+            lhs = lhs * r
+        elseif op == 17 or op == 18 then
+            if r == 0 then
+                if not undef then eerr("division by zero") end
+                lhs = 0
+            elseif op == 17 then
+                lhs = lhs / r
+            else
+                lhs = lhs % r
+            end
+        end
+    end
+    return lhs
+end
+
+-- value of the expression lbuf[s..e); undefined symbols: 0 (an error in
+-- a final pass)
+function ev(word s, word e) -> long
+    ep = s
+    eend = e
+    eskip()
+    undef = false
+    if ep >= eend then
+        eerr("missing expression")
+        return 0
+    end
+    long v = ex(0)
+    eskip()
+    if ep < eend and not failed then
+        if fail() then
+            msg("unexpected `")
+            msg_rng(ep, eend)
+            msg("` in expression")
+        end
+    end
+    if undef then
+        if fail() then
+            msg("undefined symbol `")
+            msg_rng(miss_s, miss_e)
+            msg("`")
+        end
+        return 0
+    end
+    return v
+end
+
+-- ---------------------------------------------------------------- output image
+
+const SLOT_PAGES = 35
+far byte img0[57344]        -- 7 pages each
+far byte img1[57344]
+far byte img2[57344]
+far byte img3[57344]
+far byte img4[57344]
+byte pdir[224]              -- 8K page -> image slot (1..35), 0 = not written
+byte pkeep[224]             -- pages written by INCBIN
+byte nslots = 0
+byte slots[8] = {14, 15, 10, 11, 4, 5, 0, 1}
+byte guard[8]               -- MMU option per slot: 'e', 'n', 'w' or 0
+long pc = 0
+long last_write = -1
+
+function img_put(byte s, word off, byte b)
+    byte a = (s - 1) / 7
+    word o = word((s - 1) % 7) * 8192 + off
+    if a == 0 then
+        img0[o] = b
+    elseif a == 1 then
+        img1[o] = b
+    elseif a == 2 then
+        img2[o] = b
+    elseif a == 3 then
+        img3[o] = b
+    else
+        img4[o] = b
+    end
+end
+
+function img_get(byte s, word off) -> byte
+    byte a = (s - 1) / 7
+    word o = word((s - 1) % 7) * 8192 + off
+    if a == 0 then return img0[o] end
+    if a == 1 then return img1[o] end
+    if a == 2 then return img2[o] end
+    if a == 3 then return img3[o] end
+    return img4[o]
+end
+
+-- the image slot of 8K page p (allocated and cleared on first use)
+function page_slot(byte p) -> byte
+    if pdir[p] ~= 0 then return pdir[p] end
+    if nslots >= SLOT_PAGES then
+        if fail() then msg("program too large for the assembler: more than 35 8K pages") end
+        return 0
+    end
+    nslots += 1
+    pdir[p] = nslots
+    word i = 0
+    while i < 8192 do
+        img_put(nslots, i, 0)
+        i += 1
+    end
+    return nslots
+end
+
+function emit(byte b)
+    -- crossing the end of an MMU slot guarded with `e` / `n`
+    if last_write >= 0 and last_write + 1 == pc and (pc & 0x1FFF) == 0 then
+        byte sl = byte(last_write >> 13)
+        if guard[sl] == 'e' then
+            if fail() then msg("data does not fit in an MMU slot") end
+            guard[sl] = 0
+        elseif guard[sl] == 'n' then
+            slots[sl] += 1
+            pc -= 0x2000
+        end
+    end
+    if pc < 0 or pc > 0xFFFF then
+        if fail() then msg("address outside the 64K address space") end
+        pc = pc & 0xFFFF
+    end
+    if strict then
+        byte page = slots[byte(pc >> 13)]
+        if page < 224 then
+            byte s = page_slot(page)
+            if s ~= 0 then img_put(s, word(pc) & 0x1FFF, b) end
+        end
+    end
+    last_write = pc
+    pc += 1
+end
+
+-- ---------------------------------------------------------------- operands
+
+const K_R8 = 1
+const K_R16 = 2
+const K_AFALT = 3
+const K_I = 4
+const K_R = 5
+const K_INDBC = 6
+const K_INDDE = 7
+const K_INDSP = 8
+const K_INDC = 9
+const K_MEM = 10
+const K_IMM = 11
+const R_BC = 1
+const R_DE = 2
+const R_HL = 3
+const R_SP = 4
+const R_AF = 5
+const R_IX = 6
+const R_IY = 7
+
+const MAXOPS = 16
+byte nops
+byte ok[16]                 -- kind
+byte oc[16]                 -- 8-bit register code / 16-bit register
+byte opx[16]                -- prefix $DD / $FD / 0
+bool ohasd[16]              -- (ix+d): displacement present
+word ods[16]                -- displacement lbuf[ods..ode) (empty: 0)
+word ode[16]
+word oxs[16]                -- expression (K_MEM / K_IMM) / raw text
+word oxe[16]
+word ors[16]                -- the whole operand
+word ore[16]
+
+-- top-level comma split of lbuf[s..e) into ors/ore
+function split_ops(word s, word e)
+    nops = 0
+    trim(s, e)
+    s = ts
+    e = te
+    if s >= e then return end
+    word depth = 0
+    byte quote = 0
+    word start = s
+    word i = s
+    while i < e do
+        byte c = lbuf[i]
+        if quote ~= 0 then
+            if c == '\\' and quote == '"' then
+                i += 1
+            elseif c == quote then
+                quote = 0
+            end
+        elseif c == '"' then
+            quote = c
+        elseif c == 39 then
+            -- `af'` is a register, not a character constant
+            trim(start, i)
+            if not rng_is(ts, te, "af") then quote = c end
+        elseif c == '(' then
+            depth += 1
+        elseif c == ')' then
+            depth -= 1
+        elseif c == ',' and depth == 0 and nops < MAXOPS then
+            trim(start, i)
+            ors[nops] = ts
+            ore[nops] = te
+            nops += 1
+            start = i + 1
+        end
+        i += 1
+    end
+    if nops < MAXOPS then
+        trim(start, e)
+        ors[nops] = ts
+        ore[nops] = te
+        nops += 1
+    end
+end
+
+-- data items (db / dw / dd): any number of them, one at a time
+word it_pos
+word it_end
+word it_s
+word it_e
+
+function items_begin(word s, word e)
+    trim(s, e)
+    it_pos = ts
+    it_end = te
+end
+
+-- the next top-level item into it_s..it_e; false when there is none
+function items_next() -> bool
+    if it_pos > it_end then return false end
+    if it_pos == it_end then
+        it_pos = it_end + 1
+        return false
+    end
+    word depth = 0
+    byte quote = 0
+    word start = it_pos
+    word i = it_pos
+    while i < it_end do
+        byte c = lbuf[i]
+        if quote ~= 0 then
+            if c == '\\' and quote == '"' then
+                i += 1
+            elseif c == quote then
+                quote = 0
+            end
+        elseif c == '"' or c == 39 then
+            quote = c
+        elseif c == '(' then
+            depth += 1
+        elseif c == ')' then
+            depth -= 1
+        elseif c == ',' and depth == 0 then
+            trim(start, i)
+            it_s = ts
+            it_e = te
+            it_pos = i + 1
+            if it_pos == it_end then it_pos = it_end + 1 end
+            return true
+        end
+        i += 1
+    end
+    trim(start, it_end)
+    it_s = ts
+    it_e = te
+    it_pos = it_end + 1
+    return true
+end
+
+-- lbuf[s..e) is `( ... )` as a whole?
+function bracketed(word s, word e) -> bool
+    if e - s < 2 or lbuf[s] ~= '(' or lbuf[e - 1] ~= ')' then return false end
+    word depth = 0
+    byte quote = 0
+    word i = s
+    while i < e do
+        byte c = lbuf[i]
+        if quote ~= 0 then
+            if c == quote then quote = 0 end
+        elseif c == 39 or c == '"' then
+            quote = c
+        elseif c == '(' then
+            depth += 1
+        elseif c == ')' then
+            depth -= 1
+            if depth == 0 and i ~= e - 1 then return false end
+        end
+        i += 1
+    end
+    return true
+end
+
+function reg8(byte o, word s, word e) -> bool
+    byte code = 255
+    byte p = 0
+    if rng_is(s, e, "b") then
+        code = 0
+    elseif rng_is(s, e, "c") then
+        code = 1
+    elseif rng_is(s, e, "d") then
+        code = 2
+    elseif rng_is(s, e, "e") then
+        code = 3
+    elseif rng_is(s, e, "h") then
+        code = 4
+    elseif rng_is(s, e, "l") then
+        code = 5
+    elseif rng_is(s, e, "a") then
+        code = 7
+    elseif rng_is(s, e, "ixh") or rng_is(s, e, "xh") or rng_is(s, e, "hx") then
+        code = 4
+        p = 0xDD
+    elseif rng_is(s, e, "ixl") or rng_is(s, e, "xl") or rng_is(s, e, "lx") then
+        code = 5
+        p = 0xDD
+    elseif rng_is(s, e, "iyh") or rng_is(s, e, "yh") or rng_is(s, e, "hy") then
+        code = 4
+        p = 0xFD
+    elseif rng_is(s, e, "iyl") or rng_is(s, e, "yl") or rng_is(s, e, "ly") then
+        code = 5
+        p = 0xFD
+    end
+    if code == 255 then return false end
+    ok[o] = K_R8
+    oc[o] = code
+    opx[o] = p
+    return true
+end
+
+function parse_op(byte o)
+    word s = ors[o]
+    word e = ore[o]
+    ok[o] = K_IMM
+    oc[o] = 0
+    opx[o] = 0
+    ohasd[o] = false
+    ods[o] = 0
+    ode[o] = 0
+    oxs[o] = s
+    oxe[o] = e
+    if reg8(o, s, e) then return end
+    byte r = 0
+    if rng_is(s, e, "bc") then
+        r = R_BC
+    elseif rng_is(s, e, "de") then
+        r = R_DE
+    elseif rng_is(s, e, "hl") then
+        r = R_HL
+    elseif rng_is(s, e, "sp") then
+        r = R_SP
+    elseif rng_is(s, e, "af") then
+        r = R_AF
+    elseif rng_is(s, e, "ix") then
+        r = R_IX
+    elseif rng_is(s, e, "iy") then
+        r = R_IY
+    end
+    if r ~= 0 then
+        ok[o] = K_R16
+        oc[o] = r
+        return
+    end
+    if rng_is(s, e, "af'") then
+        ok[o] = K_AFALT
+        return
+    end
+    if rng_is(s, e, "i") then
+        ok[o] = K_I
+        return
+    end
+    if rng_is(s, e, "r") then
+        ok[o] = K_R
+        return
+    end
+    if bracketed(s, e) then
+        trim(s + 1, e - 1)
+        word a = ts
+        word b = te
+        if rng_is(a, b, "hl") then
+            ok[o] = K_R8
+            oc[o] = 6
+            return
+        end
+        if rng_is(a, b, "bc") then
+            ok[o] = K_INDBC
+            return
+        end
+        if rng_is(a, b, "de") then
+            ok[o] = K_INDDE
+            return
+        end
+        if rng_is(a, b, "sp") then
+            ok[o] = K_INDSP
+            return
+        end
+        if rng_is(a, b, "c") then
+            ok[o] = K_INDC
+            return
+        end
+        byte px = 0
+        if rng_starts(a, b, "ix") then px = 0xDD end
+        if rng_starts(a, b, "iy") then px = 0xFD end
+        if px ~= 0 then
+            if b - a == 2 then
+                ok[o] = K_R8
+                oc[o] = 6
+                opx[o] = px
+                ohasd[o] = true
+                return
+            end
+            trim(a + 2, b)
+            if lbuf[ts] == '+' or lbuf[ts] == '-' then
+                ok[o] = K_R8
+                oc[o] = 6
+                opx[o] = px
+                ohasd[o] = true
+                ods[o] = ts
+                ode[o] = b
+                return
+            end
+        end
+        ok[o] = K_MEM
+        oxs[o] = a
+        oxe[o] = b
+    end
+end
+
+-- condition code of operand o, 255 if it is none
+function cond(byte o) -> byte
+    word s = ors[o]
+    word e = ore[o]
+    if rng_is(s, e, "nz") then return 0 end
+    if rng_is(s, e, "z") then return 1 end
+    if rng_is(s, e, "nc") then return 2 end
+    if rng_is(s, e, "c") then return 3 end
+    if rng_is(s, e, "po") then return 4 end
+    if rng_is(s, e, "pe") then return 5 end
+    if rng_is(s, e, "p") then return 6 end
+    if rng_is(s, e, "m") then return 7 end
+    return 255
+end
+
+-- ---------------------------------------------------------------- encoder
+
+byte ebuf[8]
+byte elen2
+bool bad_insn
+
+function eb(byte b)
+    if elen2 < 8 then
+        ebuf[elen2] = b
+        elen2 += 1
+    end
+end
+
+function bad()
+    bad_insn = true
+end
+
+function ex_val(byte o) -> long
+    return ev(oxs[o], oxe[o])
+end
+
+function eb_byte(byte o)
+    long v = ex_val(o)
+    if strict and (v < -128 or v > 255) then
+        if fail() then
+            msg("value does not fit in a byte: `")
+            msg_rng(oxs[o], oxe[o])
+            msg("`")
+        end
+    end
+    eb(byte(v))
+end
+
+function eb_word(byte o)
+    long v = ex_val(o)
+    if strict and (v < -32768 or v > 65535) then
+        if fail() then
+            msg("value does not fit in a word: `")
+            msg_rng(oxs[o], oxe[o])
+            msg("`")
+        end
+    end
+    eb(byte(v))
+    eb(byte(v >> 8))
+end
+
+function eb_disp(byte o)
+    if not ohasd[o] then return end
+    long v = 0
+    if ode[o] > ods[o] then v = ev(ods[o], ode[o]) end
+    if strict and (v < -128 or v > 127) then
+        if fail() then msg("index offset out of range -128..127") end
+    end
+    eb(byte(v))
+end
+
+-- prefix, opcode, displacement of a one-register instruction
+function r8_insn(byte o, byte op)
+    if opx[o] ~= 0 then eb(opx[o]) end
+    eb(op)
+    eb_disp(o)
+end
+
+-- 16-bit register field (bc 0, de 1, hl/ix/iy 2, sp 3); 255: not one
+function rr_code(byte r) -> byte
+    if r == R_BC then return 0 end
+    if r == R_DE then return 1 end
+    if r == R_HL or r == R_IX or r == R_IY then return 2 end
+    if r == R_SP then return 3 end
+    return 255
+end
+
+function rr_prefix(byte r) -> byte
+    if r == R_IX then return 0xDD end
+    if r == R_IY then return 0xFD end
+    return 0
+end
+
+function is_a(byte o) -> bool
+    return ok[o] == K_R8 and oc[o] == 7 and opx[o] == 0
+end
+
+function is_r16(byte o, byte r) -> bool
+    return ok[o] == K_R16 and oc[o] == r
+end
+
+function is_val(byte o) -> bool
+    return ok[o] == K_IMM or ok[o] == K_MEM
+end
+
+-- CB-prefixed rotate / shift / bit instruction on operand o
+function cb(byte o, byte op)
+    if opx[o] ~= 0 and ohasd[o] then
+        eb(opx[o])
+        eb(0xCB)
+        eb_disp(o)
+        eb(op | 6)
+    elseif opx[o] ~= 0 then
+        bad()
+    else
+        eb(0xCB)
+        eb(op | oc[o])
+    end
+end
+
+function alu(byte id)
+    -- 16-bit forms
+    if nops == 2 and ok[0] == K_R16 then
+        byte d = oc[0]
+        if id == M_ADD and (d == R_HL or d == R_IX or d == R_IY) and ok[1] == K_R16 then
+            byte sc = rr_code(oc[1])
+            if sc == 255 or (sc == 2 and oc[1] ~= d) then
+                bad()
+                return
+            end
+            if rr_prefix(d) ~= 0 then eb(rr_prefix(d)) end
+            eb(0x09 | (sc << 4))
+            return
+        end
+        if (id == M_ADC or id == M_SBC) and d == R_HL and ok[1] == K_R16 then
+            byte sc = rr_code(oc[1])
+            if sc == 255 or rr_prefix(oc[1]) ~= 0 then
+                bad()
+                return
+            end
+            eb(0xED)
+            if id == M_ADC then eb(0x4A | (sc << 4)) else eb(0x42 | (sc << 4)) end
+            return
+        end
+        if id == M_ADD and (d == R_HL or d == R_DE or d == R_BC) then
+            byte base = 0x33
+            if d == R_HL then base = 0x31 end
+            if d == R_DE then base = 0x32 end
+            if is_a(1) then
+                eb(0xED)
+                eb(base)
+                return
+            end
+            if ok[1] == K_IMM then
+                eb(0xED)
+                eb(base + 3)
+                eb_word(1)
+                return
+            end
+        end
+        bad()
+        return
+    end
+    byte base = 0xB8
+    if id == M_ADD then
+        base = 0x80
+    elseif id == M_ADC then
+        base = 0x88
+    elseif id == M_SUB then
+        base = 0x90
+    elseif id == M_SBC then
+        base = 0x98
+    elseif id == M_AND then
+        base = 0xA0
+    elseif id == M_XOR then
+        base = 0xA8
+    elseif id == M_OR then
+        base = 0xB0
+    end
+    byte src = 0
+    if nops == 2 and is_a(0) then
+        src = 1
+    elseif nops ~= 1 then
+        bad()
+        return
+    end
+    if ok[src] == K_R8 then
+        r8_insn(src, base | oc[src])
+    elseif is_val(src) then
+        eb(base + 0x46)
+        eb_byte(src)
+    else
+        bad()
+    end
+end
+
+function ld()
+    if nops ~= 2 then
+        bad()
+        return
+    end
+    byte dk = ok[0]
+    byte sk = ok[1]
+    if dk == K_R8 and sk == K_R8 then
+        if oc[0] == 6 and oc[1] == 6 then
+            bad()
+            return
+        end
+        byte p = opx[0]
+        byte q = opx[1]
+        if p ~= 0 and q ~= 0 and (p ~= q or ohasd[0] or ohasd[1]) then
+            bad()
+            return
+        end
+        if p == 0 then p = q end
+        if p ~= 0 and not ohasd[0] and not ohasd[1] then
+            -- ld ixh,h is not an instruction
+            if (opx[0] == 0 and (oc[0] == 4 or oc[0] == 5)) or (opx[1] == 0 and (oc[1] == 4 or oc[1] == 5)) then
+                bad()
+                return
+            end
+        end
+        if p ~= 0 then eb(p) end
+        eb(0x40 | (oc[0] << 3) | oc[1])
+        if ohasd[0] then eb_disp(0) else eb_disp(1) end
+        return
+    end
+    if dk == K_R8 and sk == K_IMM then
+        if opx[0] ~= 0 then eb(opx[0]) end
+        eb(0x06 | (oc[0] << 3))
+        eb_disp(0)
+        eb_byte(1)
+        return
+    end
+    if is_a(0) then
+        if sk == K_INDBC then
+            eb(0x0A)
+            return
+        end
+        if sk == K_INDDE then
+            eb(0x1A)
+            return
+        end
+        if sk == K_MEM then
+            eb(0x3A)
+            eb_word(1)
+            return
+        end
+        if sk == K_I then
+            eb(0xED)
+            eb(0x57)
+            return
+        end
+        if sk == K_R then
+            eb(0xED)
+            eb(0x5F)
+            return
+        end
+    end
+    if is_a(1) then
+        if dk == K_INDBC then
+            eb(0x02)
+            return
+        end
+        if dk == K_INDDE then
+            eb(0x12)
+            return
+        end
+        if dk == K_MEM then
+            eb(0x32)
+            oxs[1] = oxs[0]
+            oxe[1] = oxe[0]
+            eb_word(1)
+            return
+        end
+        if dk == K_I then
+            eb(0xED)
+            eb(0x47)
+            return
+        end
+        if dk == K_R then
+            eb(0xED)
+            eb(0x4F)
+            return
+        end
+    end
+    if is_r16(0, R_SP) and sk == K_R16 and (oc[1] == R_HL or oc[1] == R_IX or oc[1] == R_IY) then
+        if rr_prefix(oc[1]) ~= 0 then eb(rr_prefix(oc[1])) end
+        eb(0xF9)
+        return
+    end
+    if dk == K_R16 and (sk == K_IMM or sk == K_MEM) then
+        byte code = rr_code(oc[0])
+        if code == 255 then
+            bad()
+            return
+        end
+        if sk == K_IMM then
+            if rr_prefix(oc[0]) ~= 0 then eb(rr_prefix(oc[0])) end
+            eb(0x01 | (code << 4))
+        elseif code == 2 then
+            if rr_prefix(oc[0]) ~= 0 then eb(rr_prefix(oc[0])) end
+            eb(0x2A)
+        else
+            eb(0xED)
+            eb(0x4B | (code << 4))
+        end
+        eb_word(1)
+        return
+    end
+    if dk == K_MEM and sk == K_R16 then
+        byte code = rr_code(oc[1])
+        if code == 255 then
+            bad()
+            return
+        end
+        if code == 2 then
+            if rr_prefix(oc[1]) ~= 0 then eb(rr_prefix(oc[1])) end
+            eb(0x22)
+        else
+            eb(0xED)
+            eb(0x43 | (code << 4))
+        end
+        eb_word(0)
+        return
+    end
+    bad()
+end
+
+-- mnemonics and pseudo-ops: M_* = index + 1 in `mnems`
+const NMNEM = 118
+string mnems[] = {
+    "nop", "rlca", "rrca", "rla", "rra", "daa", "cpl", "scf", "ccf", "halt",
+    "di", "ei", "exx", "neg", "retn", "reti", "rrd", "rld", "ldi", "cpi",
+    "ini", "outi", "ldd", "cpd", "ind", "outd", "ldir", "cpir", "inir", "otir",
+    "lddr", "cpdr", "indr", "otdr", "swapnib", "outinb", "pixeldn", "pixelad", "setae", "ldix",
+    "ldws", "lddx", "ldirx", "ldpirx", "lddrx",
+    "mirror", "mul", "bsla", "bsra", "bsrl", "bsrf", "brlc", "test", "nextreg", "ld",
+    "push", "pop", "ex", "add", "adc", "sub", "sbc", "and", "xor", "or",
+    "cp", "inc", "dec", "rlc", "rrc", "rl", "rr", "sla", "sra", "sll",
+    "sli", "srl", "bit", "res", "set", "jp", "call", "jr", "djnz", "ret",
+    "rst", "im", "in", "out",
+    "opt", "output", "display", "end", "device", "org", "mmu", "db", "defb", "byte",
+    "dm", "defm", "dz", "dw", "defw", "word", "dd", "defd", "dword", "ds",
+    "defs", "block", "align", "assert", "incbin", "savenex", "equ", "=", "defl"
+}
+-- one-byte / $ED-prefixed instructions without operands (M_NOP .. M_LDDRX)
+byte single_ed[] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1
+}
+byte single_op[] = {
+    0x00, 0x07, 0x0F, 0x17, 0x1F, 0x27, 0x2F, 0x37, 0x3F, 0x76,
+    0xF3, 0xFB, 0xD9, 0x44, 0x45, 0x4D, 0x67, 0x6F, 0xA0, 0xA1,
+    0xA2, 0xA3, 0xA8, 0xA9, 0xAA, 0xAB, 0xB0, 0xB1, 0xB2, 0xB3,
+    0xB8, 0xB9, 0xBA, 0xBB, 0x23, 0x90, 0x93, 0x94, 0x95, 0xA4,
+    0xA5, 0xAC, 0xB4, 0xB7, 0xBC
+}
+const M_LDDRX = 45
+const M_MIRROR = 46
+const M_MUL = 47
+const M_BSLA = 48
+const M_BRLC = 52
+const M_TEST = 53
+const M_NEXTREG = 54
+const M_LD = 55
+const M_PUSH = 56
+const M_POP = 57
+const M_EX = 58
+const M_ADD = 59
+const M_ADC = 60
+const M_SUB = 61
+const M_SBC = 62
+const M_AND = 63
+const M_XOR = 64
+const M_OR = 65
+const M_CP = 66
+const M_INC = 67
+const M_DEC = 68
+const M_RLC = 69
+const M_SRL = 77
+const M_BIT = 78
+const M_RES = 79
+const M_SET = 80
+const M_JP = 81
+const M_CALL = 82
+const M_JR = 83
+const M_DJNZ = 84
+const M_RET = 85
+const M_RST = 86
+const M_IM = 87
+const M_IN = 88
+const M_OUT = 89
+const M_OPT = 90
+const M_DEVICE = 94
+const M_ORG = 95
+const M_MMU = 96
+const M_DB = 97
+const M_DZ = 102
+const M_DW = 103
+const M_DD = 106
+const M_DS = 109
+const M_ALIGN = 112
+const M_ASSERT = 113
+const M_INCBIN = 114
+const M_SAVENEX = 115
+const M_EQU = 116
+const M_DEFL = 118
+
+word mn_head[64]
+byte mn_next[120]
+byte opbuf[16]
+byte oplen
+
+function mn_hash_str(string s) -> byte
+    word h = 0
+    byte n = len(s)
+    byte i = 0
+    while i < n do
+        h = (h << 5) - h + asc(s, i)
+        i += 1
+    end
+    return byte(h & 63)
+end
+
+function mn_init()
+    for i = 0, NMNEM - 1 do
+        byte h = mn_hash_str(mnems[i])
+        mn_next[i + 1] = byte(mn_head[h])
+        mn_head[h] = i + 1
+    end
+end
+
+-- id of the mnemonic in opbuf (lower case), 0 if unknown
+function mn_find() -> byte
+    word h = 0
+    byte i = 0
+    while i < oplen do
+        h = (h << 5) - h + opbuf[i]
+        i += 1
+    end
+    byte m = byte(mn_head[h & 63])
+    while m ~= 0 do
+        if len(mnems[m - 1]) == oplen then
+            byte k = 0
+            while k < oplen and asc(mnems[m - 1], k) == opbuf[k] do k += 1 end
+            if k == oplen then return m end
+        end
+        m = mn_next[m]
+    end
+    return 0
+end
+
+function encode(byte id)
+    elen2 = 0
+    bad_insn = false
+    if nops > 0 then
+        for i = 0, nops - 1 do parse_op(i) end
+    end
+    if id <= M_LDDRX then
+        if nops ~= 0 then
+            bad()
+            return
+        end
+        if single_ed[id - 1] ~= 0 then eb(0xED) end
+        eb(single_op[id - 1])
+        return
+    end
+    if id == M_MIRROR then
+        if nops == 0 or (nops == 1 and is_a(0)) then
+            eb(0xED)
+            eb(0x24)
+        else
+            bad()
+        end
+    elseif id == M_MUL then
+        if nops == 0 or (nops == 2 and ok[0] == K_R8 and oc[0] == 2 and opx[0] == 0 and ok[1] == K_R8 and oc[1] == 3 and opx[1] == 0) then
+            eb(0xED)
+            eb(0x30)
+        else
+            bad()
+        end
+    elseif id >= M_BSLA and id <= M_BRLC then
+        if nops == 2 and is_r16(0, R_DE) and ok[1] == K_R8 and oc[1] == 0 and opx[1] == 0 then
+            eb(0xED)
+            eb(0x28 + id - M_BSLA)
+        else
+            bad()
+        end
+    elseif id == M_TEST then
+        if nops == 1 and is_val(0) then
+            eb(0xED)
+            eb(0x27)
+            eb_byte(0)
+        else
+            bad()
+        end
+    elseif id == M_NEXTREG then
+        if nops == 2 and is_val(0) and is_a(1) then
+            eb(0xED)
+            eb(0x92)
+            eb_byte(0)
+        elseif nops == 2 and is_val(0) and is_val(1) then
+            eb(0xED)
+            eb(0x91)
+            eb_byte(0)
+            eb_byte(1)
+        else
+            bad()
+        end
+    elseif id == M_LD then
+        ld()
+    elseif id == M_PUSH or id == M_POP then
+        byte base = 0xC1
+        if id == M_PUSH then base = 0xC5 end
+        if nops == 0 then bad() end
+        if nops > 0 then
+        for i = 0, nops - 1 do
+            if is_r16(i, R_AF) then
+                eb(base + 0x30)
+            elseif ok[i] == K_R16 then
+                byte code = rr_code(oc[i])
+                if code == 255 or code == 3 then
+                    bad()
+                    return
+                end
+                if rr_prefix(oc[i]) ~= 0 then eb(rr_prefix(oc[i])) end
+                eb(base + (code << 4))
+            elseif ok[i] == K_IMM and id == M_PUSH then
+                long v = ex_val(i)
+                eb(0xED)
+                eb(0x8A)
+                eb(byte(v >> 8))
+                eb(byte(v))
+            else
+                bad()
+                return
+            end
+        end
+        end
+    elseif id == M_EX then
+        if nops == 2 and ((is_r16(0, R_DE) and is_r16(1, R_HL)) or (is_r16(0, R_HL) and is_r16(1, R_DE))) then
+            eb(0xEB)
+        elseif nops == 2 and is_r16(0, R_AF) and (ok[1] == K_AFALT or is_r16(1, R_AF)) then
+            eb(0x08)
+        elseif nops == 2 and ok[0] == K_INDSP and ok[1] == K_R16 and rr_code(oc[1]) == 2 then
+            if rr_prefix(oc[1]) ~= 0 then eb(rr_prefix(oc[1])) end
+            eb(0xE3)
+        elseif nops == 2 and ok[1] == K_INDSP and ok[0] == K_R16 and rr_code(oc[0]) == 2 then
+            if rr_prefix(oc[0]) ~= 0 then eb(rr_prefix(oc[0])) end
+            eb(0xE3)
+        else
+            bad()
+        end
+    elseif id >= M_ADD and id <= M_CP then
+        alu(id)
+    elseif id == M_INC or id == M_DEC then
+        if nops == 1 and ok[0] == K_R8 then
+            byte op = 0x05
+            if id == M_INC then op = 0x04 end
+            r8_insn(0, op | (oc[0] << 3))
+        elseif nops == 1 and ok[0] == K_R16 and rr_code(oc[0]) ~= 255 then
+            if rr_prefix(oc[0]) ~= 0 then eb(rr_prefix(oc[0])) end
+            byte op = 0x0B
+            if id == M_INC then op = 0x03 end
+            eb(op | (rr_code(oc[0]) << 4))
+        else
+            bad()
+        end
+    else
+        encode2(id)
+    end
+end
+
+-- the rest of encode: rotates, bits, jumps, calls, returns, I/O
+function encode2(byte id)
+    if id >= M_RLC and id <= M_SRL then
+        -- rlc rrc rl rr sla sra sll sli srl
+        byte base = (id - M_RLC) << 3
+        if id == M_SRL then base = 0x38 end
+        if id == M_SRL - 1 then base = 0x30 end     -- sli = sll
+        if nops == 1 and ok[0] == K_R8 then cb(0, base) else bad() end
+    elseif id >= M_BIT and id <= M_SET then
+        byte base = 0xC0
+        if id == M_BIT then base = 0x40 end
+        if id == M_RES then base = 0x80 end
+        if nops == 2 and ok[0] == K_IMM and ok[1] == K_R8 then
+            long n = ex_val(0)
+            if strict and (n < 0 or n > 7) then
+                if fail() then msg("bit number out of range 0..7") end
+            end
+            cb(1, base | ((byte(n) & 7) << 3))
+        else
+            bad()
+        end
+    elseif id == M_JP then
+        if nops == 1 and ok[0] == K_IMM then
+            eb(0xC3)
+            eb_word(0)
+        elseif nops == 1 and ok[0] == K_R8 and oc[0] == 6 then
+            if opx[0] ~= 0 then eb(opx[0]) end
+            eb(0xE9)
+        elseif nops == 1 and ok[0] == K_R16 and (oc[0] == R_HL or oc[0] == R_IX or oc[0] == R_IY) then
+            if rr_prefix(oc[0]) ~= 0 then eb(rr_prefix(oc[0])) end
+            eb(0xE9)
+        elseif nops == 1 and ok[0] == K_INDC then
+            eb(0xED)
+            eb(0x98)
+        elseif nops == 2 and ok[1] == K_IMM and cond(0) ~= 255 then
+            eb(0xC2 | (cond(0) << 3))
+            eb_word(1)
+        else
+            bad()
+        end
+    elseif id == M_CALL then
+        if nops == 1 and ok[0] == K_IMM then
+            eb(0xCD)
+            eb_word(0)
+        elseif nops == 2 and ok[1] == K_IMM and cond(0) ~= 255 then
+            eb(0xC4 | (cond(0) << 3))
+            eb_word(1)
+        else
+            bad()
+        end
+    elseif id == M_JR or id == M_DJNZ then
+        byte op = 0
+        byte t = 0
+        if id == M_DJNZ and nops == 1 and ok[0] == K_IMM then
+            op = 0x10
+        elseif id == M_JR and nops == 1 and ok[0] == K_IMM then
+            op = 0x18
+        elseif id == M_JR and nops == 2 and ok[1] == K_IMM and cond(0) <= 3 then
+            op = 0x20 | (cond(0) << 3)
+            t = 1
+        else
+            bad()
+            return
+        end
+        long d = ex_val(t) - (here + 2)
+        if strict and (d < -128 or d > 127) then
+            if fail() then msg("jr/djnz target out of range") end
+        end
+        eb(op)
+        eb(byte(d))
+    elseif id == M_RET then
+        if nops == 0 then
+            eb(0xC9)
+        elseif nops == 1 and cond(0) ~= 255 then
+            eb(0xC0 | (cond(0) << 3))
+        else
+            bad()
+        end
+    elseif id == M_RST then
+        if nops == 1 and ok[0] == K_IMM then
+            long v = ex_val(0)
+            if strict and (v & ~0x38) ~= 0 then
+                if fail() then msg("bad rst address") end
+            end
+            eb(0xC7 | (byte(v) & 0x38))
+        else
+            bad()
+        end
+    elseif id == M_IM then
+        if nops == 1 and ok[0] == K_IMM then
+            long v = ex_val(0)
+            eb(0xED)
+            if v == 1 then
+                eb(0x56)
+            elseif v == 2 then
+                eb(0x5E)
+            else
+                if v ~= 0 and strict then
+                    if fail() then msg("bad interrupt mode") end
+                end
+                eb(0x46)
+            end
+        else
+            bad()
+        end
+    elseif id == M_IN then
+        if nops == 2 and is_a(0) and ok[1] == K_MEM then
+            eb(0xDB)
+            eb_byte(1)
+        elseif nops == 2 and ok[0] == K_R8 and opx[0] == 0 and oc[0] ~= 6 and ok[1] == K_INDC then
+            eb(0xED)
+            eb(0x40 | (oc[0] << 3))
+        elseif nops == 1 and ok[0] == K_INDC then
+            eb(0xED)
+            eb(0x70)
+        elseif nops == 2 and ok[1] == K_INDC and rng_is(ors[0], ore[0], "f") then
+            eb(0xED)
+            eb(0x70)
+        else
+            bad()
+        end
+    elseif id == M_OUT then
+        if nops == 2 and ok[0] == K_MEM and is_a(1) then
+            eb(0xD3)
+            oxs[1] = oxs[0]
+            oxe[1] = oxe[0]
+            eb_byte(1)
+        elseif nops == 2 and ok[0] == K_INDC and ok[1] == K_R8 and opx[1] == 0 and oc[1] ~= 6 then
+            eb(0xED)
+            eb(0x41 | (oc[1] << 3))
+        elseif nops == 2 and ok[0] == K_INDC and ok[1] == K_IMM and ex_val(1) == 0 then
+            eb(0xED)
+            eb(0x71)
+        else
+            bad()
+        end
+    else
+        bad()
+    end
+end
+
+-- ---------------------------------------------------------------- NEX
+
+bool nex_open = false
+byte nex_name[64]
+byte nex_nlen = 0
+word nex_pc = 0
+word nex_sp = 0xFFFE
+byte nex_entry = 0
+byte nex_core[3]
+byte nex_border = 0
+word nex_fh = 0
+byte nex_preserve = 0
+bool nex_ram2 = false
+byte nex_banks[112]         -- banks to store, in NEX order
+byte nex_nbanks = 0
+byte nex_order[112]
+
+function nex_init_order()
+    nex_order[0] = 5
+    nex_order[1] = 2
+    nex_order[2] = 0
+    nex_order[3] = 1
+    nex_order[4] = 3
+    nex_order[5] = 4
+    for i = 6, 111 do nex_order[i] = i end
+end
+
+-- has 8K page p a non-zero byte?
+function page_used(byte p) -> bool
+    byte s = pdir[p]
+    if s == 0 then return false end
+    if pkeep[p] ~= 0 then return true end
+    word i = 0
+    while i < 8192 do
+        if img_get(s, i) ~= 0 then return true end
+        i += 1
+    end
+    return false
+end
+
+function has_bank(byte b) -> bool
+    byte i = 0
+    while i < nex_nbanks do
+        if nex_banks[i] == b then return true end
+        i += 1
+    end
+    return false
+end
+
+byte outh
+byte obuf[256]
+word olen = 0
+
+function flush()
+    if olen > 0 then
+        file_write(outh, addr(obuf), olen)
+        olen = 0
+    end
+end
+
+function out_byte(byte b)
+    obuf[olen] = b
+    olen += 1
+    if olen == 256 then flush() end
+end
+
+-- write the NEX file (SAVENEX CLOSE)
+function nex_write()
+    string name = ""
+    byte i = 0
+    while i < nex_nlen do
+        name = name .. chr(nex_name[i])
+        i += 1
+    end
+    outh = file_open(name, FILE_WRITE)
+    if outh == FILE_ERROR then
+        if fail() then msg("cannot write the NEX file") end
+        return
+    end
+    byte hdr[512]
+    for k = 0, 511 do hdr[k] = 0 end
+    hdr[0] = 'N'
+    hdr[1] = 'e'
+    hdr[2] = 'x'
+    hdr[3] = 't'
+    hdr[4] = 'V'
+    hdr[5] = '1'
+    hdr[6] = '.'
+    hdr[7] = '2'
+    bool ram2 = nex_ram2
+    if nex_nbanks > 0 then
+    for k = 0, nex_nbanks - 1 do
+        if nex_banks[k] >= 48 then ram2 = true end
+        hdr[18 + nex_banks[k]] = 1
+    end
+    end
+    if nex_nbanks == 0 then ram2 = nex_ram2 end
+    if ram2 then hdr[8] = 1 end
+    hdr[9] = nex_nbanks
+    hdr[11] = nex_border & 7
+    hdr[12] = byte(nex_sp)
+    hdr[13] = byte(nex_sp >> 8)
+    hdr[14] = byte(nex_pc)
+    hdr[15] = byte(nex_pc >> 8)
+    hdr[134] = nex_preserve
+    hdr[135] = nex_core[0]
+    hdr[136] = nex_core[1]
+    hdr[137] = nex_core[2]
+    hdr[139] = nex_entry
+    hdr[140] = byte(nex_fh)
+    hdr[141] = byte(nex_fh >> 8)
+    -- 142..: the V1.3 fields stay 0 in a V1.2 header (as SjASMPlus)
+    for k = 0, 511 do out_byte(hdr[k]) end
+    -- banks in NEX order
+    for k = 0, 111 do
+        byte b = nex_order[k]
+        if has_bank(b) then
+            for half = 0, 1 do
+                byte s = pdir[b * 2 + half]
+                word j = 0
+                while j < 8192 do
+                    if s == 0 then out_byte(0) else out_byte(img_get(s, j)) end
+                    j += 1
+                end
+            end
+        end
+    end
+    flush()
+    file_close(outh)
+end
+
+function savenex(word s, word e)
+    if not strict then return end
+    trim(s, e)
+    s = ts
+    word w = s
+    while w < te and not is_blank(lbuf[w]) do w += 1 end
+    word cs = s
+    word ce = w
+    split_ops(w, te)
+    if not rng_is(cs, ce, "open") and not nex_open then
+        if fail() then msg("SAVENEX OPEN missing") end
+        return
+    end
+    if rng_is(cs, ce, "open") then
+        -- the quoted file name
+        word a = ors[0]
+        word b = ore[0]
+        if b - a < 2 or lbuf[a] ~= '"' then
+            if fail() then msg("SAVENEX OPEN needs a quoted file name") end
+            return
+        end
+        nex_nlen = 0
+        word i = a + 1
+        while i < b - 1 and nex_nlen < 63 do
+            nex_name[nex_nlen] = lbuf[i]
+            nex_nlen += 1
+            i += 1
+        end
+        nex_open = true
+        nex_pc = 0
+        nex_sp = 0xFFFE
+        nex_entry = 0
+        if nops > 1 then nex_pc = word(ev(ors[1], ore[1])) end
+        if nops > 2 then nex_sp = word(ev(ors[2], ore[2])) end
+        if nops > 3 then nex_entry = byte(ev(ors[3], ore[3])) end
+    elseif rng_is(cs, ce, "core") then
+        if nops ~= 3 then
+            if fail() then msg("SAVENEX CORE needs major,minor,subminor") end
+            return
+        end
+        for i = 0, 2 do nex_core[i] = byte(ev(ors[i], ore[i])) end
+    elseif rng_is(cs, ce, "cfg") then
+        if nops > 0 then nex_border = byte(ev(ors[0], ore[0])) end
+        if nops > 1 then nex_fh = word(ev(ors[1], ore[1])) end
+        if nops > 2 then nex_preserve = byte(b2l(ev(ors[2], ore[2]) ~= 0)) end
+        if nops > 3 then nex_ram2 = ev(ors[3], ore[3]) ~= 0 end
+    elseif rng_is(cs, ce, "auto") then
+        if nops > 0 then
+            if fail() then msg("SAVENEX AUTO with a bank range is not supported") end
+            return
+        end
+        for k = 0, 111 do
+            byte b = nex_order[k]
+            if not has_bank(b) and (page_used(b * 2) or page_used(b * 2 + 1)) then
+                nex_banks[nex_nbanks] = b
+                nex_nbanks += 1
+            end
+        end
+    elseif rng_is(cs, ce, "close") then
+        nex_write()
+        nex_open = false
+    else
+        if fail() then
+            msg("unsupported SAVENEX command `")
+            msg_rng(cs, ce)
+            msg("`")
+        end
+    end
+end
+
+-- ---------------------------------------------------------------- pseudo-ops
+
+-- MMU <slot>[ <slot2>] [e|n|w], <page>[, <address>]
+function mmu(word s, word e)
+    word comma = s
+    while comma < e and lbuf[comma] ~= ',' do comma += 1 end
+    if comma >= e then
+        if fail() then msg("MMU needs `slot, page`") end
+        return
+    end
+    trim(s, comma)
+    word a = ts
+    word b = te
+    byte opt = 0
+    if b - a >= 2 and is_blank(lbuf[b - 2]) then
+        byte c = lc(lbuf[b - 1])
+        if c == 'e' or c == 'n' or c == 'w' then
+            opt = c
+            b -= 1
+            trim(a, b)
+            b = te
+        end
+    end
+    -- one or two slot numbers
+    word m = a
+    while m < b and not is_blank(lbuf[m]) do m += 1 end
+    long lo = ev(a, m)
+    long hi = lo
+    trim(m, b)
+    if te > ts then hi = ev(ts, te) end
+    split_ops(comma + 1, e)
+    long page = ev(ors[0], ore[0])
+    if lo < 0 or lo > 7 or hi < lo or hi > 7 then
+        if fail() then msg("bad MMU slot") end
+        return
+    end
+    if page < 0 or page + (hi - lo) >= 224 then
+        if fail() then msg("8K page does not exist") end
+        return
+    end
+    long k = lo
+    while k <= hi do
+        slots[byte(k)] = byte(page + k - lo)
+        guard[byte(k)] = opt
+        k += 1
+    end
+    if nops > 1 then
+        pc = ev(ors[1], ore[1])
+        last_write = -1
+    end
+end
+
+-- a whole db item that is a string literal: emit its bytes, true
+function db_string(word a, word b) -> bool
+    if b - a < 2 then return false end
+    byte q = lbuf[a]
+    if (q ~= '"' and q ~= 39) or lbuf[b - 1] ~= q then return false end
+    -- check: no unescaped quote inside, 'x' (one char) is a number
+    word i = a + 1
+    word n = 0
+    while i < b - 1 do
+        byte c = lbuf[i]
+        if c == q then return false end
+        if c == '\\' and q == '"' and i + 1 < b - 1 then i += 1 end
+        n += 1
+        i += 1
+    end
+    if q == 39 and n < 2 then return false end
+    i = a + 1
+    while i < b - 1 do
+        byte c = lbuf[i]
+        if c == '\\' and q == '"' and i + 1 < b - 1 then
+            i += 1
+            c = unescape(lbuf[i])
+        end
+        emit(c)
+        i += 1
+    end
+    return true
+end
+
+-- INCBIN "file"[, offset[, length]]
+byte ibuf[256]
+function incbin(word s, word e)
+    split_ops(s, e)
+    trim(ors[0], ore[0])
+    if te - ts < 2 or lbuf[ts] ~= '"' or lbuf[te - 1] ~= '"' or te - ts > 66 then
+        if fail() then msg("INCBIN needs a quoted file name") end
+        return
+    end
+    string name = ""
+    word i = ts + 1
+    while i < te - 1 do
+        name = name .. chr(lbuf[i])
+        i += 1
+    end
+    long off = 0
+    long n = -1
+    if nops > 1 then off = ev(ors[1], ore[1]) end
+    if nops > 2 then n = ev(ors[2], ore[2]) end
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then
+        if fail() then
+            msg("cannot read ")
+            msg(name)
+        end
+        return
+    end
+    long size = file_size(h)
+    if off < 0 then off = 0 end
+    if n < 0 then n = size - off end
+    if n < 0 or off + n > size then
+        file_close(h)
+        if fail() then msg("INCBIN offset/length outside the file") end
+        return
+    end
+    -- (read in blocks: file_getc is busy with the source)
+    if strict then file_seek(h, off) end
+    word got = 0
+    word bp = 0
+    while n > 0 and not failed do
+        if strict then
+            if bp >= got then
+                got = file_read(h, addr(ibuf), 256)
+                bp = 0
+                if got == 0 then
+                    if fail() then msg("INCBIN: the file ends early") end
+                    break
+                end
+            end
+            -- a page with included data is kept even if it is all zeros
+            byte page = slots[byte(pc >> 13)]
+            if page < 224 then pkeep[page] = 1 end
+            emit(ibuf[bp])
+            bp += 1
+        else
+            emit(0)
+        end
+        n -= 1
+    end
+    file_close(h)
+end
+
+function pseudo_or_insn(byte id, word as_, word ae)
+    if id == M_OPT or id == M_OPT + 1 or id == M_OPT + 2 or id == M_OPT + 3 then
+        return                  -- opt output display end
+    end
+    if id == M_DEVICE then
+        trim(as_, ae)
+        if not rng_is(ts, te, "zxspectrumnext") then
+            if fail() then msg("only DEVICE ZXSPECTRUMNEXT is supported") end
+        end
+        return
+    end
+    if id == M_ORG then
+        split_ops(as_, ae)
+        pc = ev(ors[0], ore[0])
+        last_write = -1
+        return
+    end
+    if id == M_MMU then
+        mmu(as_, ae)
+        return
+    end
+    if id >= M_DB and id <= M_DZ then
+        items_begin(as_, ae)
+        while items_next() do
+            if not db_string(it_s, it_e) then
+                long v = ev(it_s, it_e)
+                if strict and (v < -128 or v > 255) then
+                    if fail() then msg("value does not fit in a byte") end
+                end
+                emit(byte(v))
+            end
+        end
+        if id == M_DZ then emit(0) end
+        return
+    end
+    if id >= M_DW and id < M_DD then
+        items_begin(as_, ae)
+        while items_next() do
+            long v = ev(it_s, it_e)
+            if strict and (v < -32768 or v > 65535) then
+                if fail() then msg("value does not fit in a word") end
+            end
+            emit(byte(v))
+            emit(byte(v >> 8))
+        end
+        return
+    end
+    if id >= M_DD and id < M_DS then
+        items_begin(as_, ae)
+        while items_next() do
+            long v = ev(it_s, it_e)
+            emit(byte(v))
+            emit(byte(v >> 8))
+            emit(byte(v >> 16))
+            emit(byte(v >> 24))
+        end
+        return
+    end
+    if id >= M_DS and id < M_ALIGN then
+        split_ops(as_, ae)
+        long n = ev(ors[0], ore[0])
+        byte fill = 0
+        if nops > 1 then fill = byte(ev(ors[1], ore[1])) end
+        if n < 0 or n > 0x10000 then
+            if fail() then msg("bad DS size") end
+            return
+        end
+        while n > 0 do
+            emit(fill)
+            n -= 1
+        end
+        return
+    end
+    if id == M_ALIGN then
+        split_ops(as_, ae)
+        long n = ev(ors[0], ore[0])
+        if n < 1 then n = 1 end
+        byte fill = 0
+        if nops > 1 then fill = byte(ev(ors[1], ore[1])) end
+        while pc % n ~= 0 do emit(fill) end
+        return
+    end
+    if id == M_ASSERT then
+        if strict then
+            split_ops(as_, ae)
+            long v = ev(ors[0], ore[0])
+            if v == 0 and not failed then
+                if fail() then
+                    if nops > 1 and ore[1] - ors[1] >= 2 then
+                        msg_rng(ors[1] + 1, ore[1] - 1)
+                    else
+                        msg("assertion failed")
+                    end
+                end
+            end
+        end
+        return
+    end
+    if id == M_INCBIN then
+        incbin(as_, ae)
+        return
+    end
+    if id == M_SAVENEX then
+        savenex(as_, ae)
+        return
+    end
+    -- an instruction
+    split_ops(as_, ae)
+    encode(id)
+    if bad_insn then
+        if fail() then
+            msg("invalid instruction `")
+            trim(as_, ae)
+            msg_rng(ts, te)
+            msg("`")
+        end
+        return
+    end
+    if elen2 > 0 then
+        for i = 0, elen2 - 1 do emit(ebuf[i]) end
+    end
+end
+
+-- strip a `;` comment (outside quotes): the new length
+function strip_comment()
+    byte quote = 0
+    word i = 0
+    while i < llen do
+        byte c = lbuf[i]
+        if quote ~= 0 then
+            if c == '\\' and quote == '"' then
+                i += 1
+            elseif c == quote then
+                quote = 0
+            end
+        elseif c == ';' then
+            llen = i
+            return
+        elseif c == '"' then
+            quote = c
+        elseif c == 39 then
+            bool af = i >= 2 and lc(lbuf[i - 2]) == 'a' and lc(lbuf[i - 1]) == 'f'
+            if af and i >= 3 and is_ident_char(lbuf[i - 3]) then af = false end
+            if not af then quote = c end
+        end
+        i += 1
+    end
+end
+
+function do_source_ln()
+    strip_comment()
+    here = pc
+    word p = 0
+    word lab_s = 0
+    word lab_e = 0
+    if llen > 0 and is_ident_start(lbuf[0]) then
+        while p < llen and is_ident_char(lbuf[p]) do p += 1 end
+        lab_e = p
+        if p < llen and lbuf[p] == ':' then p += 1 end
+    else
+        while p < llen and is_blank(lbuf[p]) do p += 1 end
+        if p < llen and is_ident_start(lbuf[p]) then
+            word q = p
+            while q < llen and is_ident_char(lbuf[q]) do q += 1 end
+            if q < llen and lbuf[q] == ':' then
+                lab_s = p
+                lab_e = q
+                p = q + 1
+            end
+        end
+    end
+    -- the mnemonic / pseudo-op
+    while p < llen and is_blank(lbuf[p]) do p += 1 end
+    oplen = 0
+    while p < llen and not is_blank(lbuf[p]) do
+        if oplen < 15 then
+            opbuf[oplen] = lc(lbuf[p])
+        end
+        oplen += 1
+        p += 1
+    end
+    byte id = 0
+    if oplen > 0 and oplen <= 15 then id = mn_find() end
+    if lab_e > lab_s then
+        if id >= M_EQU and id <= M_DEFL then
+            long v = ev(p, llen)
+            define(lab_s, lab_e, v)
+            return
+        end
+        define(lab_s, lab_e, pc)
+    end
+    if oplen == 0 then return end
+    if id == 0 then
+        if fail() then
+            msg("unknown instruction `")
+            msg_rng(p - oplen, p)
+            msg("`")
+        end
+        return
+    end
+    pseudo_or_insn(id, p, llen)
+end
+
+function run_pass()
+    pass += 1
+    changed = false
+    failed = false
+    pc = 0
+    last_write = -1
+    glen = 0
+    lno = 0
+    nex_open = false
+    nex_nbanks = 0
+    slots[0] = 14
+    slots[1] = 15
+    slots[2] = 10
+    slots[3] = 11
+    slots[4] = 4
+    slots[5] = 5
+    slots[6] = 0
+    slots[7] = 1
+    for i = 0, 7 do guard[i] = 0 end
+    for i = 0, 223 do pdir[i] = 0 end
+    nslots = 0
+    in_eof = false
+    inh = file_open(in_name, FILE_READ)
+    if inh == FILE_ERROR then
+        failed = true
+        err_line = 0
+        elen = 0
+        msg("cannot open the input (in.asm or out.asm)")
+        return
+    end
+    while not failed and read_text_ln() do
+        lno += 1
+        do_source_ln()
+    end
+    file_close(inh)
+end
+
+-- ---------------------------------------------------------------- main
+
+-- in.asm, or out.asm (written by codegen.nex)
+string in_name = "in.asm"
+if not file_exists(in_name) then in_name = "out.asm" end
+mn_init()
+nex_init_order()
+strict = false
+run_pass()
+strict = true
+byte rounds = 0
+while true do
+    run_pass()
+    rounds += 1
+    if failed or not changed or rounds >= 8 then break end
+end
+if failed then
+    outh = file_open("asm.err", FILE_WRITE)
+    string head = str(err_line) .. ": "
+    for k = 0, len(head) - 1 do out_byte(asc(head, k)) end
+    if elen > 0 then
+        for k = 0, elen - 1 do out_byte(emsg[k]) end
+    end
+    out_byte(10)
+    flush()
+    file_close(outh)
+    write("asm: error in line ", err_line, ": ")
+    word k = 0
+    while k < elen do
+        write(chr(emsg[k]))
+        k += 1
+    end
+    print("")
+else
+    string name = ""
+    byte i = 0
+    while i < nex_nlen do
+        name = name .. chr(nex_name[i])
+        i += 1
+    end
+    print("asm:", pass, "passes,", nsym, "symbols, wrote", name)
+    -- run the result when run.on exists
+    if nex_nlen > 0 and file_exists("run.on") then
+        if not file_exec("nexload " .. name) then print("cannot start", name, "error", file_status) end
+    end
+end

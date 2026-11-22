@@ -1550,10 +1550,244 @@ function sound_tick()
 end
 "#;
 
+/// Files on the SD card through the esxDOS API (`RST $08`), which NextZXOS
+/// provides to NEX programs. One call at a time goes through `file_sys`:
+/// it maps the ROM into MMU slots 0 and 1 (DivMMC lives there during the
+/// call), disables interrupts (the frame interrupt may map far pages into
+/// slot 1) and restores both afterwards. Buffers must be at $4000 or above.
+pub const FILE: &str = r#"
+const FILE_READ = 1         -- an existing file, for reading
+const FILE_WRITE = 2        -- create (or empty) a file, for writing
+const FILE_APPEND = 3       -- open or create a file, write at its end
+const FILE_ERROR = 255      -- file_open failed: see file_status
+const FILE_EOF = 0xFFFF     -- file_getc at the end of the file
+
+byte file_status            -- esxDOS error code of the last call, 0 = ok
+
+-- registers in and out of an esxDOS call
+byte file_fn
+byte file_a
+byte file_cf
+word file_bc
+word file_de
+word file_hl
+word file_ix
+byte file_zname[65]         -- the file name with a 0 terminator
+byte file_st[11]            -- F_FSTAT result
+byte file_rbuf[256]         -- file_getc buffer
+word file_rpos
+word file_rlen
+byte file_rh = 255          -- the file the buffer belongs to
+
+function file_sys()
+    asm
+        push ix
+        ld a,(g_file_fn)
+        ld (.fn),a              ; the function byte after RST $08
+        ld a,i                  ; P/V = IFF2: were interrupts enabled?
+        push af
+        di
+        ld bc,$243B
+        ld a,$50
+        out (c),a
+        inc b
+        in a,(c)
+        ld (.mmu0),a
+        dec b
+        ld a,$51
+        out (c),a
+        inc b
+        in a,(c)
+        ld (.mmu1),a
+        nextreg $50,$FF         ; ROM in slots 0 and 1 while esxDOS runs
+        nextreg $51,$FF
+        ld a,(g_file_a)
+        ld bc,(g_file_bc)
+        ld de,(g_file_de)
+        ld hl,(g_file_hl)
+        ld ix,(g_file_ix)
+        rst $08
+.fn:    db 0
+        ld (g_file_a),a
+        ld (g_file_bc),bc
+        ld (g_file_de),de
+        ld (g_file_hl),hl
+        ld a,0
+        rla                     ; carry (error) -> bit 0
+        ld (g_file_cf),a
+        ld a,(.mmu0)
+        nextreg $50,a
+        ld a,(.mmu1)
+        nextreg $51,a
+        pop af
+        jp po,.keep_di
+        ei
+.keep_di:
+        pop ix
+        jr .done
+.mmu0:  db $FF
+.mmu1:  db $FF
+.done:
+    end
+end
+
+-- after file_sys: error? (sets file_status)
+function file_failed() -> bool
+    if file_cf ~= 0 then
+        file_status = file_a
+        return true
+    end
+    file_status = 0
+    return false
+end
+
+function file_cname(string name)
+    byte n = len(name)
+    byte i = 0
+    while i < n do
+        file_zname[i] = asc(name, i)
+        i += 1
+    end
+    file_zname[n] = 0
+    file_ix = addr(file_zname)
+    file_hl = file_ix
+end
+
+-- open a file: FILE_READ, FILE_WRITE or FILE_APPEND; the handle or FILE_ERROR
+function file_open(string name, byte mode) -> byte
+    file_cname(name)
+    byte m = 0x01                               -- FA_READ, must exist
+    if mode == FILE_WRITE then m = 0x0E end     -- FA_WRITE | FA_CREATE_AL
+    if mode == FILE_APPEND then m = 0x0A end    -- FA_WRITE | FA_OPEN_AL
+    file_fn = 0x9A
+    file_a = '*'
+    file_bc = word(m) << 8
+    file_sys()
+    if file_failed() then return FILE_ERROR end
+    byte h = file_a
+    if mode == FILE_APPEND then
+        file_seek(h, file_size(h))
+    end
+    return h
+end
+
+function file_close(byte h)
+    if h == file_rh then file_rh = 255 end
+    file_fn = 0x9B
+    file_a = h
+    file_sys()
+    file_failed()
+end
+
+-- read up to count bytes to address (>= $4000); the number read (0 = end)
+function file_read(byte h, word address, word count) -> word
+    file_fn = 0x9D
+    file_a = h
+    file_ix = address
+    file_hl = address
+    file_bc = count
+    file_sys()
+    if file_failed() then return 0 end
+    return file_bc
+end
+
+-- write count bytes from address (>= $4000); the number written
+function file_write(byte h, word address, word count) -> word
+    file_fn = 0x9E
+    file_a = h
+    file_ix = address
+    file_hl = address
+    file_bc = count
+    file_sys()
+    if file_failed() then return 0 end
+    return file_bc
+end
+
+-- move to byte pos from the start of the file
+function file_seek(byte h, long pos)
+    file_fn = 0x9F
+    file_a = h
+    file_bc = word(pos >> 16)
+    file_de = word(pos)
+    file_hl = 0
+    file_ix = 0
+    file_sys()
+    file_failed()
+    if h == file_rh then file_rh = 255 end
+end
+
+-- current position
+function file_pos(byte h) -> long
+    file_fn = 0xA0
+    file_a = h
+    file_sys()
+    if file_failed() then return 0 end
+    return long(file_bc) << 16 | long(file_de)
+end
+
+function file_size(byte h) -> long
+    file_fn = 0xA1
+    file_a = h
+    file_ix = addr(file_st)
+    file_hl = file_ix
+    file_sys()
+    if file_failed() then return 0 end
+    return long(file_st[7]) | long(file_st[8]) << 8 | long(file_st[9]) << 16 | long(file_st[10]) << 24
+end
+
+function file_delete(string name) -> bool
+    file_cname(name)
+    file_fn = 0xAD
+    file_a = '*'
+    file_sys()
+    return not file_failed()
+end
+
+-- does the file exist?
+function file_exists(string name) -> bool
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then return false end
+    file_close(h)
+    return true
+end
+
+-- run a dot command: file_exec("nexload game.nex") (does not come back when
+-- it starts another program); false (and file_status) when it fails
+function file_exec(string cmd) -> bool
+    file_cname(cmd)
+    file_fn = 0x8F
+    file_sys()
+    return not file_failed()
+end
+
+-- next byte of a file read byte by byte; FILE_EOF at the end. The buffer
+-- serves one file: reading another one with file_getc starts it again
+-- (mixing file_getc and file_read on the same file skips bytes).
+function file_getc(byte h) -> word
+    if h ~= file_rh then
+        file_rh = h
+        file_rpos = 0
+        file_rlen = 0
+    end
+    if file_rpos >= file_rlen then
+        file_rlen = file_read(h, addr(file_rbuf), 256)
+        file_rpos = 0
+        if file_rlen == 0 then return FILE_EOF end
+    end
+    byte c = file_rbuf[file_rpos]
+    file_rpos += 1
+    return c
+end
+"#;
+
 pub fn uses_sound(src: &str) -> bool {
     ["play(", "play_loop(", "beep(", "tone(", "noise(", "volume(", "sound_", "playing("]
         .iter()
         .any(|w| src.contains(w))
+}
+
+pub fn uses_file(src: &str) -> bool {
+    src.contains("file_") || src.contains("FILE_")
 }
 
 pub fn uses_copper(src: &str) -> bool {
@@ -1597,6 +1831,14 @@ pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
             "PAL_ULA_2", "PAL_LAYER2_2", "PAL_SPRITES_2", "PAL_TEXT_2",
         ],
     ),
+    (
+        "file",
+        &[
+            "file_open", "file_close", "file_read", "file_write", "file_seek", "file_pos", "file_size",
+            "file_delete", "file_getc", "file_exists", "file_exec", "file_status", "FILE_READ", "FILE_WRITE", "FILE_APPEND",
+            "FILE_ERROR", "FILE_EOF",
+        ],
+    ),
     ("copper", &["copper_begin", "copper_wait", "copper_move", "copper_start", "copper_stop"]),
     (
         "sound",
@@ -1611,6 +1853,9 @@ pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
 pub fn library_module(name: &str) -> Option<&'static str> {
     if name.starts_with("snd_") {
         return Some("sound");
+    }
+    if name.starts_with("file_") {
+        return Some("file");
     }
     if name.starts_with("l2_") {
         return Some("Layer 2");

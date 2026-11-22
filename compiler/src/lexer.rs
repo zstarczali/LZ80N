@@ -34,7 +34,18 @@ pub struct Token {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
-    Lexer { s: src.as_bytes(), i: 0, line: 1, col: 1 }.run()
+    let mut out = Vec::new();
+    Lexer { s: src.as_bytes(), i: 0, line: 1, col: 1 }.run(&mut out)?;
+    Ok(out)
+}
+
+/// The tokens up to the first error, and the error (tests of the
+/// self-hosted lexer compare both).
+#[cfg(test)]
+pub fn lex_partial(src: &str) -> (Vec<Token>, Option<Diag>) {
+    let mut out = Vec::new();
+    let r = Lexer { s: src.as_bytes(), i: 0, line: 1, col: 1 }.run(&mut out);
+    (out, r.err())
 }
 
 struct Lexer<'a> {
@@ -65,14 +76,13 @@ impl<'a> Lexer<'a> {
         Pos { line: self.line, col: self.col, file: 0 }
     }
 
-    fn run(mut self) -> Result<Vec<Token>, Diag> {
-        let mut out = Vec::new();
+    fn run(mut self, out: &mut Vec<Token>) -> Result<(), Diag> {
         loop {
             self.skip_ws_and_comments()?;
             let pos = self.pos();
             if self.i >= self.s.len() {
                 out.push(Token { tok: Tok::Eof, pos });
-                return Ok(out);
+                return Ok(());
             }
             let tok = self.next_tok(pos)?;
             let is_asm = tok == Tok::Asm;
