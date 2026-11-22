@@ -89,6 +89,20 @@ const FUNCTIONS = {
   addr: ['addr(x) -> word', 'Address of a variable, array, element or field.', 19],
   dma_copy: ['dma_copy(src, dst, len)', 'Copy memory with the zxnDMA.', 19],
   dma_fill: ['dma_fill(dst, len, value)', 'Fill memory with the zxnDMA.', 19],
+  // 19.2 files
+  file_open: ['file_open(name, mode) -> byte', 'Open a file on the SD card: `FILE_READ`, `FILE_WRITE` (create or empty) or `FILE_APPEND`; a handle or `FILE_ERROR`.', 19],
+  file_close: ['file_close(h)', 'Close a file or a folder.', 19],
+  file_read: ['file_read(h, address, count) -> word', 'Read up to `count` bytes to `address` (`$4000` or above); the number read, 0 at the end.', 19],
+  file_write: ['file_write(h, address, count) -> word', 'Write `count` bytes from `address`; the number written.', 19],
+  file_getc: ['file_getc(h) -> word', 'The next byte of a file (buffered), or `FILE_EOF` at the end.', 19],
+  file_seek: ['file_seek(h, pos)', 'Move to byte `pos` from the start of the file.', 19],
+  file_pos: ['file_pos(h) -> long', 'The current position in the file.', 19],
+  file_size: ['file_size(h) -> long', 'The size of an open file.', 19],
+  file_exists: ['file_exists(name) -> bool', 'Does the file exist?', 19],
+  file_delete: ['file_delete(name) -> bool', 'Delete a file.', 19],
+  file_opendir: ['file_opendir(path) -> byte', 'Open a folder (`"."`: the current one) for `file_readdir`; a handle or `FILE_ERROR`.', 19],
+  file_readdir: ['file_readdir(h, address) -> bool', 'The next folder entry into a 280-byte buffer: attributes (bit 4: a folder), the name ending with 0, time, date, size; false at the end.', 19],
+  file_exec: ['file_exec(command) -> bool', 'Run a dot command, e.g. `file_exec("nexload game.nex")` (does not come back when it starts another program).', 19],
   // 9 strings
   len: ['len(s) -> byte', 'Length of a string.', 9],
   sub: ['sub(s, from, count) -> string', 'Part of a string.', 9],
@@ -158,5 +172,11 @@ for (const p of ['ULA', 'LAYER2', 'SPRITES', 'TEXT']) {
 CONSTANTS.L2_256 = 'Layer 2 256x192, 256 colours, for `layer2_mode()`.';
 CONSTANTS.L2_320 = 'Layer 2 320x256, 256 colours, for `layer2_mode()`.';
 CONSTANTS.L2_640 = 'Layer 2 640x256, 16 colours, for `layer2_mode()`.';
+CONSTANTS.FILE_READ = '`file_open()` mode: read an existing file.';
+CONSTANTS.FILE_WRITE = '`file_open()` mode: create or empty a file for writing.';
+CONSTANTS.FILE_APPEND = '`file_open()` mode: open or create a file, write at its end.';
+CONSTANTS.FILE_ERROR = '255: `file_open()` / `file_opendir()` failed; see `file_status`.';
+CONSTANTS.FILE_EOF = '`$FFFF`: `file_getc()` at the end of the file.';
+CONSTANTS.file_status = 'The esxDOS error code of the last file call (0: no error).';
 
 module.exports = { FUNCTIONS, ARRAYS, TYPES, KEYWORDS, CONSTANTS };

@@ -722,6 +722,12 @@ function draw_status()
         row_text(c, prompt_text, C_STATUS)
         rowa[c + len(prompt_text)] = C_CURSOR * 2
     else
+        if hv_open then
+            row_text(1, "Manual: arrows, left/right chapter, ENTER, F find, N next, BREAK close", C_STATUS)
+            if message ~= "" then row_text(1, message, msg_colour) end
+            put_row(STATUS_ROW)
+            return
+        end
         row_text(1, "Ln ", C_STATUS)
         row_num(4, 5, cy + 1, C_STATUS)
         row_text(10, "Col ", C_STATUS)
@@ -744,11 +750,11 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "", "Build output  EXT L"
+    "Keys", "About", "", "Build output  EXT L", "Language manual EXT H", "Kezikonyv (magyar)"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
-byte menu_order[18] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 16}
-byte menu_first[5] = {0, 4, 13, 16, 18}
+byte menu_order[20] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 20, 16}
+byte menu_first[5] = {0, 4, 13, 16, 20}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -882,6 +888,7 @@ string help_text[] = {
     "EXTEND (CAPS+SYM), then:",
     "  S save  O open  N new  B compile  R compile & run",
     "  F find  G go to line  K delete line  L build output",
+    "  H the manual at the word under the cursor",
     "  M mark (then the cursor keys select)  A select all",
     "  C copy  X cut  V paste (a line without a selection)",
     "  left / right: start / end of the line",
@@ -893,7 +900,7 @@ string help_text[] = {
     "",
     "Any key closes this."
 }
-const NHELP = 23
+const NHELP = 24
 
 -- the build output: the last lines of build.log in a box at the bottom
 const OUT_MAX = 16
@@ -985,6 +992,8 @@ function covered(byte r) -> bool
     if menu_open and r >= box_y and r <= box_y + box_n() then return true end
     if help_open and r >= TEXT_TOP + 1 and r < TEXT_TOP + 1 + NHELP + 2 then return true end
     if out_open and r >= TEXT_TOP + TEXT_ROWS - nout - 2 then return true end
+    if br_open and r >= BR_Y and r <= BR_Y + BR_ROWS + 2 then return true end
+    if hv_open and r >= TEXT_TOP and r < TEXT_TOP + TEXT_ROWS then return true end
     return false
 end
 
@@ -998,7 +1007,9 @@ function redraw()
         end
         if menu_open then draw_menu_box() end
         if help_open then draw_help() end
+        if hv_open then draw_hv() end
         if out_open then draw_output() end
+        if br_open then draw_browser() end
         draw_status()
         redraw_all = false
         redraw_line = false
@@ -1086,7 +1097,7 @@ function set_top(word t)
     bool up = t > top
     if up then d = t - top else d = top - t end
     top = t
-    if redraw_all or menu_open or help_open or out_open or d >= TEXT_ROWS - 2 then
+    if redraw_all or menu_open or help_open or out_open or br_open or hv_open or d >= TEXT_ROWS - 2 then
         redraw_all = true
         return
     end
@@ -1378,7 +1389,19 @@ function mouse_poll()
     if mouse_seen and dw ~= 0 then
         if dw > 7 then dw -= 16 end
         if dw < -8 then dw += 16 end
-        scroll_by(sword(dw) * 3)
+        if br_open then
+            browser_wheel(dw)
+        elseif hv_open then
+            if dw < 0 then
+                if hv_top > 3 then hv_top -= 3 else hv_top = 0 end
+            elseif hv_top + 3 < hl_n then
+                hv_top += 3
+            end
+            hv_cur = hv_top
+            draw_hv()
+        else
+            scroll_by(sword(dw) * 3)
+        end
     end
     -- the buttons (0 = pressed): bit 1 left, bit 0 right
     bool down = mb & 2 == 0
@@ -1521,6 +1544,10 @@ end
 function click()
     word r = py / 8
     word c = px / 4
+    if br_open then
+        browser_click(r, c)
+        return
+    end
     if out_open then
         out_open = false
         redraw_all = true
@@ -2165,6 +2192,9 @@ function prompt_done(byte kind, string t)
     elseif kind == 3 then
         find_text = t
         find_next()
+    elseif kind == 5 then
+        hv_find = t
+        hv_find_next()
     elseif kind == 4 then
         sword n = val(t)
         if n < 1 then n = 1 end
@@ -2316,7 +2346,7 @@ function run_item(byte it)
     if it == 0 then
         if may_drop(K_EXT + 'n') then new_text() end
     elseif it == 1 then
-        if may_drop(K_EXT + 'o') then prompt(1, "Open:", fname) end
+        if may_drop(K_EXT + 'o') then open_browser() end
     elseif it == 2 then
         cmd_save()
     elseif it == 3 then
@@ -2350,6 +2380,11 @@ function run_item(byte it)
         splash(false)
     elseif it == 18 then
         show_output()
+    elseif it == 19 then
+        hv_show("help.txt", hv_cur)
+    elseif it == 20 then
+        if hv_file ~= "help-hu.txt" then hv_cur = 0 end
+        hv_show("help-hu.txt", hv_cur)
     end
 end
 
@@ -2401,6 +2436,8 @@ function ext_command(word c)
         delete_this_line()
     elseif c == 'l' then
         show_output()
+    elseif c == 'h' then
+        context_help()
     elseif c == K_LEFT then
         move_to(cy, 0)
     elseif c == K_RIGHT then
@@ -2414,6 +2451,14 @@ function ext_command(word c)
 end
 
 function handle_key(word k)
+    if hv_open and prompt_kind == 0 then
+        hv_key(k)
+        return
+    end
+    if br_open then
+        browser_key(k)
+        return
+    end
     if out_open then
         out_open = false
         redraw_all = true
@@ -2633,6 +2678,616 @@ function load_session()
     redraw_all = true
 end
 
+-- ---------------------------------------------------------------- the file browser
+-- File -> Open: the folders and the program files of a folder; ENTER (or a
+-- double click) opens one, a letter jumps to the names starting with it
+
+const BR_X = 14             -- the box: columns 14..65, rows 2..29
+const BR_W = 52
+const BR_Y = 2
+const BR_ROWS = 25          -- entries shown
+const BR_MAX = 255
+far byte br_names[16320]    -- 64 bytes for each entry's name
+byte br_len[255]
+byte br_attr[255]           -- $10: a folder; 1: "type a name"
+word br_size[255]           -- the size (65535: 64K or more)
+byte br_order[255]          -- the entries sorted: folders first, then names
+byte br_n = 0
+byte br_first = 0           -- the first entry shown
+byte br_cur = 0             -- the selected entry
+bool br_open = false
+string br_dir = ""          -- the folder shown ("" = the current one, else "x/")
+byte dbuf[280]              -- file_readdir's buffer
+
+function br_name(byte i) -> string
+    string t = ""
+    word o = word(i) * 64
+    byte k = 0
+    while k < br_len[i] do
+        t = t .. chr(br_names[o + k])
+        k += 1
+    end
+    return t
+end
+
+-- name a before name b? (folders first; letters compared without case)
+function br_before(byte a, byte b) -> bool
+    bool da = br_attr[a] & 0x10 ~= 0
+    bool db = br_attr[b] & 0x10 ~= 0
+    if br_attr[a] == 1 then return true end
+    if br_attr[b] == 1 then return false end
+    if da ~= db then return da end
+    word oa = word(a) * 64
+    word ob = word(b) * 64
+    byte k = 0
+    while k < br_len[a] and k < br_len[b] do
+        byte ca = br_names[oa + k]
+        byte cb = br_names[ob + k]
+        if ca >= 'A' and ca <= 'Z' then ca += 32 end
+        if cb >= 'A' and cb <= 'Z' then cb += 32 end
+        if ca ~= cb then return ca < cb end
+        k += 1
+    end
+    return br_len[a] < br_len[b]
+end
+
+-- the files worth opening: source, assembly and text files
+function br_wanted(byte i) -> bool
+    if br_attr[i] & 0x10 ~= 0 then return true end
+    string t = lower(br_name(i))
+    byte n = len(t)
+    if n > 6 and sub(t, n - 6, 6) == ".lz80n" then return true end
+    if n > 4 and (sub(t, n - 4, 4) == ".asm" or sub(t, n - 4, 4) == ".txt" or sub(t, n - 4, 4) == ".log" or sub(t, n - 4, 4) == ".bas") then return true end
+    if n > 3 and sub(t, n - 3, 3) == ".md" then return true end
+    return false
+end
+
+-- read br_dir
+function br_read()
+    br_n = 0
+    -- the first entry: type a name
+    br_attr[0] = 1
+    br_len[0] = 0
+    br_size[0] = 0
+    br_order[0] = 0
+    br_n = 1
+    string path = br_dir
+    if path == "" then path = "." end
+    byte h = file_opendir(path)
+    if h == FILE_ERROR then
+        set_msg("cannot read the folder " .. path, C_ERR)
+        return
+    end
+    while br_n < BR_MAX and file_readdir(h, addr(dbuf)) do
+        byte i = br_n
+        br_attr[i] = dbuf[0]
+        word o = word(i) * 64
+        byte k = 0
+        while dbuf[1 + k] ~= 0 and k < 64 do
+            br_names[o + k] = dbuf[1 + k]
+            k += 1
+        end
+        br_len[i] = k
+        -- skip `.`, hidden and system entries
+        bool keep = k > 0 and not (k == 1 and dbuf[1] == '.') and dbuf[0] & 6 == 0
+        -- (the size after the name, its 0 and the time and the date)
+        byte p = 1
+        while dbuf[p] ~= 0 do p += 1 end
+        p += 5
+        if dbuf[p + 2] ~= 0 or dbuf[p + 3] ~= 0 then
+            br_size[i] = 65535
+        else
+            br_size[i] = word(dbuf[p]) | word(dbuf[p + 1]) << 8
+        end
+        if keep and br_wanted(i) then
+            -- into the sorted order
+            byte j = br_n
+            while j > 0 and br_before(i, br_order[j - 1]) do
+                br_order[j] = br_order[j - 1]
+                j -= 1
+            end
+            br_order[j] = i
+            br_n += 1
+        end
+    end
+    file_close(h)
+    br_first = 0
+    br_cur = 0
+    if br_n > 1 then br_cur = 1 end
+end
+
+function open_browser()
+    br_open = true
+    br_read()
+    redraw_all = true
+end
+
+function close_browser()
+    br_open = false
+    mark_rows(BR_Y, BR_Y + BR_ROWS + 2)
+end
+
+-- the row of entry k (of the sorted order) in rowc / rowa
+function br_entry_row(byte k)
+    byte colour = C_BOX
+    if k == br_cur then colour = C_MENUHI end
+    byte x = 0
+    while x < BR_W do
+        rowc[BR_X + x] = ' '
+        rowa[BR_X + x] = colour * 2
+        x += 1
+    end
+    if k >= br_n then return end
+    byte i = br_order[k]
+    if br_attr[i] == 1 then
+        row_text(BR_X + 2, "<type a name>", colour)
+        return
+    end
+    string t = br_name(i)
+    if br_attr[i] & 0x10 ~= 0 then t = t .. "/" end
+    if len(t) > 36 then t = sub(t, 0, 35) .. "~" end
+    row_text(BR_X + 2, t, colour)
+    if br_attr[i] & 0x10 == 0 then
+        if br_size[i] == 65535 then
+            row_text(BR_X + BR_W - 6, ">64K", colour)
+        else
+            row_num(BR_X + BR_W - 8, 6, br_size[i], colour)
+        end
+    end
+end
+
+function draw_browser()
+    byte r = BR_Y
+    while r <= BR_Y + BR_ROWS + 2 do
+        build_text_row(r)
+        if r == BR_Y or r == BR_Y + BR_ROWS + 2 then
+            byte x = 0
+            while x < BR_W do
+                rowc[BR_X + x] = ' '
+                rowa[BR_X + x] = C_BOX * 2
+                x += 1
+            end
+            if r == BR_Y then
+                string d = br_dir
+                if d == "" then d = "./" end
+                row_text(BR_X + 1, "Open: " .. d, C_BOX)
+            else
+                row_text(BR_X + 1, "ENTER open  BREAK cancel  a letter: jump", C_BOX)
+            end
+        else
+            br_entry_row(br_first + byte(r - BR_Y - 1))
+        end
+        put_row(r)
+        r += 1
+    end
+end
+
+-- the selection to entry k (scrolls the list when needed)
+function br_select(byte k)
+    if k >= br_n then k = br_n - 1 end
+    if k < br_first or k >= br_first + BR_ROWS then
+        br_cur = k
+        if k < br_first then br_first = k else br_first = k - BR_ROWS + 1 end
+        draw_browser()
+        return
+    end
+    byte old = br_cur
+    br_cur = k
+    put_attr(BR_Y + 1 + (old - br_first), BR_X, BR_W, C_BOX * 2)
+    put_attr(BR_Y + 1 + (k - br_first), BR_X, BR_W, C_MENUHI * 2)
+end
+
+-- open the selected entry: a folder is shown, a file is loaded
+function br_enter()
+    byte i = br_order[br_cur]
+    if br_attr[i] == 1 then
+        close_browser()
+        prompt(1, "Open:", br_dir)
+        return
+    end
+    string t = br_name(i)
+    if br_attr[i] & 0x10 ~= 0 then
+        if t == ".." then
+            -- up: drop the last folder of br_dir
+            byte n = len(br_dir)
+            if n > 0 then n -= 1 end
+            while n > 0 and asc(br_dir, n - 1) ~= '/' do n -= 1 end
+            br_dir = sub(br_dir, 0, n)
+        else
+            br_dir = br_dir .. t .. "/"
+        end
+        br_read()
+        draw_browser()
+        return
+    end
+    close_browser()
+    string name = br_dir .. t
+    if load_file(name) then
+        fname = name
+        main_name = ""
+        set_msg("loaded " .. name, C_STATUS)
+    end
+    redraw_all = true
+end
+
+function browser_key(word k)
+    if k == K_BREAK or k == K_MENU then
+        close_browser()
+    elseif k == K_UP then
+        if br_cur > 0 then br_select(br_cur - 1) end
+    elseif k == K_DOWN then
+        if br_cur + 1 < br_n then br_select(br_cur + 1) end
+    elseif k == K_PGUP then
+        if br_cur > BR_ROWS then br_select(br_cur - BR_ROWS) else br_select(0) end
+    elseif k == K_PGDN then
+        if word(br_cur) + BR_ROWS < br_n then br_select(br_cur + BR_ROWS) else br_select(br_n - 1) end
+    elseif k == K_ENTER then
+        br_enter()
+    elseif k >= 'a' and k <= 'z' or k >= 'A' and k <= 'Z' then
+        -- the next entry starting with that letter
+        byte c = byte(k) | 32
+        byte j = br_cur + 1
+        byte tries = 0
+        while tries < br_n do
+            if j >= br_n then j = 0 end
+            byte i = br_order[j]
+            if br_attr[i] ~= 1 and br_len[i] > 0 and (br_names[word(i) * 64] | 32) == c then
+                br_select(j)
+                return
+            end
+            j += 1
+            tries += 1
+        end
+    end
+end
+
+-- a click in the browser: select, a second click on the same entry opens
+function browser_click(word r, word c)
+    if c < BR_X or c >= BR_X + BR_W or r < BR_Y or r > BR_Y + BR_ROWS + 2 then
+        close_browser()
+        return
+    end
+    if r == BR_Y or r == BR_Y + BR_ROWS + 1 + 1 then return end
+    byte k = br_first + byte(r - BR_Y - 1)
+    if k >= br_n then return end
+    if k == br_cur and frame_n - click_t < 25 then
+        br_enter()
+        return
+    end
+    click_t = frame_n
+    br_select(k)
+end
+
+function browser_wheel(sbyte d)
+    sword f = sword(br_first) + sword(d) * 3
+    sword most = sword(br_n) - BR_ROWS
+    if most < 0 then most = 0 end
+    if f > most then f = most end
+    if f < 0 then f = 0 end
+    br_first = byte(f)
+    if br_cur < br_first then br_cur = br_first end
+    if br_cur >= br_first + BR_ROWS then br_cur = br_first + BR_ROWS - 1 end
+    draw_browser()
+end
+
+-- ---------------------------------------------------------------- the manual
+-- Help -> Language manual: help.txt (help-hu.txt: Hungarian), the LZ80N
+-- manual, in the text area: the cursor keys move, left / right go to the
+-- previous / next chapter, ENTER on a line of the contents opens that
+-- chapter, F finds a text (N: again), EXT H in the editor looks up the
+-- word under the cursor. BREAK closes it.
+
+far byte ht[65280]          -- the text
+far word hl_off[4000]       -- the wrapped lines: offset, length, kind
+far byte hl_len[4000]
+far byte hl_kind[4000]      -- 0 text, 1 heading, 2 code, 3 table
+word hl_n = 0
+word ht_len = 0
+word hv_top = 0
+word hv_cur = 0
+bool hv_open = false
+string hv_file = ""
+string hv_find = ""
+
+-- read a manual and wrap its lines at the text width
+function hv_load(string name) -> bool
+    if hv_file == name then return true end
+    byte h = file_open(name, FILE_READ)
+    if h == FILE_ERROR then
+        set_msg("cannot read " .. name, C_ERR)
+        redraw_line = true
+        return false
+    end
+    ht_len = 0
+    word c = file_getc(h)
+    while c ~= FILE_EOF and ht_len < 65280 do
+        ht[ht_len] = byte(c)
+        ht_len += 1
+        c = file_getc(h)
+    end
+    file_close(h)
+    -- the lines, wrapped at word boundaries at 77 columns
+    hl_n = 0
+    bool code = false
+    word p = 0
+    while p < ht_len and hl_n < 4000 do
+        word e = p
+        while e < ht_len and ht[e] ~= 10 do e += 1 end
+        byte kind = 0
+        if ht[p] == '`' and e - p >= 3 and ht[p + 1] == '`' then
+            code = not code
+            kind = 2
+        elseif code then
+            kind = 2
+        elseif ht[p] == '#' then
+            kind = 1
+        elseif ht[p] == '|' then
+            kind = 3
+        end
+        word q = p
+        bool first = true
+        while (q < e or first) and hl_n < 4000 do
+            first = false
+            word n = e - q
+            if n > 77 then
+                n = 77
+                -- back to a space, unless there is none
+                word b = n
+                while b > 20 and ht[q + b] ~= ' ' do b -= 1 end
+                if b > 20 then n = b + 1 end
+            end
+            hl_off[hl_n] = q
+            hl_len[hl_n] = byte(n)
+            hl_kind[hl_n] = kind
+            hl_n += 1
+            q += n
+        end
+        p = e + 1
+    end
+    hv_file = name
+    return true
+end
+
+function hv_show(string name, word at_)
+    if not hv_load(name) then return end
+    hv_open = true
+    if at_ >= hl_n then at_ = 0 end
+    hv_cur = at_
+    hv_top = at_
+    if hv_top > 3 then hv_top -= 3 else hv_top = 0 end
+    redraw_all = true
+end
+
+function hv_close()
+    hv_open = false
+    redraw_all = true
+end
+
+function hv_row(byte r)
+    word l = hv_top + (r - TEXT_TOP)
+    row_clear(C_TEXT)
+    if l < hl_n then
+        byte colour = C_TEXT
+        byte k = hl_kind[l]
+        if k == 1 then colour = C_KEY end
+        if k == 2 then colour = C_NUM end
+        if k == 3 then colour = C_TYPE end
+        word o = hl_off[l]
+        byte n = hl_len[l]
+        byte i = 0
+        while i < n do
+            rowc[1 + i] = ht[o + i]
+            rowa[1 + i] = colour * 2
+            i += 1
+        end
+        if l == hv_cur then
+            byte x = 0
+            while x < 79 do
+                rowa[x] = C_SEL * 2
+                x += 1
+            end
+        end
+    end
+    put_row(r)
+end
+
+function draw_hv()
+    byte r = TEXT_TOP
+    while r < TEXT_TOP + TEXT_ROWS do
+        hv_row(r)
+        r += 1
+    end
+end
+
+-- the cursor line to l (scrolls when needed)
+function hv_go(word l)
+    if l >= hl_n then
+        if hl_n == 0 then return end
+        l = hl_n - 1
+    end
+    word old = hv_cur
+    hv_cur = l
+    if l < hv_top or l >= hv_top + TEXT_ROWS then
+        if l < hv_top then hv_top = l else hv_top = l - TEXT_ROWS + 1 end
+        draw_hv()
+        return
+    end
+    if old >= hv_top and old < hv_top + TEXT_ROWS then hv_row(byte(old - hv_top) + TEXT_TOP) end
+    hv_row(byte(l - hv_top) + TEXT_TOP)
+end
+
+-- does line l start with the text t?
+function hv_starts(word l, string t) -> bool
+    if hl_len[l] < len(t) then return false end
+    word o = hl_off[l]
+    byte i = 0
+    while i < len(t) do
+        if ht[o + i] ~= asc(t, i) then return false end
+        i += 1
+    end
+    return true
+end
+
+-- the next (dir 1) or previous chapter: a line starting with "## "
+function hv_chapter(bool next)
+    word l = hv_cur
+    while true do
+        if next then
+            if l + 1 >= hl_n then return end
+            l += 1
+        else
+            if l == 0 then return end
+            l -= 1
+        end
+        if hv_starts(l, "## ") then
+            hv_top = l
+            hv_go(l)
+            draw_hv()
+            return
+        end
+    end
+end
+
+-- t in line l (letters compared without case)?
+function hv_has(word l, string t) -> bool
+    byte n = len(t)
+    byte ln = hl_len[l]
+    if n == 0 or ln < n then return false end
+    word o = hl_off[l]
+    byte i = 0
+    while i + n <= ln do
+        byte j = 0
+        while j < n do
+            byte a = ht[o + i + j]
+            byte b = asc(t, j)
+            if a >= 'A' and a <= 'Z' then a += 32 end
+            if b >= 'A' and b <= 'Z' then b += 32 end
+            if a ~= b then break end
+            j += 1
+        end
+        if j == n then return true end
+        i += 1
+    end
+    return false
+end
+
+-- the next line with t after line from (around the end); hl_n if none
+function hv_search(string t, word from) -> word
+    word l = from
+    word tries = 0
+    while tries < hl_n do
+        l += 1
+        if l >= hl_n then l = 0 end
+        if hv_has(l, t) then return l end
+        tries += 1
+    end
+    return hl_n
+end
+
+function hv_find_next()
+    if hv_find == "" then return end
+    word l = hv_search(hv_find, hv_cur)
+    if l == hl_n then
+        set_msg("not found: " .. hv_find, C_ERR)
+        redraw_line = true
+        return
+    end
+    hv_top = l
+    if hv_top > 3 then hv_top -= 3 else hv_top = 0 end
+    hv_cur = l
+    draw_hv()
+end
+
+-- ENTER: a line of the contents ("12. ...") opens its chapter
+function hv_enter()
+    word o = hl_off[hv_cur]
+    byte n = hl_len[hv_cur]
+    byte i = 0
+    while i < n and ht[o + i] >= '0' and ht[o + i] <= '9' do i += 1 end
+    if i == 0 or i >= n or ht[o + i] ~= '.' then return end
+    string head = "## "
+    byte k = 0
+    while k <= i do
+        head = head .. chr(ht[o + k])
+        k += 1
+    end
+    word l = 0
+    while l < hl_n do
+        if hv_starts(l, head) then
+            hv_top = l
+            hv_cur = l
+            draw_hv()
+            return
+        end
+        l += 1
+    end
+end
+
+function hv_key(word k)
+    if k == K_BREAK or k == K_MENU then
+        hv_close()
+    elseif k == K_UP then
+        if hv_cur > 0 then hv_go(hv_cur - 1) end
+    elseif k == K_DOWN then
+        hv_go(hv_cur + 1)
+    elseif k == K_PGUP then
+        if hv_cur > TEXT_ROWS then hv_go(hv_cur - TEXT_ROWS) else hv_go(0) end
+    elseif k == K_PGDN then
+        hv_go(hv_cur + TEXT_ROWS)
+    elseif k == K_LEFT then
+        hv_chapter(false)
+    elseif k == K_RIGHT then
+        hv_chapter(true)
+    elseif k == K_EXT + K_UP then
+        hv_top = 0
+        hv_go(0)
+        draw_hv()
+    elseif k == K_EXT + K_DOWN then
+        hv_go(hl_n - 1)
+    elseif k == K_ENTER then
+        hv_enter()
+    elseif k == 'f' or k == 'F' or k == K_EXT + 'f' then
+        prompt(5, "Find in the manual:", hv_find)
+    elseif k == 'n' or k == 'N' then
+        hv_find_next()
+    end
+end
+
+-- EXT H: the word under the cursor in the manual (`word` first)
+function context_help()
+    load_cur(cy)
+    byte a = cx
+    while a > 0 and (is_alpha(cur[a - 1]) or is_digit(cur[a - 1])) do a -= 1 end
+    byte b = cx
+    while b < cur_len and (is_alpha(cur[b]) or is_digit(cur[b])) do b += 1 end
+    if not hv_load("help.txt") then return end
+    if a == b then
+        hv_show("help.txt", 0)
+        return
+    end
+    string w = ""
+    byte i = a
+    while i < b do
+        w = w .. chr(cur[i])
+        i += 1
+    end
+    -- after the contents: a heading, then `word(`, then `word`, then the word
+    word start = 0
+    while start < hl_n and not hv_starts(start, "## 1.") do start += 1 end
+    if start == hl_n then start = 0 end
+    word l = hv_search("`" .. w .. "(", start)
+    if l == hl_n then l = hv_search("`" .. w .. "`", start) end
+    if l == hl_n then l = hv_search("`" .. w, start) end
+    if l == hl_n then l = hv_search(w, start) end
+    if l == hl_n then
+        set_msg("not in the manual: " .. w, C_ERR)
+        redraw_line = true
+        return
+    end
+    hv_find = w
+    hv_show("help.txt", l)
+end
+
 -- ---------------------------------------------------------------- splash
 
 -- 5x7 letters of the logo (bit 4 = the left column)
@@ -2787,7 +3442,7 @@ while not quit_now do
     if k == 0xFFFF then break end           -- the end of ide.key
     if k ~= 0 then handle_key(k) end
     blink_t += 1
-    if blink_t >= 25 and not scripted and not menu_open and not help_open and not out_open then
+    if blink_t >= 25 and not scripted and not menu_open and not help_open and not out_open and not br_open and not hv_open then
         blink_t = 0
         blink = not blink
         redraw_line = true

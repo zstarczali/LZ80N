@@ -6096,3 +6096,80 @@ fn selfhost_ide_scroll() {
     let blocks = thumb.windows(2).filter(|w| w[0] != w[1]).count();
     assert!(blocks <= 2 && thumb.contains(&38), "{thumb:?}");
 }
+
+/// File -> Open: the file browser (folders first, then the program files,
+/// sorted; the other files left out); into a folder and open a file there.
+#[test]
+fn selfhost_ide_browser() {
+    let files: [(&str, &[u8]); 5] = [
+        ("zz.txt", b"notes\n"),
+        ("a.lz80n", b"print(1)\n"),
+        ("x.nex", b"NEX"),
+        ("sub/b.lz80n", b"print(\"b\")\n"),
+        ("sub/deep/c.lz80n", b"print(3)\n"),
+    ];
+    let run = |keys: &[u8]| {
+        let mut fs: Vec<(&str, &[u8])> = files.to_vec();
+        fs.push(("ide.key", keys));
+        let (mut cpu, end) = ide_cpu(&fs);
+        while cpu.pc != end {
+            cpu.tick().unwrap();
+        }
+        cpu
+    };
+    let cpu = run(&[0x80 | b'o']);
+    // the box: columns 14..65
+    let box_rows: Vec<String> = (2..8)
+        .map(|r| (14..66).map(|c| cpu.mem[0x6000 + r * 160 + c * 2] as char).collect::<String>().trim().to_string())
+        .collect();
+    assert_eq!(box_rows[0], "Open: ./");
+    assert_eq!(box_rows[1], "<type a name>");
+    assert_eq!(box_rows[2], "sub/");
+    assert!(box_rows[3].starts_with("a.lz80n") && box_rows[3].ends_with(" 9"), "{:?}", box_rows[3]);
+    assert!(box_rows[4].starts_with("zz.txt"), "{:?}", box_rows[4]);
+    assert_eq!(box_rows[5], "", "x.nex is left out");
+    assert_eq!(ide_attr(&cpu, 4, 20), 29, "sub/ selected");
+    // into sub/, down to b.lz80n (past ../ and deep/), open it
+    let cpu = run(&[0x80 | b'o', 13, 2, 2, 13]);
+    assert!(ide_row(&cpu, 0).contains("sub/b.lz80n"), "{}", ide_row(&cpu, 0));
+    assert_eq!(ide_row(&cpu, 1), "   1 print(\"b\")");
+    // a letter jumps: z
+    let cpu = run(&[0x80 | b'o', b'z', 13]);
+    assert!(ide_row(&cpu, 0).contains("zz.txt"), "{}", ide_row(&cpu, 0));
+}
+
+/// The language manual in the IDE: EXT H at a word opens it there; F finds
+/// a text, ENTER on a line of the contents opens the chapter.
+#[test]
+fn selfhost_ide_manual() {
+    let help = crate::help_text(include_str!("../../docs/manual-en.md"));
+    let run = |keys: &[u8]| {
+        let (mut cpu, end) = ide_cpu(&[("help.txt", help.as_bytes()), ("ide.key", keys)]);
+        while cpu.pc != end {
+            cpu.tick().unwrap();
+        }
+        cpu
+    };
+    // `upper` under the cursor, EXT H
+    let mut k = b"s = upper".to_vec();
+    k.push(0x80 | b'h');
+    let cpu = run(&k);
+    let rows: Vec<String> = (1..31).map(|r| ide_row(&cpu, r)).collect();
+    let cur = (1..31).find(|&r| ide_attr(&cpu, r, 0) == 36).expect("no cursor line");
+    assert!(rows[cur - 1].contains("upper("), "{}", rows[cur - 1]);
+    assert!(ide_row(&cpu, 31).contains("Manual"), "{}", ide_row(&cpu, 31));
+    // Help -> Language manual, find the contents line "9. Strings", ENTER
+    let mut k = vec![7u8, 4, 4, 4, 2, 13, b'f'];
+    k.extend(b"9. Strings\r");
+    k.push(13);
+    let cpu = run(&k);
+    assert!(ide_row(&cpu, 1).starts_with(" ## 9. Strings"), "{}", ide_row(&cpu, 1));
+    // right: the next chapter; BREAK: back to the text
+    let mut k2 = k.clone();
+    k2.extend([4u8]);
+    let cpu = run(&k2);
+    assert!(ide_row(&cpu, 1).starts_with(" ## 10."), "{}", ide_row(&cpu, 1));
+    k2.push(10);
+    let cpu = run(&k2);
+    assert_eq!(ide_row(&cpu, 1), "   1");
+}

@@ -647,3 +647,30 @@ $FDFC..       stack (grows down)
   (`Options::file_dirs`). The standard library detection scans the text of
   all files.
 
+
+## Files (standard module)
+
+The file module (pulled in by a name starting with `file_` or `FILE_`) calls
+the esxDOS API (`RST $08`) of NextZXOS with the ROM in MMU slots 0-1 and
+bank 5 (the system variables) in slot 2, through the resident `rt_esx`
+(banked code has its page in slot 2).
+
+* `file_open(name, mode) -> byte` (`FILE_READ`, `FILE_WRITE`, `FILE_APPEND`;
+  `FILE_ERROR`), `file_close(h)`, `file_read(h, address, count) -> word`,
+  `file_write(h, address, count) -> word`, `file_getc(h) -> word`
+  (`FILE_EOF`), `file_seek(h, pos)`, `file_pos(h) -> long`,
+  `file_size(h) -> long`, `file_exists(name) -> bool`,
+  `file_delete(name) -> bool`, `file_status` (the last esxDOS error).
+* `file_opendir(path) -> byte` (F_OPENDIR, long names) and
+  `file_readdir(h, address) -> bool` (F_READDIR into a 280-byte buffer:
+  attributes, the name and 0, time, date, size; false at the end).
+* `file_exec(command) -> bool`: M_EXECCMD, a dot command (`"nexload x.nex"`);
+  it runs in IM 1 with the ROM's interrupt routine.
+
+## The self-hosted compiler and the IDE
+
+`selfhost/` holds the compiler written in LZ80N (lexer, assets, codegen,
+assembler stages and the IDE); `lz80nc --export-selfhost DIR` builds them
+with the runtime and module texts, `help.txt` / `help-hu.txt` (the manuals
+in ASCII) and `version.txt`. The stages chain with `file_exec("nexload ...")`;
+`selfhost/README.md` describes them and the IDE.

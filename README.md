@@ -7,7 +7,7 @@
 <p align="center"><em>The simplicity of Lua. The power of Z80N.</em></p>
 
 <p align="center">
-  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.3.0" src="https://img.shields.io/badge/version-1.3.0-brightgreen"></a>
+  <a href="https://github.com/zstarczali/LZ80N"><img alt="version: 1.4.0" src="https://img.shields.io/badge/version-1.4.0-brightgreen"></a>
   <a href="https://github.com/zstarczali/LZ80N/actions/workflows/ci.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/zstarczali/LZ80N/ci.yml?label=build"></a>
   <a href="https://github.com/zstarczali/LZ80N/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/zstarczali/LZ80N?color=blue"></a>
 </p>
@@ -16,7 +16,8 @@
   <a href="compiler/"><img alt="compiler: Rust" src="https://img.shields.io/badge/compiler-Rust-b7410e?logo=rust&logoColor=white"></a>
   <a href="docs/manual-en.md#22-how-a-program-runs"><img alt="target: Z80N / ZX Spectrum Next" src="https://img.shields.io/badge/target-Z80N%20%2F%20ZX%20Spectrum%20Next-6f42c1"></a>
   <a href="docs/spec.md#toolchain"><img alt="output: .nex" src="https://img.shields.io/badge/output-.nex-6f42c1"></a>
-  <a href="https://github.com/z00m128/sjasmplus"><img alt="assembler: SjASMPlus 1.24" src="https://img.shields.io/badge/assembler-SjASMPlus%201.24-555"></a>
+  <a href="docs/spec.md#toolchain"><img alt="assembler: built-in Z80N" src="https://img.shields.io/badge/assembler-built--in%20Z80N-555"></a>
+  <a href="selfhost/README.md"><img alt="runs on: the Next too" src="https://img.shields.io/badge/runs%20on-the%20Next%20too-6f42c1"></a>
 </p>
 
 <p align="center">
@@ -37,13 +38,15 @@
 A statically typed, Lua-inspired language that compiles to native Z80N
 machine code for the ZX Spectrum Next. No VM, no garbage collector.
 
-Status: **1.3.0** — a complete command-line compiler: typed variables,
+Status: **1.4.0** — a complete command-line compiler, and the same compiler
+with an IDE on the ZX Spectrum Next itself ([selfhost](selfhost/README.md)): typed variables,
 multi-dimensional arrays with initialisers, strings, `fixed` point math,
 structs and classes, hardware sprites, Layer 2 graphics (lines, circles,
 ellipses, triangles, PNG pictures), palettes, AY sound and music, ProTracker 3 modules,
 DAC samples, zxnDMA,
 copper and raster interrupts, tilemap text, inline `asm`, data and code
 banking for programs beyond the 31 KB program area, a peephole optimizer,
+files on the SD card, a built-in Z80N assembler,
 and a test suite that runs the compiled `.nex` files in a built-in Z80N
 emulator. See the [changelog](CHANGELOG.md).
 
@@ -55,7 +58,8 @@ docs/spec.md     what 1.0 implements and the decisions behind it
 examples/        sample .lz80n programs
 benchmarks/      the same tasks in LZ80N and NextBASIC
 editors/vscode   VS Code extension: highlighting, errors on save, build + run in CSpect
-tools/sjasmplus  SjASMPlus 1.24.0 (not in the repository, see below)
+selfhost/        the compiler written in LZ80N and the LZ80N IDE, for the Next itself
+tools/sjasmplus  SjASMPlus 1.24.0 (optional, not in the repository, see below)
 ```
 
 ## Documentation
@@ -68,9 +72,9 @@ tools/sjasmplus  SjASMPlus 1.24.0 (not in the repository, see below)
 
 ## Build and run
 
-The compiler needs [SjASMPlus 1.24.0](https://github.com/z00m128/sjasmplus/releases/tag/v1.24.0)
-(BSD licence). Put the Windows release into `tools/sjasmplus/sjasmplus-1.24.0.win/`
-or pass `--sjasmplus PATH`.
+The compiler assembles with its built-in Z80N assembler. [SjASMPlus 1.24.0](https://github.com/z00m128/sjasmplus/releases/tag/v1.24.0)
+(BSD licence) is optional (`--sjasmplus PATH`, or `auto`: the Windows release in
+`tools/sjasmplus/sjasmplus-1.24.0.win/`); the test suite compares the two.
 
 ```powershell
 cd compiler

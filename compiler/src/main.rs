@@ -218,6 +218,10 @@ pub fn export_selfhost(dir: &Path) -> Result<Vec<Built>, String> {
         write(name, src.as_bytes())?;
     }
     write("chain.on", b"1")?;
+    // the language manuals for the IDE's help (plain ASCII: the font has no
+    // accented letters)
+    write("help.txt", help_text(include_str!("../../docs/manual-en.md")).as_bytes())?;
+    write("help-hu.txt", help_text(include_str!("../../docs/manual-hu.md")).as_bytes())?;
     // the IDE shows it (Help -> About, the splash screen)
     write("version.txt", format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())?;
     let mut built = vec![];
@@ -249,6 +253,56 @@ on the screen, and in codegen.err / asm.err. Delete chain.on to run the\r\n\
 stages one by one. Supported language: see selfhost/README.md.\r\n",
     )?;
     Ok(built)
+}
+
+/// A manual (Markdown) as the IDE's help text: links keep their text only
+/// (`[Strings](#9-strings)` -> `Strings`), and the letters outside ASCII
+/// become their nearest ASCII ones (the Next font has 32..127 only).
+pub fn help_text(md: &str) -> String {
+    let mut out = String::new();
+    let mut rest = md;
+    while let Some(i) = rest.find("](") {
+        let (head, tail) = rest.split_at(i);
+        match (head.rfind('['), tail.find(')')) {
+            (Some(open), Some(close)) => {
+                out.push_str(&head[..open]);
+                out.push_str(&head[open + 1..]);
+                rest = &tail[close + 1..];
+            }
+            _ => {
+                out.push_str(head);
+                out.push_str("](");
+                rest = &tail[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' => "a".to_string(),
+            'é' => "e".into(),
+            'í' => "i".into(),
+            'ó' | 'ö' | 'ő' => "o".into(),
+            'ú' | 'ü' | 'ű' => "u".into(),
+            'Á' => "A".into(),
+            'É' => "E".into(),
+            'Í' => "I".into(),
+            'Ó' | 'Ö' | 'Ő' => "O".into(),
+            'Ú' | 'Ü' | 'Ű' => "U".into(),
+            '–' | '—' => "-".into(),
+            '„' | '”' | '“' => "\"".into(),
+            '’' | '‘' => "'".into(),
+            '…' => "...".into(),
+            '→' => "->".into(),
+            '↔' => "<->".into(),
+            '×' => "x".into(),
+            '±' => "+/-".into(),
+            '°' => " deg".into(),
+            '\r' => String::new(),
+            c if c.is_ascii() => c.to_string(),
+            _ => "?".into(),
+        })
+        .collect()
 }
 
 /// `--sjasmplus auto`: $SJASMPLUS, next to lz80nc, tools/sjasmplus, the PATH.

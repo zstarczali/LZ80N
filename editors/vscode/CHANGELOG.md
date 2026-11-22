@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0
+
+* Follows LZ80N 1.4.0 (the compiler and the LZ80N IDE on the Next, the
+  built-in assembler, the file module).
+* The file module in completion, hover help and highlighting: `file_open`,
+  `file_close`, `file_read`, `file_write`, `file_getc`, `file_seek`,
+  `file_pos`, `file_size`, `file_exists`, `file_delete`, `file_opendir`,
+  `file_readdir`, `file_exec` and the `FILE_` constants.
+
 ## 1.3.0
 
 * Follows LZ80N 1.3.0 (sprite collision detection, faster lines and

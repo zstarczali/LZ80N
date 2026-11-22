@@ -128,6 +128,9 @@ pub struct EsxFs {
     pub with_interrupts: bool,
     /// dot commands run with M_EXECCMD ($8F), in order
     pub exec: Vec<String>,
+    /// open directories (handle $80 + index): their entries (name,
+    /// attributes, size) and the next one
+    dirs: Vec<Option<(Vec<(String, u8, u32)>, usize)>>,
 }
 
 /// esxDOS error codes used by the virtual SD card
@@ -714,9 +717,85 @@ impl Cpu {
                     };
                     self.a = i as u8 + 1;
                 }
+                0x9B if self.a >= 0x80 => {
+                    let i = (self.a - 0x80) as usize;
+                    match fs.dirs.get_mut(i) {
+                        Some(d @ Some(_)) => *d = None,
+                        _ => return Err(ESX_EBADF),
+                    }
+                }
                 0x9B => {
                     let i = handle(&fs, self.a)?;
                     fs.handles[i] = None;
+                }
+                0xA3 => {
+                    // F_OPENDIR: IX = path; A = handle. The entries: the files
+                    // and the folders (from the files' paths) in it, sorted;
+                    // `.` and `..` in a folder, as on FAT
+                    let path = name_at(self, self.ix);
+                    let path = path.trim_end_matches('/');
+                    let path = if path == "." { "" } else { path };
+                    let prefix = if path.is_empty() { String::new() } else { format!("{path}/") };
+                    let mut entries: std::collections::BTreeMap<String, (u8, u32)> = Default::default();
+                    let mut found = path.is_empty();
+                    for (name, data) in &fs.files {
+                        let Some(rest) = name.strip_prefix(&prefix) else { continue };
+                        found = true;
+                        match rest.split_once('/') {
+                            Some((dir, _)) => {
+                                entries.insert(dir.to_string(), (0x10, 0));
+                            }
+                            None => {
+                                entries.insert(rest.to_string(), (0x20, data.len() as u32));
+                            }
+                        }
+                    }
+                    if !found {
+                        return Err(ESX_ENOENT);
+                    }
+                    let mut list: Vec<(String, u8, u32)> = vec![];
+                    if !path.is_empty() {
+                        list.push((".".into(), 0x10, 0));
+                        list.push(("..".into(), 0x10, 0));
+                    }
+                    list.extend(entries.into_iter().map(|(n, (a, s))| (n, a, s)));
+                    let i = match fs.dirs.iter().position(|d| d.is_none()) {
+                        Some(i) => i,
+                        None => {
+                            fs.dirs.push(None);
+                            fs.dirs.len() - 1
+                        }
+                    };
+                    fs.dirs[i] = Some((list, 0));
+                    self.a = 0x80 + i as u8;
+                }
+                0xA4 => {
+                    // F_READDIR: A = handle, IX = buffer; A = 1 (an entry) or 0
+                    let i = self.a.wrapping_sub(0x80) as usize;
+                    let Some(Some((list, next))) = fs.dirs.get_mut(i) else { return Err(ESX_EBADF) };
+                    if *next >= list.len() {
+                        self.a = 0;
+                    } else {
+                        let (name, attr, size) = list[*next].clone();
+                        *next += 1;
+                        let mut a = self.ix;
+                        let mut put = |cpu: &mut Cpu, v: u8| {
+                            cpu.wr(a, v);
+                            a = a.wrapping_add(1);
+                        };
+                        put(self, attr);
+                        for b in name.bytes() {
+                            put(self, b);
+                        }
+                        put(self, 0);
+                        for _ in 0..4 {
+                            put(self, 0);
+                        }
+                        for b in size.to_le_bytes() {
+                            put(self, b);
+                        }
+                        self.a = 1;
+                    }
                 }
                 0x9D | 0x9E => {
                     // F_READ / F_WRITE: A = handle, IX = buffer, BC = count; BC = done
