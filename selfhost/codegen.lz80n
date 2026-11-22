@@ -1203,7 +1203,7 @@ function nat(word e) -> byte
         end
         if text_is(name, "len") or text_is(name, "asc") then return TY_BYTE end
         if text_is(name, "addr") or text_is(name, "image_width") or text_is(name, "image_height") then return TY_WORD end
-        if text_is(name, "sample_playing") then return TY_BOOL end
+        if text_is(name, "sample_playing") or text_is(name, "music_playing") then return TY_BOOL end
         if text_is(name, "note_period") then return TY_WORD end
         word s = lookup(name)
         if s ~= 0 and sk[s] == SK_FUNC then return sty[s] end
@@ -2694,6 +2694,14 @@ function builtin_expr(word e, byte w) -> bool
         if w == 4 then extend32(false) end
         return true
     end
+    if text_is(name, "music_playing") then
+        if not want_args(e, 0) then return true end
+        uses_music = true
+        oi("ld a,(rt_mus_on)")
+        extend_a(TY_BYTE)
+        if w == 4 then extend32(false) end
+        return true
+    end
     if text_is(name, "sample_playing") then
         if not want_args(e, 0) then return true end
         uses_samples = true
@@ -2898,6 +2906,38 @@ function builtin_stmt(word e) -> bool
         oi("pop hl")
         oi("ld e,l")
         oi("call rt_ay_write")
+        return true
+    end
+    if text_is(name, "music_play") or text_is(name, "music_once") then
+        -- a music asset and an optional AY chip (0-2)
+        byte na = count(a)
+        if na < 1 or na > 2 then
+            if fail_node(e) then msg("expects a music asset and an optional AY chip (0-2)") end
+            return true
+        end
+        byte ma = asset_arg(a, AK_MUS)
+        if ma == 255 then
+            if fail_node(a) then msg("expected the name of a music asset (`asset name = \"file.pt3\"`)") end
+            return true
+        end
+        uses_music = true
+        if nx[a] ~= 0 then
+            gen(nx[a], 1, false)
+            oi("ld d,l")
+        else
+            oi("ld d,0")
+        end
+        os("    ld hl,")
+        o_asset(ma)
+        onl()
+        if text_is(name, "music_play") then oi("ld a,1") else oi("xor a") end
+        oi("call rt_mus_play")
+        return true
+    end
+    if text_is(name, "music_stop") then
+        if not want_args(e, 0) then return true end
+        uses_music = true
+        oi("call rt_mus_stop")
         return true
     end
     if text_is(name, "sample_stop") then
@@ -3582,12 +3622,15 @@ const AK_PAT = 1            -- a PNG sheet of 16x16 patterns (converted: a_NAME.
 const AK_RAW = 2            -- the file as it is (.spr: patterns)
 const AK_IMG = 3            -- a picture for Layer 2, in 8K pages
 const AK_WAV = 4            -- a sample, in 8K pages
+const AK_MUS = 5            -- a .pt3 module rendered to AY registers, in 8K pages
+                            -- (as_w / as_h: the loop offset, low / high word)
 const MAXASSET = 64
 byte nassets = 0
 word far_arr_pages = 0      -- pages of far arrays (cleared at startup)
 bool uses_samples = false
 bool uses_notes = false
 bool uses_trig = false
+bool uses_music = false
 string apath = ""
 
 function asset_err(word it, string m)
@@ -3669,7 +3712,35 @@ function declare_asset(word it)
     tabw[W_AS_LENL + a] = 0
     tabw[W_AS_LENH + a] = 0
     if nf[it] == 0 and ext_is("pt3") then
-        unsupported(it, "music assets (.pt3)")
+        -- rendered by assets.nex: its length and loop offset in a_NAME.inf
+        tabb[B_AS_KIND + a] = AK_MUS
+        if not ai_open(apath) then
+            asset_err(it, ai_err)
+            return
+        end
+        ai_close()
+        apath = "a_"
+        word ni = 0
+        while ni < tlen_(name) do
+            apath = apath .. chr(tpool[toff_(name) + ni])
+            ni += 1
+        end
+        apath = apath .. ".inf"
+        if not ai_open(apath) then
+            asset_err(it, "not converted (assets.nex did not run?)")
+            return
+        end
+        long mlen_ = ai_rd32()
+        long mloop = ai_rd32()
+        ai_close()
+        tabw[W_AS_LENL + a] = word(mlen_)
+        tabw[W_AS_LENH + a] = word(mlen_ >> 16)
+        tabw[W_AS_W + a] = word(mloop)
+        tabw[W_AS_H + a] = word(mloop >> 16)
+        if not asset_pages(it, a, word((mlen_ + 8191) / 8192)) then return end
+        word ms = new_sym(SK_ASSET, name, TY_NONE)
+        sid[ms] = a
+        nassets += 1
         return
     end
     if not ai_open(apath) then
@@ -3798,6 +3869,15 @@ function asset_data()
             os("\n    incbin \"")
             o_asset(a)
             os(".msk\"\n")
+        elseif k == AK_MUS then
+            long lp = long(tabw[W_AS_H + a]) << 16 | long(tabw[W_AS_W + a])
+            os("    db ")
+            odec(tabb[B_AS_PAGE + a])
+            os("\n    dw ")
+            odec(word(8192 + lp % 8192))
+            os("\n    db ")
+            odec(word(tabb[B_AS_PAGE + a]) + word(lp / 8192))
+            onl()
         else
             os("    db ")
             odec(tabb[B_AS_PAGE + a])
@@ -3888,7 +3968,7 @@ function asset_pages_out()
     byte a = 0
     while a < nassets do
         byte k = tabb[B_AS_KIND + a]
-        if k == AK_IMG or k == AK_WAV then
+        if k == AK_IMG or k == AK_WAV or k == AK_MUS then
             long total = long(tabw[W_AS_LENH + a]) << 16 | long(tabw[W_AS_LENL + a])
             long per = 8192
             if k == AK_IMG then
@@ -3900,7 +3980,13 @@ function asset_pages_out()
                 long off = long(i) * per
                 long n = total - off
                 if n > per then n = per end
-                if k == AK_IMG then os("; picture ") else os("; sample ") end
+                if k == AK_IMG then
+                    os("; picture ")
+                elseif k == AK_MUS then
+                    os("; music ")
+                else
+                    os("; sample ")
+                end
                 otok(tabw[W_AS_NAME + a])
                 os("\n    MMU 1 e, ")
                 odec(tabb[B_AS_PAGE + a] + i)
@@ -3918,44 +4004,6 @@ function asset_pages_out()
     end
 end
 
--- assets.lst for the asset stage: true if there is something to convert
-function asset_list() -> bool
-    bool any = false
-    byte a = 0
-    while a < nassets do
-        if tabb[B_AS_KIND + a] ~= AK_RAW then any = true end
-        a += 1
-    end
-    if not any then
-        if file_exists("assets.lst") then file_delete("assets.lst") end
-        return false
-    end
-    byte h = file_open("assets.lst", FILE_WRITE)
-    if h == FILE_ERROR then return false end
-    to_file(h)
-    a = 0
-    while a < nassets do
-        byte k = tabb[B_AS_KIND + a]
-        if k ~= AK_RAW then
-            if k == AK_PAT then
-                ob('p')
-            elseif k == AK_IMG then
-                ob('i')
-            else
-                ob('w')
-            end
-            ob(' ')
-            otok(tabw[W_AS_NAME + a])
-            ob(' ')
-            otok(tabw[W_AS_PATH + a])
-            onl()
-        end
-        a += 1
-    end
-    to_file(0)
-    file_close(h)
-    return true
-end
 
 -- the body of function f (an `interrupt` keeps it in n2)
 function fn_body(word f) -> word
@@ -4050,7 +4098,64 @@ function isr_tick(word drv, word frame_h)
     os("    ld hl,(rt_frames)\n    inc hl\n    ld (rt_frames),hl\n")
     if drv ~= 0 then o_ins_lab("call ", drv, "") end
     if uses_samples then oi("call rt_smp_tick") end
+    if uses_music then oi("call rt_mus_tick") end
     if frame_h ~= 0 then o_ins_lab("call ", frame_h, "") end
+end
+
+function check_irq_sharing()
+    word r = 1
+    bool any = false
+    while r <= nsy do
+        if sk[r] == SK_FUNC and (sdim[r] ~= 0 or (sstruct[r] == 0 and sname[r] ~= 0 and text_isx(sname[r], "s|ound_tick"))) then any = true end
+        r += 1
+    end
+    if not any then return end
+    -- the calls of the main program: the edges of symbol 0
+    word it = prog_first
+    while it ~= 0 do
+        byte k = nk[it]
+        if k ~= I_FUNC and k ~= I_STRUCT and k ~= I_INTERRUPT and k ~= S_ASSET then collect_calls(0, it) end
+        it = nx[it]
+    end
+    r = 1
+    while r <= nsy and not failed do
+        if sk[r] == SK_FUNC and (sdim[r] ~= 0 or (sstruct[r] == 0 and sname[r] ~= 0 and text_isx(sname[r], "s|ound_tick"))) then
+            word f = 1
+            while f <= nsy do
+                if sk[f] == SK_FUNC and sdim[f] == 0 and (f == r or reaches(r, f)) and reaches(0, f) then
+                    if fail_at(0, 0) then
+                        msg("function `")
+                        o_name_msg(f)
+                        msg("` is called both from the main program and from `")
+                        o_name_msg(r)
+                        msg("`; functions use static frames, so an interrupt would corrupt it (use separate functions)")
+                    end
+                    return
+                end
+                f += 1
+            end
+        end
+        r += 1
+    end
+end
+
+-- the name of function f in a message
+function o_name_msg(word f)
+    if sdim[f] == 1 then
+        msg("interrupt frame")
+        return
+    end
+    if sdim[f] == 2 then
+        msg("interrupt raster(")
+        msg_dec(0, slen[f])
+        msg(")")
+        return
+    end
+    if sstruct[f] ~= 0 then
+        msg_text(tabw[W_ST_NAME + sstruct[f] - 1])
+        msg(".")
+    end
+    msg_text(sname[f])
 end
 
 -- ---- call graph (for recursion)
@@ -4910,6 +5015,9 @@ function declare_all()
         end
         f += 1
     end
+    -- functions have static frames: one called both from the main program
+    -- and from an interrupt handler (or the sound driver) would be corrupted
+    check_irq_sharing()
     pass_declare = false
 end
 
@@ -4946,7 +5054,7 @@ function global_data() -> word
     k = 0
     while k < nassets do
         total += tabw[W_AS_LENL + k] + 6
-        if tabb[B_AS_KIND + k] == AK_WAV then total -= tabw[W_AS_LENL + k] end
+        if tabb[B_AS_KIND + k] == AK_WAV or tabb[B_AS_KIND + k] == AK_MUS then total -= tabw[W_AS_LENL + k] end
         k += 1
     end
     return total
@@ -5262,6 +5370,7 @@ function generate()
     while ka < nassets do
         if tabb[B_AS_KIND + ka] == AK_IMG then img_ = true end
         if tabb[B_AS_KIND + ka] == AK_WAV then wav_ = true end
+        if tabb[B_AS_KIND + ka] == AK_MUS then resident_used += 400 end
         ka += 1
     end
     if img_ then resident_used += 500 end
@@ -5364,6 +5473,7 @@ function generate()
     if any_img then ocopy("rt_images.asm") end
     if uses_samples then ocopy("rt_samples.asm") end
     if uses_notes then ocopy("rt_notes.asm") end
+    if uses_music then ocopy("rt_music.asm") end
     if uses_trig then ocopy("rt_trig.asm") end
     -- the background driver of the sound module
     word drv = 0
@@ -5573,14 +5683,9 @@ if load_tokens() then
         print("")
     else
         print("codegen:", nsy, "symbols, out.asm written")
-        -- the next stage (lexer -> codegen -> [assets ->] asm)
-        bool conv = asset_list()
+        -- the next stage (lexer -> [assets ->] codegen -> asm)
         if file_exists("chain.on") then
-            if conv then
-                if not file_exec("nexload assets.nex") then print("cannot start assets.nex, error", file_status) end
-            elseif not file_exec("nexload asm.nex") then
-                print("cannot start asm.nex, error", file_status)
-            end
+            if not file_exec("nexload asm.nex") then print("cannot start asm.nex, error", file_status) end
         end
     end
 end

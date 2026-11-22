@@ -4284,16 +4284,16 @@ impl SelfHost {
         for (n, d) in selfhost_runtime_files() {
             files.insert(n, d);
         }
-        let files = run_stage(&self.lex.0, &self.lex.1, files);
-        let mut files = run_stage(&self.cg.0, &self.cg.1, files);
-        if let Some(e) = files.get("codegen.err") {
-            return Err(String::from_utf8_lossy(e).trim_end().to_string());
-        }
-        if files.contains_key("assets.lst") {
+        let mut files = run_stage(&self.lex.0, &self.lex.1, files);
+        if files.contains_key("assets.on") {
             files = run_stage(&self.assets.0, &self.assets.1, files);
             if let Some(e) = files.get("assets.err") {
                 return Err(String::from_utf8_lossy(e).trim_end().to_string());
             }
+        }
+        let files = run_stage(&self.cg.0, &self.cg.1, files);
+        if let Some(e) = files.get("codegen.err") {
+            return Err(String::from_utf8_lossy(e).trim_end().to_string());
         }
         let asm = String::from_utf8_lossy(files.get("out.asm").expect("no out.asm")).to_string();
         Ok((asm, files))
@@ -4775,7 +4775,7 @@ fn selfhost_export_and_chain() {
         fs.files.insert(format!("assets/{f}"), std::fs::read(ex.join(f)).unwrap());
     }
     let (stages, fs) = chain(fs);
-    assert_eq!(stages, ["lexer.nex", "codegen.nex", "assets.nex", "asm.nex"]);
+    assert_eq!(stages, ["lexer.nex", "assets.nex", "codegen.nex", "asm.nex"]);
     let (want, rcpu) = run_with("sh_chain_assets", prog, |_| {}).unwrap();
     let mut cpu = load_nex(&fs.files["out.nex"]).unwrap();
     cpu.esx = Some(crate::emu::EsxFs::default());
@@ -5253,7 +5253,22 @@ fn selfhost_assets_match_rust() {
         want.push((format!("a_t{n}.bin"), smp.bytes));
         files.insert(name.clone(), data.clone());
     }
-    files.insert("assets.lst".into(), list.clone().into_bytes());
+    // the declarations in a program: lexed, then the asset stage
+    let mut prog = String::new();
+    for line in list.lines() {
+        let mut it = line.splitn(3, ' ');
+        let (k, n, p) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+        if k == "i" {
+            prog.push_str(&format!("asset {n} = image(\"{p}\")\n"));
+        } else {
+            prog.push_str(&format!("asset {n} = \"{p}\"\n"));
+        }
+    }
+    files.insert("in.lz80n".into(), prog.into_bytes());
+    let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
+    let lex = build("sh_lex_assets", &lexer_src).unwrap();
+    let files = run_stage(&lex.0, &lex.1, files);
+    assert!(files.contains_key("assets.on"), "the lexer should mark the assets");
     let out = run_stage(&stage.0, &stage.1, files);
     if let Some(e) = out.get("assets.err") {
         panic!("asset stage: {}\n{list}", String::from_utf8_lossy(e));
@@ -5584,4 +5599,61 @@ fn selfhost_codegen_large_main() {
     let asm = sh.compile(&src).unwrap_or_else(|e| panic!("self-hosted compiler: {e}"));
     assert!(asm.contains("__mc_0_bank:"), "the main program should be in code pages");
     assert_eq!(run_asm(&asm), want);
+}
+
+/// Music: the asset stage renders a .pt3 module into the same AY register
+/// stream as compiler/src/pt3.rs, and a program playing it compiled by the
+/// self-hosted compiler leaves the AY chips as with lz80nc.
+#[test]
+fn selfhost_codegen_music() {
+    let sh = SelfHost::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let tune = std::fs::read(root.join("examples/assets/tune.pt3")).unwrap();
+    let (want_bytes, want_loop) = crate::pt3::encode(&crate::pt3::render(&tune).unwrap());
+    let programs: &[&str] = &[
+        "asset tune = \"assets/tune.pt3\"\nmusic_play(tune, 1)\nfor i = 1, 150 do vsync() end\nprint(music_playing())\nmusic_stop()\nprint(music_playing())\n",
+        "asset tune = \"assets/tune.pt3\"\ncpu_speed(0)\nmusic_once(tune)\nword t = frames()\nwhile music_playing() do vsync() end\nprint(frames() - t)\n",
+    ];
+    let dir = std::env::temp_dir().join("lz80n_sh_music");
+    for (i, src) in programs.iter().enumerate() {
+        let (want, rcpu) = run_with(&format!("sh_mus_{i}"), src, |_| {}).unwrap();
+        let (asm, files) = sh
+            .compile_sd(&[("in.lz80n", src.as_bytes()), ("assets/tune.pt3", &tune)])
+            .unwrap_or_else(|e| panic!("program {i}: self-hosted compiler: {e}"));
+        let got_bytes = &files["a_tune.bin"];
+        if let Some(k) = (0..want_bytes.len().max(got_bytes.len())).find(|&k| want_bytes.get(k) != got_bytes.get(k)) {
+            panic!("the rendered stream differs at {k}: pt3.rs {:?}, assets.lz80n {:?}", want_bytes.get(k), got_bytes.get(k));
+        }
+        let inf = &files["a_tune.inf"];
+        assert_eq!(u32::from_le_bytes(inf[4..8].try_into().unwrap()) as usize, want_loop, "loop offset");
+        let _ = std::fs::remove_dir_all(&dir);
+        for (n, d) in &files {
+            let p = dir.join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, d).unwrap();
+        }
+        let out = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("program {i}: assembler: {}", e[0]));
+        let syms = out.symbols16();
+        let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+        cpu.esx = Some(crate::emu::EsxFs::default());
+        let (putc, newline, end) = (syms["rt_putc"], syms["rt_newline"], syms["__main_end"]);
+        let pchr = syms.get("rt_pp_chr").copied().unwrap_or(0xFFFF);
+        let (isr, mut prev) = (syms["__isr"], 0u16);
+        let mut got = String::new();
+        let mut n = 0u64;
+        while cpu.pc != end {
+            let from_isr = prev >= isr && prev < isr + 512;
+            if !from_isr && (cpu.pc == putc || cpu.pc == pchr) && cpu.a != 10 {
+                got.push(cpu.a as char);
+            } else if !from_isr && cpu.pc == newline {
+                got.push('\n');
+            }
+            prev = cpu.pc;
+            cpu.tick().unwrap();
+            n += 1;
+            assert!(n < 2_000_000_000, "program {i} did not finish");
+        }
+        assert_eq!(got, want, "program {i}: output");
+        assert_eq!(rcpu.ay, cpu.ay, "program {i}: AY registers");
+    }
 }
