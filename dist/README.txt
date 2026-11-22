@@ -36,6 +36,10 @@ CONTENTS
                              as Markdown text
   examples/                  24 example programs, their pictures and
                              the include files of modules.lz80n (lib/)
+  next/lz80n/                the compiler and editor that run on the Next
+                             itself: copy the folder to the SD card, then
+                             .cd /lz80n and .nexload editor.nex (2 MB Next);
+                             see next/lz80n/README.txt
   README.txt                 this file
   CHANGELOG.md               what is new in each version
   LICENSE                    LZ80N licence (MIT)
@@ -50,6 +54,8 @@ The packages:
   lz80n-@VERSION@-linux-x64.tar.gz     Linux, Intel/AMD 64-bit (glibc 2.35+)
   lz80n-@VERSION@-linux-arm64.tar.gz   Linux on ARM64 (Raspberry Pi 4/5 with a
                                        64-bit OS, ARM servers; glibc 2.35+)
+  lz80n-@VERSION@-zxnext-sdcard.zip    only the Next's own compiler and
+                                       editor (the next/ folder above)
 
 
 2. INSTALLATION

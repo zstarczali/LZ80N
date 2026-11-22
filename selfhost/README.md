@@ -13,6 +13,7 @@ compiler stays the stage-0 compiler that builds it.
 | 4b. Code generation (`codegen.lz80n`) | the subset the compiler itself is written in, structs and classes, assets |
 | 4c. Assets (`assets.lz80n`) | done: PNG and WAV converted like `compiler/src/assets.rs` |
 | 5. The compiler compiles itself | done: `selfhost_bootstrap` reaches a fixed point |
+| 6. The editor (`editor.lz80n`) | a full-screen editor with menus, the mouse, highlighting, Build -> Compile |
 
 ## lexer.lz80n
 
@@ -149,6 +150,37 @@ Not yet: diagnostics of type errors (programs are expected to be correct:
 check them with lz80nc first) and a few rare forms (a single statement of
 the main program larger than an 8K page).
 
+## editor.lz80n
+
+`editor.nex`, the IDE on the Next: the 80x32 tilemap text mode (the font
+moved to $7400 above the larger map), a menu bar (File, Edit, Build, Help),
+line numbers, a status line (line, column, CAPS, EXTEND, messages) and
+syntax highlighting (keywords, types, calls, numbers, strings, comments,
+`asm` blocks, which may span lines). The text is up to 2040 lines of up to
+255 characters, in 256-byte line slots in `far` arrays; the line being
+edited is in a resident buffer.
+
+* Keys: CAPS+5..8 cursor, CAPS+3 / 4 page up / down, CAPS+0 DELETE, CAPS+9
+  delete forward, CAPS+1 (EDIT) the menus, CAPS+SPACE cancel, CAPS+2 caps
+  lock; SYMBOL SHIFT gives the symbols (and `[ ] ^ ~ | \ { }` on Q W E A S D
+  F G, the backquote on X). EXTEND (CAPS+SYMBOL) then S save, O open, N new,
+  B compile, R compile and run, F find, G go to line, C / X / V copy, cut,
+  paste a line, K delete a line; cursor left / right / up / down: start /
+  end of the line, of the text. Keys repeat when held.
+* The Kempston mouse: a sprite pointer; a click moves the cursor or opens
+  and picks a menu item; the wheel scrolls.
+* Build -> Compile (EXT B) saves the file and `in.lz80n`, writes
+  `editor.on`, `chain.on` (and `run.on` for Compile & run) and the session
+  (`editor.ses`: the file and the cursor), then starts `lexer.nex`. The
+  stages start `editor.nex` again when `editor.on` exists: after an error
+  (`codegen.err`, `asm.err`, `assets.err`), or after `asm.nex` when
+  `run.on` does not exist. The editor reloads the file, shows the result
+  in the status line, and puts the cursor on the line and column of a
+  code generator error.
+* `editor.key`: when it exists its bytes are the keys (`$80` + a letter =
+  EXTEND + that letter) and the editor ends at its end; the tests drive the
+  editor this way.
+
 ## Tests
 
 * `selfhost_codegen_runs_like_rust`, `selfhost_codegen_strings_long_far_files`:
@@ -180,6 +212,11 @@ the main program larger than an 8K page).
   handlers (the raster state too), a main program in code pages;
 * `selfhost_export_and_chain`: the exported SD card, every stage started by
   the one before, with and without assets (lexer, codegen, assets, asm).
+* `selfhost_editor`: the exported editor types a program from an
+  `editor.key` script, saves it, compiles it through the chain and comes back
+  showing the result (the tilemap: text, line numbers, highlighting, status);
+  after an error with the cursor on the error's line.
+  `selfhost_editor_keyboard`: the keyboard matrix, with the shifts;
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
   self-hosted compiler compiles the lexer, the parser and the assembler; they
   give byte-identical results to their lz80nc-compiled versions;
@@ -205,7 +242,7 @@ lz80nc --export-selfhost DIR
 ```
 
 writes everything into DIR: `lexer.nex`, `codegen.nex`, `assets.nex`,
-`asm.nex` (built from
+`asm.nex`, `editor.nex` (built from
 these sources), the runtime and module files, the sources themselves, and
 `chain.on`. Copy DIR to the SD card (a 2 MB Next), then in NextBASIC:
 
@@ -214,6 +251,8 @@ these sources), the runtime and module files, the sources themselves, and
 COPY "myprog.lz80n" TO "in.lz80n"
 .nexload lexer.nex
 ```
+
+or `.nexload editor.nex`, and Build -> Compile from there.
 
 `lexer.nex` writes `tokens.bin` and starts `codegen.nex` (esxDOS
 `M_EXECCMD`, `nexload`), which writes `out.asm` and starts `asm.nex`, which
