@@ -243,7 +243,7 @@ pub fn export_selfhost(dir: &Path) -> Result<Vec<Built>, String> {
     write("chain.on", b"1")?;
     // the language manuals for the IDE's help (plain ASCII: the font has no
     // accented letters)
-    write("lib/help.txt", help_text(include_str!("../../docs/manual-en.md")).as_bytes())?;
+    write("lib/help.txt", help_text(&helptext::for_the_next(include_str!("../../docs/manual-en.md"))).as_bytes())?;
     // the IDE shows it (Help -> About, the splash screen)
     write("lib/version.txt", format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())?;
     let mut built = vec![];

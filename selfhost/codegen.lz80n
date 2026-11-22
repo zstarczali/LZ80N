@@ -320,8 +320,8 @@ const TY_SBYTE = 3
 const TY_WORD = 4
 const TY_SWORD = 5
 const TY_LONG = 6
-const TY_FIXED = 7          -- 8.8 fixed point (2 bytes)
-const TY_FIXED16 = 8        -- 16.16 fixed point (4 bytes)
+const TY_FIXED = 7          -- 8.8 fixed-pt (2 bytes)
+const TY_FIXED16 = 8        -- 16.16 fixed-pt (4 bytes)
 const TY_STR = 9
 const TY_STRUCT = 16        -- struct number k: TY_STRUCT + k
 const TY_BAD = 255
@@ -808,7 +808,7 @@ function const_eval(word e) -> bool
     return false
 end
 
--- ---------------------------------------------------------------- fixed point
+-- ---------------------------------------------------------------- fixed-pt
 -- `fixed` = 8.8 in HL, `fixed16` = 16.16 in DE:HL. Fixed literals and
 -- constants are raw 16.16 (rounded to 8.8 for `fixed`); integer constants
 -- adapt (x 256 / x 65536). The rules are those of compiler/src/codegen.rs.
@@ -1143,7 +1143,7 @@ function o_fx_widen()
     oi("ld l,0")
 end
 
--- a cast to or from a fixed point type: true if done
+-- a cast to or from a fixed-pt type: true if done
 function fx_cast(word a, byte c, byte w) -> bool
     byte from = nat(a)
     if c == TY_FIXED then
@@ -4176,13 +4176,9 @@ function check_irq_sharing()
         r += 1
     end
     if not any then return end
-    -- the calls of the main program: the edges of symbol 0
-    word it = prog_first
-    while it ~= 0 do
-        byte k = nk[it]
-        if k ~= I_FUNC and k ~= I_STRUCT and k ~= I_INTERRUPT and k ~= S_ASSET then collect_calls(0, it) end
-        it = nx[it]
-    end
+    -- the calls of the main program: the edges of symbol 0 (collect_calls
+    -- goes along the whole list; functions and structs in it are skipped)
+    collect_calls(0, prog_first)
     r = 1
     while r <= nsy and not failed do
         if sk[r] == SK_FUNC and (sdim[r] ~= 0 or (sstruct[r] == 0 and sname[r] ~= 0 and text_isx(sname[r], "s|ound_tick"))) then
@@ -4285,6 +4281,118 @@ function collect_calls(word f, word n)
             collect_calls(f, n4[n])
         end
         n = nx[n]
+    end
+end
+
+-- ---------------------------------------------------------------- live functions
+-- Only the functions the program can call are generated (a module has many
+-- the program does not use): the main program, the interrupt handlers, the
+-- sound driver and every function named in inline assembly (`f_name`) are
+-- the roots; the call graph gives the rest.
+
+far byte live_[8000]
+
+function is_idc(byte c) -> bool
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_'
+end
+
+-- the function named by tpool[a..b) (0: none)
+function func_by_text(word a, word b) -> word
+    word r = 1
+    while r <= nsy do
+        if sk[r] == SK_FUNC and sstruct[r] == 0 and sname[r] ~= 0 and tlen_(sname[r]) == b - a then
+            word o = toff_(sname[r])
+            word i = 0
+            while i < b - a and tpool[o + i] == tpool[a + i] do i += 1 end
+            if i == b - a then return r end
+        end
+        r += 1
+    end
+    return 0
+end
+
+-- the functions named `f_name` in the inline assembly of node list n
+-- become live roots
+function asm_roots(word n)
+    while n ~= 0 do
+        byte k = nk[n]
+        if k == S_ASM then
+            word o = toff_(n1[n])
+            word e = o + tlen_(n1[n])
+            word i = o
+            while i + 2 < e do
+                -- (`rt_note...` needs the note table, as a call of note_period does)
+                if tpool[i] == 'r' and i + 7 < e and tpool[i + 1] == 't' and tpool[i + 2] == '_' and tpool[i + 3] == 'n' and tpool[i + 4] == 'o' and tpool[i + 5] == 't' and tpool[i + 6] == 'e' then uses_notes = true end
+                if tpool[i] == 'f' and tpool[i + 1] == '_' and (i == o or not is_idc(tpool[i - 1])) then
+                    word a = i + 2
+                    word b = a
+                    while b < e and is_idc(tpool[b]) do b += 1 end
+                    word fn = func_by_text(a, b)
+                    if fn ~= 0 then live_[fn] = 1 end
+                    i = b
+                else
+                    i += 1
+                end
+            end
+        elseif k == S_IF or k == S_WHILE or k == S_ARM then
+            asm_roots(n2[n])
+            if k == S_IF then asm_roots(n1[n]) end
+        elseif k == S_FOR then
+            asm_roots(n4[n])
+        end
+        n = nx[n]
+    end
+end
+
+function mark_live()
+    if nedge >= MAXEDGE - 1 then
+        -- (the call graph is incomplete: every function)
+        word q = 1
+        while q <= nsy do
+            live_[q] = 1
+            q += 1
+        end
+        return
+    end
+    -- the main program's calls (symbol 0): collect_calls and asm_roots go
+    -- along the whole list (functions and structs in it are skipped)
+    collect_calls(0, prog_first)
+    asm_roots(prog_first)
+    word r = 1
+    while r <= nsy do
+        if sk[r] == SK_FUNC then
+            asm_roots(fn_body(r))
+            if sdim[r] ~= 0 or (sstruct[r] == 0 and sname[r] ~= 0 and text_isx(sname[r], "s|ound_tick")) then live_[r] = 1 end
+        end
+        r += 1
+    end
+    -- from the roots along the calls
+    word sp_ = 0
+    stack_[sp_] = 0
+    sp_ += 1
+    r = 1
+    while r <= nsy do
+        if live_[r] ~= 0 and sp_ < 2999 then
+            stack_[sp_] = r
+            sp_ += 1
+        end
+        r += 1
+    end
+    while sp_ > 0 do
+        sp_ -= 1
+        word f = stack_[sp_]
+        word ed = efirst[f]
+        while ed ~= 0 do
+            word c = eto[ed]
+            if live_[c] == 0 then
+                live_[c] = 1
+                if sp_ < 2999 then
+                    stack_[sp_] = c
+                    sp_ += 1
+                end
+            end
+            ed = enext[ed]
+        end
     end
 end
 
@@ -5530,9 +5638,10 @@ function generate()
         end
         return
     end
+    mark_live()
     word f = 1
     while f <= nsy and not failed do
-        if sk[f] == SK_FUNC then gen_function(f) end
+        if sk[f] == SK_FUNC and live_[f] ~= 0 then gen_function(f) end
         f += 1
     end
     if failed then return end

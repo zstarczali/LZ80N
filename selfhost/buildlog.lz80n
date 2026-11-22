@@ -5,7 +5,8 @@
 -- like one command line session; the IDE shows the log after a compile.
 -- The lexer (the first stage) starts a new log.
 --
--- The screen is the 80x32 text mode with the IDE's small font.
+-- The screen is the 80x32 text mode with the IDE's small font, made to look
+-- like the IDE with a window for the log.
 --
 -- A line is built in log_buf (log_s, log_n, log_c, log_time), then log_end
 -- writes it (no string temporaries: the code generator counts them).
@@ -55,10 +56,131 @@ function log_time()
     log_s(" s)")
 end
 
--- the 80x32 text mode, the small font, a clear screen
+-- The screen looks like the IDE: its menu bar, the program's first lines,
+-- the status line, and a window with the log in the middle.
+const LB_X = 6              -- the window: columns 6..73, rows 8..23
+const LB_W = 68
+const LB_Y = 8
+const LB_ROWS = 14          -- log rows 9..22
+const LB_TEXT = 64          -- characters of a log row
+-- colour pairs (attribute = pair * 2)
+const LA_DIM = 40
+const LA_GUT = 42
+const LA_MENU = 44
+const LA_TITLE = 46
+const LA_STATUS = 48
+const LA_BOX = 50
+const LA_CYAN = 52
+const LA_RED = 54
+byte log_pal[16] = {0xE3, 0x6D, 0xE3, 0x49, 0x02, 0xFF, 0x02, 0xFC, 0x49, 0xFF, 0x25, 0xFF, 0x25, 0x1F, 0x25, 0xF5}
+byte log_name[64]           -- the program's name (from ide.on)
+byte log_nlen = 0
+
+-- the address of a cell of the 80x32 tilemap
+function lcell(byte r, byte c) -> word
+    return 0x6000 + word(r) * 160 + word(c) * 2
+end
+
+-- n cells from (r, c): the character ch, attribute a
+function lfill(byte r, byte c, byte n, byte ch, byte a)
+    word p = lcell(r, c)
+    byte i = 0
+    while i < n do
+        memory[p] = ch
+        memory[p + 1] = a
+        p += 2
+        i += 1
+    end
+end
+
+function ltext(byte r, byte c, string t, byte a)
+    word p = lcell(r, c)
+    byte i = 0
+    while i < len(t) and c + i < 80 do
+        memory[p] = asc(t, i)
+        memory[p + 1] = a
+        p += 2
+        i += 1
+    end
+end
+
+-- the program's name and its first lines behind the window
+function log_backdrop()
+    log_nlen = 0
+    byte h = file_open("ide.on", FILE_READ)
+    if h ~= FILE_ERROR then
+        word c = file_getc(h)
+        while c ~= FILE_EOF and c ~= 10 and log_nlen < 60 do
+            log_name[log_nlen] = byte(c)
+            log_nlen += 1
+            c = file_getc(h)
+        end
+        file_close(h)
+    end
+    if log_nlen == 0 then
+        byte k = 0
+        while k < 8 do
+            log_name[k] = asc("in.lz80n", k)
+            k += 1
+        end
+        log_nlen = 8
+    end
+    -- the menu bar, the status line
+    lfill(0, 0, 80, ' ', LA_MENU)
+    ltext(0, 1, "File  Edit  Build  Help", LA_MENU)
+    ltext(0, 30, "LZ80N IDE", LA_TITLE)
+    word p = lcell(0, 79 - log_nlen)
+    byte k = 0
+    while k < log_nlen do
+        memory[p] = log_name[k]
+        p += 2
+        k += 1
+    end
+    lfill(31, 0, 80, ' ', LA_STATUS)
+    ltext(31, 1, "Compiling...  the IDE comes back when it is done", LA_STATUS)
+    -- the program's first lines (dim, with line numbers)
+    h = file_open("in.lz80n", FILE_READ)
+    if h == FILE_ERROR then return end
+    byte r = 1
+    word c = file_getc(h)
+    while r <= 30 and c ~= FILE_EOF do
+        -- the line number
+        p = lcell(r, 0)
+        byte d0 = r / 10
+        if d0 ~= 0 then memory[p + 4] = '0' + d0 end
+        memory[p + 6] = '0' + r % 10
+        k = 0
+        while k < 4 do
+            memory[p + k * 2 + 1] = LA_GUT
+            k += 1
+        end
+        byte x = 5
+        while c ~= FILE_EOF and c ~= 10 do
+            if x < 80 and c >= 32 and c < 128 then
+                p = lcell(r, x)
+                memory[p] = byte(c)
+                memory[p + 1] = LA_DIM
+                x += 1
+            end
+            c = file_getc(h)
+        end
+        if c == 10 then c = file_getc(h) end
+        r += 1
+    end
+    file_close(h)
+end
+
+-- the screen: 80x32 text mode, the small font, the IDE's look, the window
 function log_screen()
     nextreg[0x6B] = 0xC9
     nextreg[0x6F] = 0x34
+    nextreg[0x43] = 0x30
+    nextreg[0x40] = 40
+    byte k = 0
+    while k < 16 do
+        nextreg[0x41] = log_pal[k]
+        k += 1
+    end
     asm
         ld hl,rt_font
         ld de,$7400+32*8
@@ -69,12 +191,29 @@ function log_screen()
 .c:
         ld (hl),' '
         inc hl
-        ld (hl),14
+        ld (hl),40
         inc hl
         dec bc
         ld a,b
         or c
         jr nz,.c
+    end
+    log_backdrop()
+    -- the window: a title row, the log rows, a bottom row
+    byte r = LB_Y
+    while r < LB_Y + LB_ROWS + 2 do
+        lfill(r, LB_X, LB_W, ' ', LA_BOX)
+        r += 1
+    end
+    lfill(LB_Y, LB_X, LB_W, ' ', LA_MENU)
+    ltext(LB_Y, LB_X + 2, "Compiling ", LA_MENU)
+    word p = lcell(LB_Y, LB_X + 12)
+    k = 0
+    while k < log_nlen and k < 50 do
+        memory[p] = log_name[k]
+        memory[p + 1] = LA_TITLE
+        p += 2
+        k += 1
     end
     log_row = 0
 end
@@ -90,28 +229,36 @@ function log_bad() -> bool
     return false
 end
 
--- the line on the screen (80 columns a row; the screen scrolls): the first
--- line in cyan, errors in red, the others white
+-- the line in the window (LB_TEXT characters a row; the window scrolls):
+-- the first line in cyan, errors in red, the others white
 function log_show()
-    byte at_ = 14
-    if log_len >= 5 and log_buf[0] == 'L' and log_buf[1] == 'Z' then at_ = 10 end
-    if log_bad() then at_ = 4 end
+    byte at_ = LA_BOX
+    if log_len >= 5 and log_buf[0] == 'L' and log_buf[1] == 'Z' then at_ = LA_CYAN end
+    if log_bad() then at_ = LA_RED end
     byte i = 0
     bool first = true
     while first or i < log_len do
         first = false
-        if log_row >= 32 then
-            asm
-                ld hl,$6000+160
-                ld de,$6000
-                ld bc,31*160
-                ldir
+        if log_row >= LB_ROWS then
+            -- up one row: the log rows of the window only
+            byte r = 0
+            while r < LB_ROWS - 1 do
+                sh_from = lcell(LB_Y + 2 + r, LB_X)
+                sh_to = lcell(LB_Y + 1 + r, LB_X)
+                asm
+                    ld hl,(g_sh_from)
+                    ld de,(g_sh_to)
+                    ld bc,68*2
+                    ldir
+                end
+                r += 1
             end
-            log_row = 31
+            lfill(LB_Y + LB_ROWS, LB_X, LB_W, ' ', LA_BOX)
+            log_row = LB_ROWS - 1
         end
-        word a = 0x6000 + word(log_row) * 160
+        word a = lcell(LB_Y + 1 + log_row, LB_X + 2)
         byte x = 0
-        while x < 80 do
+        while x < LB_TEXT do
             if i < log_len then
                 memory[a] = log_buf[i]
                 i += 1
@@ -126,6 +273,8 @@ function log_show()
     end
     log_len = 0
 end
+word sh_from = 0
+word sh_to = 0
 
 -- a line on the screen only
 function log_note(string s)
@@ -144,7 +293,7 @@ function log_end()
     log_show()
 end
 
-function log_line(string s)
+function log_say(string s)
     log_s(s)
     log_end()
 end

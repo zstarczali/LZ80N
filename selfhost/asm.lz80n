@@ -41,7 +41,7 @@ function read_text_ln() -> bool
             end
         end
         any = true
-        scan_line()
+        scan_ln()
         if rl_lf ~= 0 then return true end
     end
     return any
@@ -50,7 +50,7 @@ end
 -- rb[rb_pos..rb_len) into lbuf up to a line feed (CRs dropped, at most 512
 -- characters kept); rl_lf: 1 when the line feed was found
 byte rl_lf = 0
-function scan_line()
+function scan_ln()
     asm
         push ix
         ld hl,(g_rb_len)

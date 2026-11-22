@@ -2,7 +2,7 @@
 --
 -- A full-screen editor in the 80x32 tilemap mode: a menu bar (File, Edit,
 -- Build, Help), syntax highlighting, a scroll bar, the Kempston mouse with a
--- sprite pointer (click, drag to select, double click a word, right click a
+-- sprite mouse arrow (click, drag to select, double click a word, right click a
 -- menu, the wheel), and Build -> Compile / Compile & run, which saves the
 -- program, starts the self-hosted compiler (lexer.nex -> ... -> asm.nex) and
 -- comes back here with the result; an error puts the cursor on its line.
@@ -36,7 +36,7 @@ const TW = 74               -- text columns (column 79: the scroll bar)
 const TILEMAP = 0x6000
 const FONT = 0x7400         -- tile definitions (80x32 needs $6000..$73FF)
 
--- colours: tilemap palette pairs (paper, ink)
+-- colours: tilemap colour pairs (paper, ink)
 const C_TEXT = 20
 const C_KEY = 21
 const C_TYPE = 22
@@ -220,7 +220,7 @@ function text_reset()
 end
 
 -- n new empty lines at position at: false when the text is full
-function insert_lines(word at, word n) -> bool
+function insert_lns(word at, word n) -> bool
     if nfree < n or nlines + n > MAXLINES then return false end
     word i = nlines
     while i > at do
@@ -241,12 +241,12 @@ function insert_lines(word at, word n) -> bool
     return true
 end
 
-function insert_line(word at) -> bool
-    return insert_lines(at, 1)
+function insert_ln(word at) -> bool
+    return insert_lns(at, 1)
 end
 
 -- n lines from position at
-function delete_lines(word at, word n)
+function delete_lns(word at, word n)
     word i = 0
     while i < n do
         freeslot[nfree] = lslot[at + i]
@@ -262,8 +262,8 @@ function delete_lines(word at, word n)
     nlines -= n
 end
 
-function delete_line(word at)
-    delete_lines(at, 1)
+function delete_ln(word at)
+    delete_lns(at, 1)
 end
 
 function line_len(word l) -> byte
@@ -273,7 +273,7 @@ end
 -- line l into buf (its length: blen)
 byte lbuf[256]
 byte blen = 0
-function get_line(word l)
+function get_ln(word l)
     if l == cur_line then
         blen = cur_len
         word i = 0
@@ -361,7 +361,7 @@ function load_cur(word l)
     if l == cur_line then return end
     store_cur()
     cur_line = 0xFFFF
-    get_line(l)
+    get_ln(l)
     cur_len = blen
     word i = 0
     while i < blen do
@@ -511,7 +511,7 @@ end
 -- colours of lbuf (line in_asm: inside an `asm` block); the state after the
 -- line in asm_after
 bool asm_after = false
-function colour_line(bool in_asm)
+function colour_ln(bool in_asm)
     asm_after = in_asm
     byte i = 0
     if in_asm then
@@ -593,8 +593,8 @@ end
 function update_asm(word l)
     bool st = false
     if l > 0 and l <= nlines then
-        get_line(l - 1)
-        colour_line(lasm[l - 1] ~= 0)
+        get_ln(l - 1)
+        colour_ln(lasm[l - 1] ~= 0)
         st = asm_after
     end
     while l < nlines do
@@ -602,8 +602,8 @@ function update_asm(word l)
         if st then want = 1 end
         if lasm[l] == want and l > cy + 1 then return end
         lasm[l] = want
-        get_line(l)
-        colour_line(st)
+        get_ln(l)
+        colour_ln(st)
         st = asm_after
         l += 1
     end
@@ -653,8 +653,8 @@ function build_text_row(byte r)
     if l < nlines then
         row_num(0, 4, l + 1, C_GUT)
         rowa[4] = C_GUT * 2
-        get_line(l)
-        colour_line(lasm[l] ~= 0)
+        get_ln(l)
+        colour_ln(lasm[l] ~= 0)
         word c = left_
         byte x = GUTTER
         while x < 79 and c <= blen do
@@ -747,7 +747,7 @@ function draw_status()
 end
 
 -- the open menu: a box below its name, or the pop-up menu of the right
--- button at the pointer
+-- button at the mouse arrow
 string menu_items[] = {
     "New           EXT N", "Open...       EXT O", "Save          EXT S", "Save as...",
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
@@ -1338,10 +1338,10 @@ function mouse_init()
     sprites_visible(true, true)
 end
 
--- the text position under the pointer: false if not in the text
+-- the text position under the mouse arrow: false if not in the text
 word hit_line = 0
 byte hit_col = 0
-function pointer_text() -> bool
+function mouse_text() -> bool
     word r = py / 8
     if r < TEXT_TOP or r >= TEXT_TOP + TEXT_ROWS then return false end
     word c = px / 4
@@ -1424,7 +1424,7 @@ function mouse_poll()
     if rdown and not rwas then right_click() end
 end
 
--- the pointer over a menu: its item, or another menu of the bar
+-- the mouse arrow over a menu: its item, or another menu of the bar
 function hover()
     if not menu_open then return end
     word r = py / 8
@@ -1525,7 +1525,7 @@ function right_click()
     end
     if prompt_kind ~= 0 then return end
     drag = false
-    if not sel_on and pointer_text() then
+    if not sel_on and mouse_text() then
         word l = hit_line
         if l >= nlines then l = nlines - 1 end
         move_to(l, hit_col)
@@ -1684,9 +1684,9 @@ function insert_char(byte c)
     scroll_to_cursor()
 end
 
-function new_line()
+function new_ln()
     load_cur(cy)
-    if not insert_line(cy + 1) then
+    if not insert_ln(cy + 1) then
         set_msg("the text is full", C_ERR)
         return
     end
@@ -1746,7 +1746,7 @@ function backspace()
         i += 1
     end
     cur_line = 0xFFFF          -- dropped, not stored
-    delete_line(cy)
+    delete_ln(cy)
     cy = above
     load_cur(above)
     i = 0
@@ -1791,7 +1791,7 @@ function delete_forward()
         i += 1
     end
     store_cur()
-    delete_line(nl_)
+    delete_ln(nl_)
     update_asm(cy)
     changed()
     redraw_all = true
@@ -1819,7 +1819,7 @@ function copy_sel() -> bool
     clip_line = false
     word l = s_l1
     while l <= s_l2 do
-        get_line(l)
+        get_ln(l)
         word a = 0
         if l == s_l1 then a = s_c1 end
         word b = blen
@@ -1868,7 +1868,7 @@ function delete_sel()
     if not sel_on then return end
     sel_order()
     store_cur()
-    get_line(s_l2)
+    get_ln(s_l2)
     byte suf[256]
     word n = 0
     word i = s_c2
@@ -1890,7 +1890,7 @@ function delete_sel()
         i += 1
     end
     store_cur()
-    if s_l2 > s_l1 then delete_lines(s_l1 + 1, s_l2 - s_l1) end
+    if s_l2 > s_l1 then delete_lns(s_l1 + 1, s_l2 - s_l1) end
     cy = s_l1
     cx = s_c1
     sel_on = false
@@ -1900,7 +1900,7 @@ function delete_sel()
     scroll_to_cursor()
 end
 
-function delete_this_line()
+function delete_this_ln()
     sel_clear()
     marking = false
     load_cur(cy)
@@ -1911,7 +1911,7 @@ function delete_this_line()
         return
     end
     cur_line = 0xFFFF
-    delete_line(cy)
+    delete_ln(cy)
     if cy >= nlines then cy = nlines - 1 end
     load_cur(cy)
     if cx > cur_len then cx = cur_len end
@@ -1929,7 +1929,7 @@ function cut_cmd()
         return
     end
     copy_cmd()
-    delete_this_line()
+    delete_this_ln()
     set_msg("line cut", C_STATUS)
 end
 
@@ -1948,7 +1948,7 @@ function paste_cmd()
     end
     load_cur(cy)
     store_cur()
-    if not insert_lines(cy + 1, nl_) then
+    if not insert_lns(cy + 1, nl_) then
         set_msg("the text is full", C_ERR)
         return
     end
@@ -2067,14 +2067,14 @@ function load_file(string name) -> bool
     end
     cur_line = 0xFFFF
     text_reset()
-    insert_line(0)
+    insert_ln(0)
     word l = 0
     bool long_ = false
     bool full = false
     word c = file_getc(fh)
     while c ~= FILE_EOF do
         if c == 10 then
-            if not insert_line(l + 1) then
+            if not insert_ln(l + 1) then
                 full = true
                 break
             end
@@ -2103,7 +2103,7 @@ function load_file(string name) -> bool
     end
     file_close(fh)
     -- the final newline makes an empty last line: drop it
-    if nlines > 1 and line_len(nlines - 1) == 0 then delete_line(nlines - 1) end
+    if nlines > 1 and line_len(nlines - 1) == 0 then delete_ln(nlines - 1) end
     update_asm(0)
     cy = 0
     cx = 0
@@ -2125,7 +2125,7 @@ end
 function new_text()
     cur_line = 0xFFFF
     text_reset()
-    insert_line(0)
+    insert_ln(0)
     cy = 0
     cx = 0
     top = 0
@@ -2216,7 +2216,7 @@ function find_next()
     word start = word(cx) + 1
     word tries = 0
     while tries <= nlines do
-        get_line(l)
+        get_ln(l)
         word i = start
         while i + flen <= blen do
             byte j = 0
@@ -2365,7 +2365,7 @@ function run_item(byte it)
     elseif it == 8 then
         mark_cmd()
     elseif it == 9 then
-        delete_this_line()
+        delete_this_ln()
     elseif it == 10 then
         prompt(3, "Find:", find_text)
     elseif it == 11 then
@@ -2434,7 +2434,7 @@ function ext_command(word c)
     elseif c == 'm' then
         mark_cmd()
     elseif c == 'k' then
-        delete_this_line()
+        delete_this_ln()
     elseif c == 'l' then
         show_output()
     elseif c == 'h' then
@@ -2521,7 +2521,7 @@ function handle_key(word k)
     elseif k == K_ENTER then
         if sel_on then delete_sel() end
         marking = false
-        if not sel_on then new_line() end
+        if not sel_on then new_ln() end
     elseif k == K_BREAK then
         marking = false
         sel_clear()

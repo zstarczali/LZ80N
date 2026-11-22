@@ -642,7 +642,7 @@ end
 
 word ntokens = 0
 string included[16]
-string cur_dir = ""         -- the directory of the file being read
+string cur_dir = ""         -- the folder of the file being read
 byte nincluded = 0
 
 -- lex one file (no T_EOF); false if it cannot be opened
@@ -716,7 +716,7 @@ function include_file(word l, word c)
     word ln = lno
     word cn = cno
     string dir = cur_dir
-    -- the directory of the included file
+    -- the folder of the included file
     cur_dir = ""
     byte j = len(path)
     while j > 0 and asc(path, j - 1) ~= '/' do j -= 1 end
@@ -848,7 +848,7 @@ if ih ~= FILE_ERROR then
     file_close(ih)
     if nm ~= "" then prog_name = nm end
 end
-log_line("LZ80N: compiling " .. prog_name)
+log_say("LZ80N: compiling " .. prog_name)
 byte probe = file_open("expand.on", FILE_READ)
 if probe ~= FILE_ERROR then
     expand = true
@@ -876,7 +876,7 @@ while pj > 0 and asc(prog_name, pj - 1) ~= '/' do pj -= 1 end
 if pj > 0 then cur_dir = sub(prog_name, 0, pj) end
 if not failed then
     if not lex_file("in.lz80n") then
-        log_line("cannot open in.lz80n, error " .. str(file_status))
+        log_say("cannot open in.lz80n, error " .. str(file_status))
     end
 end
 if not failed then out_head(T_EOF, lno, cno) end

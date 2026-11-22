@@ -79,9 +79,12 @@ Tests:
 * `selfhost_asm_all_examples` (ignored, ~80 s): all 24 examples, NEX byte
   for byte: `cargo test --release selfhost_asm_all -- --ignored`.
 
-Two passes (layout, then output; more only if a value changes). Speed at
-28 MHz: about 220 lines per second, e.g. 9.5 s for `hello` (2132 lines),
-54 s for `shooter` (9134 lines); `images` takes 99 s (large data, many pages).
+Two passes (layout, then output; more only if a value changes). The runtime
+comes pre-assembled (`lib/rt_core.bin`, `incbin`), and the code generator
+emits only the live functions (those reachable from the main program, the
+interrupt handlers and inline `asm`), so `hello` takes about 1.3 s here
+(lexer 0.2 + code generator 0.7 + assembler 1.3 s in all, at first 11.7 s)
+and a Layer 2 program such as `life` about 13 s (at first 34 s).
 
 ## codegen.lz80n
 
@@ -196,8 +199,10 @@ up to 32 KB.
   the Layer 2 module) 3.1 + 5.6 + 13.3 s (4.5 + 12.2 + 17.2 s).
   `profile_stage` (ignored) shows where a stage spends its time.
 * The build log: every stage writes its lines (with the time it took) to
-  the screen (the 80-column text mode, the IDE's font) and to `build.log`, and shows the lines of the stages before
-  it first, so the screen reads like one command line session. After a
+  the screen and to `build.log`, and shows the lines of the stages before
+  it first. The screen looks like the IDE (its menu bar, the program's
+  first lines, the status line) with the log in a window, as if the IDE
+  were still running. After a
   compile the IDE shows the log in a box (Build -> Build output, EXT L,
   shows it again).
 * The Next keyboard's extra keys (cursor keys, DELETE, EDIT, BREAK,
@@ -210,8 +215,8 @@ up to 32 KB.
   for a name. It reads folders with the file module's new `file_opendir`
   and `file_readdir` (esxDOS F_OPENDIR / F_READDIR).
 * Help -> Language manual: the LZ80N manual (`lib/help.txt`, written by the
-  export from `docs/manual-en.md`, laid out for 80 columns in ASCII
-  letters) in the text area: left / right go to the chapters, ENTER
+  export from `docs/manual-en.md` without the parts about the PC, laid out
+  for 80 columns in ASCII letters) in the text area: left / right go to the chapters, ENTER
   on a line of the contents opens its chapter, F finds a text, N again.
   EXT H opens it at the word under the cursor.
 * A splash screen at the start: a box with the logo and the version

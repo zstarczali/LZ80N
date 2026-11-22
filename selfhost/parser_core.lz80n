@@ -190,7 +190,7 @@ far byte to_hi[48000]
 far byte tn_lo[48000]       -- text: length
 far byte tn_hi[48000]
 
-function tline(word t) -> word
+function tlno(word t) -> word
     return word(tl_hi[t]) << 8 | tl_lo[t]
 end
 
@@ -279,7 +279,7 @@ function fail_at(word l, word c) -> bool
 end
 
 function fail_tok(word t) -> bool
-    return fail_at(tline(t), tcol(t))
+    return fail_at(tlno(t), tcol(t))
 end
 
 -- the text of token t into the message
@@ -400,7 +400,7 @@ function node(byte kind, word t) -> word
     nnodes += 1
     word n = nnodes
     nk[n] = kind
-    nl[n] = tline(t)
+    nl[n] = tlno(t)
     nc[n] = tcol(t)
     return n
 end
@@ -948,7 +948,7 @@ function unary() -> word
     -- fold negative literals right away
     if op == 0 and (nk[e] == E_INT or nk[e] == E_FIXED) then
         nf[e] = 1 - nf[e]
-        nl[e] = tline(t0)
+        nl[e] = tlno(t0)
         nc[e] = tcol(t0)
         return e
     end
@@ -1169,7 +1169,7 @@ function load_tokens() -> bool
                 i += 1
             end
             if pool_len + n > 60000 then
-                if fail_at(tline(t), tcol(t)) then msg("program too large: more than 60000 bytes of names and texts") end
+                if fail_at(tlno(t), tcol(t)) then msg("program too large: more than 60000 bytes of names and texts") end
                 break
             end
             if k == T_IDENT then intern(t, h & 4095) end

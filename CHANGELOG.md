@@ -18,16 +18,19 @@
   mode with menus, syntax highlighting, a scroll bar, the Kempston mouse
   (click, drag to select, double click, a right-button menu, the wheel),
   selections, a clipboard, find and go to line, a file browser, the
-  language manual (EXTEND H: at the word under the cursor), and Build -> Compile / Compile & run: the compiler's messages
-  appear like a command line session (in the 80-column mode) and in the
-  IDE; an error puts the
-  cursor on its line, in included files too. The Next keyboard's extra keys
+  language manual without the parts about the PC (EXTEND H: at the word
+  under the cursor), and Build -> Compile / Compile & run: the compiler's
+  messages appear in a window on a screen that looks like the IDE, and in
+  the IDE afterwards; an error puts the cursor on its line, in included
+  files too. The Next keyboard's extra keys
   (NextRegs `$B0` / `$B1`) work as well.
 * Compiling on the Next: the runtime is assembled once by the export
   (`lib/rt_core.bin` and its labels) instead of with every program; the
   assembler reads blocks and skips the work its first pass does not need;
+  the code generator compiles only the functions the program can call;
   a small program compiles about 6 times faster than at first (about 2
-  seconds of work at 28 MHz), one with the Layer 2 module about 1.5 times.
+  seconds of work at 28 MHz), one with the Layer 2 module about 2.5 times
+  (about 13 seconds).
 * The release packages contain it in `next/lz80n`; it is also a separate
   archive, `lz80n-1.4.0-zxnext-sdcard.zip`.
 

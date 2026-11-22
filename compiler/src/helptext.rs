@@ -349,3 +349,100 @@ mod tests {
         }
     }
 }
+
+/// The manual for the IDE on the Next: without what is about the PC (the
+/// command line compiler, CSpect, the Rust sources, the roadmap).
+pub fn for_the_next(md: &str) -> String {
+    const SKIP_SECTIONS: [&str; 4] = ["## 1. Getting started", "### 22.4 The compiler", "## 23. Limitations and roadmap", "### Benchmarks"];
+    const SKIP_CONTENTS: [&str; 2] = ["1. [Getting started]", "23. [Limitations"];
+    const PC_WORDS: [&str; 10] = ["lz80nc", "cargo", "CSpect", "manual-hu.md", "VS Code", "powershell", "--export-selfhost", "release packages", "benchmarks/", "with `-S`"];
+    const INTRO: &str = "LZ80N is a statically typed, Lua-inspired programming language for the ZX Spectrum Next. This manual describes the language and its libraries; chapter 25 is about this IDE (EXTEND H opens the manual at the word under the cursor).";
+    let lines: Vec<&str> = md.lines().collect();
+    // 1. whole sections and their lines in the contents
+    let mut kept: Vec<&str> = vec![];
+    let mut skip_level = 0usize;
+    for l in &lines {
+        let level = if l.starts_with('#') { l.chars().take_while(|&c| c == '#').count() } else { 0 };
+        if skip_level > 0 {
+            if level > 0 && level <= skip_level {
+                skip_level = 0;
+            } else {
+                continue;
+            }
+        }
+        if level > 0 && SKIP_SECTIONS.iter().any(|s| l.starts_with(s)) {
+            skip_level = level;
+            continue;
+        }
+        if SKIP_CONTENTS.iter().any(|s| l.starts_with(s)) {
+            continue;
+        }
+        kept.push(l);
+    }
+    // 2. paragraphs, list items and code blocks about the PC
+    let mut out: Vec<String> = vec![];
+    let mut block: Vec<&str> = vec![];
+    let mut intro_done = false;
+    let mut flush = |block: &mut Vec<&str>, out: &mut Vec<String>, intro_done: &mut bool| {
+        if block.is_empty() {
+            return;
+        }
+        let text = block.join("\n");
+        if !*intro_done && text.contains("translates LZ80N source code") {
+            out.push(INTRO.to_string());
+            *intro_done = true;
+        } else if !PC_WORDS.iter().any(|w| text.contains(w)) {
+            out.extend(block.iter().map(|s| s.to_string()));
+        }
+        block.clear();
+    };
+    let mut in_code = false;
+    for l in kept {
+        let t = l.trim_start();
+        if in_code {
+            block.push(l);
+            if t.starts_with("```") {
+                in_code = false;
+                flush(&mut block, &mut out, &mut intro_done);
+            }
+            continue;
+        }
+        if t.starts_with("```") {
+            flush(&mut block, &mut out, &mut intro_done);
+            block.push(l);
+            in_code = true;
+            continue;
+        }
+        let item = t.starts_with("* ") || t.starts_with("- ") || {
+            let d = t.chars().take_while(|c| c.is_ascii_digit()).count();
+            d > 0 && t[d..].starts_with(". ")
+        };
+        if t.is_empty() || t.starts_with('#') || t.starts_with('|') || item {
+            flush(&mut block, &mut out, &mut intro_done);
+            if t.is_empty() || t.starts_with('#') {
+                out.push(l.to_string());
+                continue;
+            }
+        }
+        block.push(l);
+    }
+    flush(&mut block, &mut out, &mut intro_done);
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
+}
+
+#[cfg(test)]
+mod next_tests {
+    #[test]
+    fn manual_without_the_pc() {
+        let md = include_str!("../../docs/manual-en.md");
+        let h = super::for_the_next(md);
+        for w in ["lz80nc", "CSpect", "cargo", "Getting started", "Limitations and roadmap", "22.4 The compiler", "benchmarks/", "release packages", "Benchmarks"] {
+            assert!(!h.contains(w), "{w} is still in the manual");
+        }
+        for w in ["## 2. A first program", "## 25. The compiler and the IDE on the Next", "### 25.1 The LZ80N IDE", "upper(s)", "chapter 25 is about this IDE"] {
+            assert!(h.contains(w), "{w} is missing");
+        }
+    }
+}

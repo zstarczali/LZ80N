@@ -6195,7 +6195,7 @@ fn selfhost_ide_browser() {
 /// a text, ENTER on a line of the contents opens the chapter.
 #[test]
 fn selfhost_ide_manual() {
-    let help = crate::help_text(include_str!("../../docs/manual-en.md"));
+    let help = crate::help_text(&crate::helptext::for_the_next(include_str!("../../docs/manual-en.md")));
     let run = |keys: &[u8]| {
         let (mut cpu, end) = ide_cpu(&[("lib/help.txt", help.as_bytes()), ("ide.key", keys)]);
         while cpu.pc != end {
@@ -6324,4 +6324,14 @@ fn profile_stage() {
     for (n, k) in c.iter().take(15) {
         eprintln!("{k:8} calls  {n}");
     }
+}
+
+#[test]
+#[ignore]
+fn dump_selfhost_asm() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let prog = std::fs::read_to_string(root.join(std::env::var("PROG").unwrap_or("examples/hello.lz80n".into()))).unwrap();
+    let sh = SelfHost::new();
+    let (asm, _) = sh.compile_sd(&[("in.lz80n", prog.as_bytes())]).unwrap();
+    std::fs::write("/tmp/sh_out.asm", asm).unwrap();
 }
