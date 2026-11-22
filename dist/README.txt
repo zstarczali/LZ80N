@@ -27,9 +27,9 @@ CONTENTS
 1. WHAT IS IN THIS PACKAGE
 --------------------------
 
-  lz80nc / lz80nc.exe        the LZ80N compiler
-  sjasmplus / sjasmplus.exe  SjASMPlus @SJASM@, the Z80N assembler the compiler
-                             uses (it is found automatically in this folder)
+  lz80nc / lz80nc.exe        the LZ80N compiler (with a built-in Z80N assembler)
+  sjasmplus / sjasmplus.exe  SjASMPlus @SJASM@, an optional external assembler
+                             (lz80nc --sjasmplus auto finds it in this folder)
   docs/manual-en.pdf         Programmer's manual (English)
   docs/manual-hu.pdf         Programozói kézikönyv (magyar)
   docs/*.md                  the same manuals and the technical specification
@@ -102,9 +102,9 @@ Linux (x64 and ARM64)
          echo 'export PATH="$PATH:'"$PWD"'"' >> ~/.bashrc
   * `uname -m` tells your platform: x86_64 = x64, aarch64 = arm64.
   * The programs need glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
-    Fedora 36 and later). If the bundled sjasmplus does not start, build it
-    from source (https://github.com/z00m128/sjasmplus) and point lz80nc at it
-    with --sjasmplus PATH or the SJASMPLUS environment variable.
+    Fedora 36 and later). lz80nc needs no assembler of its own; for
+    --sjasmplus, if the bundled sjasmplus does not start, build it from
+    source (https://github.com/z00m128/sjasmplus).
 
 
 3. YOUR FIRST PROGRAM
@@ -160,7 +160,10 @@ The program takes over the machine: it runs until you reset.
     -O0              no peephole optimisation
     --bank-all       put every function into its own code page (to try
                      code banking; normally automatic)
-    --sjasmplus PATH use this SjASMPlus
+    --sjasmplus PATH assemble with this SjASMPlus instead of the built-in
+                     assembler (auto: the one next to lz80nc)
+    --export-selfhost DIR
+                     the compiler and the LZ80N IDE for the Next (see next/)
     -V, --version    print the version
     -h, --help       short help
 
@@ -168,7 +171,7 @@ Errors look like  file.lz80n:12:5: error: message  and the compiler reports
 as many as it can find in one run. Relative asset paths (PNG files) are
 relative to the source file.
 
-The SjASMPlus used is the first of: --sjasmplus PATH, the SJASMPLUS
+With --sjasmplus auto the SjASMPlus used is the first of: the SJASMPLUS
 environment variable, sjasmplus next to lz80nc, sjasmplus on the PATH.
 
 
@@ -281,8 +284,8 @@ In examples/ (compile any of them with lz80nc examples/NAME.lz80n):
 8. TROUBLESHOOTING
 ------------------
 
-  "sjasmplus failed" / "cannot run sjasmplus"
-      Keep sjasmplus next to lz80nc, or use --sjasmplus PATH.
+  "sjasmplus failed" / "cannot run sjasmplus" (only with --sjasmplus)
+      Keep sjasmplus next to lz80nc, or give its path: --sjasmplus PATH.
   macOS: "cannot be opened because the developer cannot be verified"
       Run  xattr -dr com.apple.quarantine .  in the package folder.
   Linux: "Permission denied"

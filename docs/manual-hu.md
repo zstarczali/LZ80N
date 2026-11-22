@@ -8,7 +8,7 @@ fordítja, és `.nex` fájlba csomagolja, amely közvetlenül fut a Nexten vagy
 emulátorban. Nincs interpreter, nincs virtuális gép és nincs szemétgyűjtő: amit
 leírsz, az Z80N utasításokká válik.
 
-Ez a kézikönyv a nyelvet és a könyvtárait az 1.3.0-s verzió állapota szerint
+Ez a kézikönyv a nyelvet és a könyvtárait az 1.4.0-s verzió állapota szerint
 írja le (lásd [`CHANGELOG.md`](../CHANGELOG.md)). Az angol változat: [`manual-en.md`](manual-en.md). A tömör műszaki
 specifikáció: [`spec.md`](spec.md).
 
@@ -40,6 +40,7 @@ specifikáció: [`spec.md`](spec.md).
 22. [Hogyan fut egy program](#22-hogyan-fut-egy-program)
 23. [Korlátok és tervek](#23-korlátok-és-tervek)
 24. [Referenciatáblák](#24-referenciatáblák)
+25. [A fordító és az IDE a Nexten](#25-a-fordító-és-az-ide-a-nexten)
 
 ---
 
@@ -47,10 +48,12 @@ specifikáció: [`spec.md`](spec.md).
 
 ### 1.1 Amire szükséged van
 
-* Az **lz80nc** fordító és az **SjASMPlus 1.24.0** assembler, amely a
-  generált kódból `.nex` fájlt készít. A Windows, macOS és Linux release
-  csomagok mindkettőt tartalmazzák; a fordító a saját mappájában megtalálja
-  az assemblert. (Forrásból fordítás: lásd `README.md`.)
+* Az **lz80nc** fordító. A generált kódot maga fordítja le, és maga írja a
+  `.nex` fájlt. A Windows, macOS és Linux release csomagok az
+  **SjASMPlus 1.24.0** assemblert is tartalmazzák, ezt a `--sjasmplus`
+  kapcsoló használja a beépített assembler helyett. (Forrásból fordítás:
+  lásd `README.md`.)
+* Vagy a fordító és az IDE magán a Nexten (25. fejezet).
 * Egy **ZX Spectrum Next** (3.0-s vagy újabb core) vagy a **CSpect** emulátor.
 
 Az LZ80N kizárólag a Nextet célozza. Nincs 48K-s vagy 128K-s kompatibilitási
@@ -66,6 +69,7 @@ lz80nc game.lz80n -S                   # megáll az assemblynél (.asm)
 lz80nc game.lz80n -O0                  # peephole optimalizálás nélkül
 lz80nc game.lz80n --bank-all           # minden függvény külön kódlapon (22.5)
 lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
+lz80nc --export-selfhost D:\lz80n      # a fordító és az IDE a Nextre (25)
 ```
 
 A hibák formája `fájl:sor:oszlop: error: üzenet`. A fordító egy futásban annyi
@@ -1442,6 +1446,45 @@ scores[i] = scores[i - 1] + 10
 * `far` elem nem adható át referenciaként és nem használható `addr()`-ral;
   egy teljes sor (`level[y]`) önmagában nem használható.
 
+### 19.2 Fájlok az SD kártyán
+
+A fájlmodul a NextZXOS esxDOS API-ján keresztül olvas és ír fájlokat az SD
+kártyán. Akkor kerül a programba, ha az `file_` vagy `FILE_` kezdetű nevet
+használ.
+
+| Függvény | Leírás |
+|----------|--------|
+| `file_open(név, mód)` → byte | fájl megnyitása: `FILE_READ`, `FILE_WRITE` (létrehozza vagy kiüríti) vagy `FILE_APPEND`; egy leíró vagy `FILE_ERROR` |
+| `file_close(h)` | fájl (vagy mappa) lezárása |
+| `file_read(h, cím, darab)` → word | legfeljebb `darab` bájt olvasása a `cím`-re (`$4000` vagy fölötte); a beolvasott bájtok száma, a végén 0 |
+| `file_write(h, cím, darab)` → word | `darab` bájt írása a `cím`-ről; a kiírt bájtok száma |
+| `file_getc(h)` → word | a következő bájt, a végén `FILE_EOF` (pufferelt) |
+| `file_seek(h, poz)`, `file_pos(h)` → long, `file_size(h)` → long | a pozíció és a méret |
+| `file_exists(név)` → bool, `file_delete(név)` → bool | |
+| `file_opendir(út)` → byte | mappa megnyitása (`"."`: az aktuális) a `file_readdir`-hez; egy leíró vagy `FILE_ERROR` |
+| `file_readdir(h, cím)` → bool | a következő bejegyzés egy 280 bájtos pufferbe: attribútumok (4. bit: mappa), a 0-val záródó név, idő, dátum (2 + 2 bájt), méret (4 bájt); a végén hamis |
+| `file_exec(parancs)` → bool | pontparancs futtatása, pl. `file_exec("nexload game.nex")` (nem tér vissza, ha másik programot indít) |
+| `file_status` | az utolsó hívás esxDOS hibakódja (0: nincs hiba) |
+
+```lua
+byte h = file_open("scores.txt", FILE_WRITE)
+if h ~= FILE_ERROR then
+    string line = "hiscore " .. str(score) .. chr(10)
+    file_write(h, addr(line) + 1, len(line))   -- a string bájtjai a hossza után
+    file_close(h)
+end
+
+byte buf[280]
+byte d = file_opendir(".")
+while d ~= FILE_ERROR and file_readdir(d, addr(buf)) do
+    -- buf[0]: attribútumok, buf[1..]: a név
+end
+if d ~= FILE_ERROR then file_close(d) end
+```
+
+A fájlnevek lehetnek hosszú nevek, és tartalmazhatnak mappát is
+(`levels/1.dat`).
+
 ## 20. Beépített assembly
 
 ```lua
@@ -1614,6 +1657,7 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
 | `copper_begin`, `copper_wait`, `copper_move`, `copper_start`, `copper_stop` | 18 |
 | `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill`, `far` tömbök | 19 |
+| `file_open`, `file_close`, `file_read`, `file_write`, `file_getc`, `file_seek`, `file_pos`, `file_size`, `file_exists`, `file_delete`, `file_opendir`, `file_readdir`, `file_exec` | 19.2 |
 | `len`, `sub`, `find`, `val`, `str`, `asc`, `chr`, `upper`, `lower` | 9 |
 | `abs`, `min`, `max`, `clamp`, `sqrt`, `sin`, `cos`, `atan2`, `round` | 10 |
 
@@ -1661,3 +1705,75 @@ mintalejátszás és zeneimport → köztes reprezentáció és regiszteralloká
 | `music.lz80n` | ProTracker 3 zene, hangerőmérők |
 | `sprites.lz80n` | hardveres sprite-ok, PNG erőforrások |
 | `benchmarks/benchmark.lz80n` | sebességmérés |
+
+---
+
+## 25. A fordító és az IDE a Nexten
+
+Az LZ80N magán a ZX Spectrum Nexten is fut (2 MB-os gépen): a fordító
+szintén LZ80N-ben készült, és az `lz80nc` lefordítja a Nextre.
+
+```powershell
+lz80nc --export-selfhost D:\lz80n      # a .nex fájlok, a futtatókörnyezet, a kézikönyv
+```
+
+A release csomagokban ez a `next/lz80n` mappa (és külön
+`lz80n-VERZIÓ-zxnext-sdcard.zip`). Másold az `lz80n` mappát az SD kártyára,
+majd NextBASIC-ben:
+
+```
+.cd /lz80n
+.nexload ide.nex
+```
+
+### 25.1 Az LZ80N IDE
+
+Az `ide.nex` teljes képernyős szerkesztő 80 oszlopos szöveges módban:
+menük (File, Edit, Build, Help), szintaxiskiemelés, sorszámok, görgetősáv,
+állapotsor, Kempston egér mutatóval (kattintás, kijelölés húzással, szó
+kijelölése dupla kattintással, a jobb gomb menüt nyit, a görgő görget).
+
+| Billentyűk | |
+|------------|---|
+| CAPS+5 6 7 8 | kurzor balra, le, fel, jobbra |
+| CAPS+3 / CAPS+4 | lapozás fel / le |
+| CAPS+0 / CAPS+9 | törlés visszafelé / előre |
+| CAPS+1 (EDIT) | a menük |
+| CAPS+SPACE (BREAK) | mégse |
+| SYM+Q W E A S D F G X | `[` `]` `^` `~` `\|` `\` `{` `}` és a fordított aposztróf |
+| EXTEND (CAPS+SYM), majd S O N | mentés, megnyitás (fájlböngésző), új |
+| EXTEND, majd B / R | fordítás / fordítás és futtatás |
+| EXTEND, majd F G | keresés, ugrás sorra |
+| EXTEND, majd M A C X V K | jelölés, mindent kijelöl, másolás, kivágás, beillesztés, sor törlése |
+| EXTEND, majd L / H | a fordítás kimenete / a kézikönyv a kurzor alatti szónál |
+
+A **fordítás** (Build -> Compile, EXTEND B) elmenti a programot és elindítja
+a fordítót, amely az eredménnyel visszatér az IDE-be. A fordító üzenetei
+parancssorszerűen jelennek meg a képernyőn, utána az IDE is megmutatja őket
+(Build -> Build output); hibánál a kurzor a hibás sorra áll (include-olt
+fájlban hibánál azt a fájlt nyitja meg). A **Compile & run** sikeres
+fordítás után el is indítja a programot.
+
+A **File -> Open** egy mappa almappáit és programfájljait mutatja. A
+**Help -> Language manual** az angol, a **Kezikonyv (magyar)** ezt a
+kézikönyvet mutatja (ékezetek nélkül, mert a Next betűkészletében nincsenek);
+balra / jobbra a fejezetek között lép, a tartalomjegyzék egy során az ENTER
+megnyitja a fejezetet, az F szöveget keres.
+
+### 25.2 A fordítás lépései
+
+A fordító lépésekben fut, mindegyik egy `.nex` program, amely elindítja a
+következőt: `lexer.nex` (tokenek, include-ok, modulok) -> `assets.nex`
+(képek, minták, zene; csak ha a programnak vannak erőforrásai) ->
+`codegen.nex` (az assembly, `out.asm`) -> `asm.nex` (`out.nex`). Kézzel, az
+IDE nélkül:
+
+```
+COPY "myprog.lz80n" TO "in.lz80n"
+.nexload lexer.nex
+```
+
+A hibák a `codegen.err`, `asm.err` vagy `assets.err` fájlba kerülnek; a
+`build.log` a lépések üzeneteit tartalmazza. Egy kis program fordítása
+28 MHz-en kb. 10-15 másodperc. A nyelv ugyanaz, mint a PC-s `lz80nc`-vel
+(a részletek: `selfhost/README.md`).

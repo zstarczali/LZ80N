@@ -9,7 +9,7 @@ on the Next or in an emulator. There is no interpreter, no virtual machine and
 no garbage collector: what you write becomes Z80N instructions.
 
 This manual describes the language and its libraries as implemented in
-version 1.3.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
+version 1.4.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
 The compact technical specification is [`spec.md`](spec.md).
 
 ---
@@ -40,6 +40,7 @@ The compact technical specification is [`spec.md`](spec.md).
 22. [How a program runs](#22-how-a-program-runs)
 23. [Limitations and roadmap](#23-limitations-and-roadmap)
 24. [Reference tables](#24-reference-tables)
+25. [The compiler and the IDE on the Next](#25-the-compiler-and-the-ide-on-the-next)
 
 ---
 
@@ -47,10 +48,11 @@ The compact technical specification is [`spec.md`](spec.md).
 
 ### 1.1 What you need
 
-* **lz80nc**, the compiler, and **SjASMPlus 1.24.0**, the assembler that
-  turns the generated code into a `.nex` file. The release packages for
-  Windows, macOS and Linux contain both; the compiler finds the assembler
-  next to itself. (Building from source: see `README.md`.)
+* **lz80nc**, the compiler. It assembles the generated code itself and
+  writes the `.nex` file. The release packages for Windows, macOS and Linux
+  also contain **SjASMPlus 1.24.0**, which `--sjasmplus` uses instead of
+  the built-in assembler. (Building from source: see `README.md`.)
+* Or the compiler and the IDE on the Next itself (chapter 25).
 * A **ZX Spectrum Next** (core 3.0 or later) or the **CSpect** emulator.
 
 LZ80N targets the Next only. There is no 48K or 128K compatibility mode. The
@@ -66,6 +68,7 @@ lz80nc game.lz80n -S                   # stop after the assembly (.asm)
 lz80nc game.lz80n -O0                  # no peephole optimisation
 lz80nc game.lz80n --bank-all           # every function in its own code page (22.5)
 lz80nc game.lz80n --sjasmplus C:\tools\sjasmplus.exe
+lz80nc --export-selfhost D:\lz80n      # the compiler and the IDE for the Next (25)
 ```
 
 Errors are reported as `file:line:column: error: message`. The compiler
@@ -1429,6 +1432,44 @@ scores[i] = scores[i - 1] + 10
 * A `far` element cannot be passed by reference or used with `addr()`; a
   whole row (`level[y]`) cannot be used on its own.
 
+### 19.2 Files on the SD card
+
+The file module reads and writes files on the SD card through the esxDOS
+API of NextZXOS. It is part of a program when it uses a name starting with
+`file_` or `FILE_`.
+
+| Function | Description |
+|----------|-------------|
+| `file_open(name, mode)` → byte | open a file: `FILE_READ`, `FILE_WRITE` (create or empty) or `FILE_APPEND`; a handle or `FILE_ERROR` |
+| `file_close(h)` | close a file (or a folder) |
+| `file_read(h, address, count)` → word | read up to `count` bytes to `address` (at `$4000` or above); the number read, 0 at the end |
+| `file_write(h, address, count)` → word | write `count` bytes from `address`; the number written |
+| `file_getc(h)` → word | the next byte, or `FILE_EOF` at the end (buffered) |
+| `file_seek(h, pos)`, `file_pos(h)` → long, `file_size(h)` → long | the position and the size |
+| `file_exists(name)` → bool, `file_delete(name)` → bool | |
+| `file_opendir(path)` → byte | open a folder (`"."`: the current one) for `file_readdir`; a handle or `FILE_ERROR` |
+| `file_readdir(h, address)` → bool | the next entry into a 280-byte buffer: attributes (bit 4: a folder), the name ending with 0, time, date (2 + 2 bytes), size (4 bytes); false at the end |
+| `file_exec(command)` → bool | run a dot command, e.g. `file_exec("nexload game.nex")` (does not come back when it starts another program) |
+| `file_status` | the esxDOS error code of the last call (0: no error) |
+
+```lua
+byte h = file_open("scores.txt", FILE_WRITE)
+if h ~= FILE_ERROR then
+    string line = "hiscore " .. str(score) .. chr(10)
+    file_write(h, addr(line) + 1, len(line))   -- a string's bytes follow its length
+    file_close(h)
+end
+
+byte buf[280]
+byte d = file_opendir(".")
+while d ~= FILE_ERROR and file_readdir(d, addr(buf)) do
+    -- buf[0]: attributes, buf[1..]: the name
+end
+if d ~= FILE_ERROR then file_close(d) end
+```
+
+File names may be long names and may contain folders (`levels/1.dat`).
+
 ## 20. Inline assembly
 
 ```lua
@@ -1595,6 +1636,7 @@ register allocation.
 | `beep`, `tone`, `noise`, `volume`, `sound_off`, `sound_reset`, `play`, `play_loop`, `playing`, `note_period`, `ay_write` | 17 |
 | `copper_begin`, `copper_wait`, `copper_move`, `copper_start`, `copper_stop` | 18 |
 | `memory[]`, `port[]`, `nextreg[]`, `addr`, `dma_copy`, `dma_fill`, `far` arrays | 19 |
+| `file_open`, `file_close`, `file_read`, `file_write`, `file_getc`, `file_seek`, `file_pos`, `file_size`, `file_exists`, `file_delete`, `file_opendir`, `file_readdir`, `file_exec` | 19.2 |
 | `len`, `sub`, `find`, `val`, `str`, `asc`, `chr`, `upper`, `lower` | 9 |
 | `abs`, `min`, `max`, `clamp`, `sqrt`, `sin`, `cos`, `atan2`, `round` | 10 |
 
@@ -1642,3 +1684,73 @@ register allocation.
 | `music.lz80n` | ProTracker 3 music, level meters |
 | `sprites.lz80n` | hardware sprites, PNG assets |
 | `benchmarks/benchmark.lz80n` | speed measurement |
+
+---
+
+## 25. The compiler and the IDE on the Next
+
+LZ80N also runs on the ZX Spectrum Next itself (a 2 MB machine): the
+compiler is written in LZ80N as well, and `lz80nc` builds it for the Next.
+
+```powershell
+lz80nc --export-selfhost D:\lz80n      # the .nex files, the runtime files, the manual
+```
+
+The release packages contain the result in `next/lz80n` (and as
+`lz80n-VERSION-zxnext-sdcard.zip`). Copy the `lz80n` folder to the SD card,
+then in NextBASIC:
+
+```
+.cd /lz80n
+.nexload ide.nex
+```
+
+### 25.1 The LZ80N IDE
+
+`ide.nex` is a full-screen editor in the 80-column text mode: menus (File,
+Edit, Build, Help), syntax highlighting, line numbers, a scroll bar, a
+status line, the Kempston mouse with a pointer (click, drag to select,
+double click a word, the right button opens a menu, the wheel scrolls).
+
+| Keys | |
+|------|---|
+| CAPS+5 6 7 8 | cursor left, down, up, right |
+| CAPS+3 / CAPS+4 | page up / page down |
+| CAPS+0 / CAPS+9 | delete back / forward |
+| CAPS+1 (EDIT) | the menus |
+| CAPS+SPACE (BREAK) | cancel |
+| SYM+Q W E A S D F G X | `[` `]` `^` `~` `\|` `\` `{` `}` and the backquote |
+| EXTEND (CAPS+SYM), then S O N | save, open (the file browser), new |
+| EXTEND, then B / R | compile / compile and run |
+| EXTEND, then F G | find, go to a line |
+| EXTEND, then M A C X V K | mark, select all, copy, cut, paste, delete the line |
+| EXTEND, then L / H | the build output / the manual at the word under the cursor |
+
+**Compile** (Build -> Compile, EXTEND B) saves the program and starts the
+compiler; it comes back to the IDE with the result. The compiler's messages
+appear on the screen like in a command line session and are shown in the
+IDE afterwards (Build -> Build output); an error puts the cursor on its
+line (in an included file it opens that file). **Compile & run** starts the
+program when it compiled.
+
+**File -> Open** shows the folders and the program files of a folder.
+**Help -> Language manual** shows this manual (Hungarian:
+**Kezikonyv (magyar)**); left / right go to the chapters, ENTER on a line of
+the contents opens its chapter, F finds a text.
+
+### 25.2 The stages
+
+The compiler runs as stages, each a `.nex` program that starts the next one:
+`lexer.nex` (tokens, includes and modules) -> `assets.nex` (pictures,
+samples, music; only when the program has assets) -> `codegen.nex` (the
+assembly, `out.asm`) -> `asm.nex` (`out.nex`). By hand, without the IDE:
+
+```
+COPY "myprog.lz80n" TO "in.lz80n"
+.nexload lexer.nex
+```
+
+Errors go to `codegen.err`, `asm.err` or `assets.err`; `build.log` has the
+messages of the stages. A small program takes about 10-15 seconds at 28 MHz.
+The language is the same as with `lz80nc` on a PC (`selfhost/README.md`
+lists the details).

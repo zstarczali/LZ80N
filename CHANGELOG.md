@@ -1,12 +1,48 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-11-22
+
+**LZ80N on the Next: the compiler and the LZ80N IDE**
+
+* The compiler is now also written in LZ80N (`selfhost/`): lexer, asset
+  converter (PNG, WAV, ProTracker 3), code generator and Z80N assembler, as
+  `.nex` programs that start one another on the Next (2 MB). It compiles the
+  same language as `lz80nc`, compiles itself (the bootstrap reaches a fixed
+  point), and its stages are tested against the Rust compiler.
+* `lz80nc --export-selfhost DIR` writes it for the SD card: the `.nex`
+  files, the runtime and module texts, the manuals (`help.txt`,
+  `help-hu.txt`) and `version.txt`.
+* The **LZ80N IDE** (`ide.nex`): a full-screen editor in the 80-column text
+  mode with menus, syntax highlighting, a scroll bar, the Kempston mouse
+  (click, drag to select, double click, a right-button menu, the wheel),
+  selections, a clipboard, find and go to line, a file browser, the
+  language manual in English and Hungarian (EXTEND H: at the word under the
+  cursor), and Build -> Compile / Compile & run: the compiler's messages
+  appear like a command line session and in the IDE; an error puts the
+  cursor on its line, in included files too. The Next keyboard's extra keys
+  (NextRegs `$B0` / `$B1`) work as well.
+* The release packages contain it in `next/lz80n`; it is also a separate
+  archive, `lz80n-1.4.0-zxnext-sdcard.zip`.
+
+**Language and library**
+
+* File module: files on the SD card through the esxDOS API (`file_open`,
+  `file_close`, `file_read`, `file_write`, `file_getc`, `file_seek`,
+  `file_pos`, `file_size`, `file_exists`, `file_delete`, `file_status`),
+  folders (`file_opendir`, `file_readdir`) and dot commands (`file_exec`).
+  esxDOS is called with the system variables mapped, so it works from
+  banked code too.
 
 **Tools**
 
+* A built-in Z80N assembler and NEX writer: `lz80nc` no longer needs
+  SjASMPlus (`--sjasmplus` still uses it; the NEX files are the same).
+* Errors in included files name the file.
 * `lz80nc.exe` carries its version information on Windows (Properties ->
   Details): version, product, description, author, copyright and licence,
   taken from `Cargo.toml`.
+* The built-in emulator: the Kempston mouse, the MMU registers' start
+  values, folders on the virtual SD card.
 
 ## 1.3.0 — 2026-11-21
 

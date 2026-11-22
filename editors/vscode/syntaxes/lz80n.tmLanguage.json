@@ -145,7 +145,7 @@
         {
           "comment": "built-in functions (compiler intrinsics)",
           "name": "support.function.builtin.lz80n",
-          "match": "\\b(print|write|at|ink|cls|border|vsync|pause|frames|key|kempston|any_key|wait_key|cpu_speed|random|seed|addr|dma_copy|dma_fill|plot|point|hline|layer2_clear|layer2_flip|sprite_load|ay_write|note_period|abs|min|max|clamp|sqrt|sin|cos|atan2|round|len|sub|find|val|asc|chr|str|upper|lower|draw_image|image_width|image_height|image|layer2_mode|layer2_width|layer2_height|sample_play|sample_loop|sample_stop|sample_playing|music_play|music_once|music_stop|music_playing)\\b(?=\\s*\\()"
+          "match": "\\b(print|write|at|ink|cls|border|vsync|pause|frames|key|kempston|any_key|wait_key|cpu_speed|random|seed|addr|dma_copy|dma_fill|plot|point|hline|layer2_clear|layer2_flip|sprite_load|ay_write|note_period|abs|min|max|clamp|sqrt|sin|cos|atan2|round|len|sub|find|val|asc|chr|str|upper|lower|draw_image|image_width|image_height|image|layer2_mode|layer2_width|layer2_height|sample_play|sample_loop|sample_stop|sample_playing|music_play|music_once|music_stop|music_playing|file_open|file_close|file_read|file_write|file_getc|file_seek|file_pos|file_size|file_exists|file_delete|file_opendir|file_readdir|file_exec)\\b(?=\\s*\\()"
         },
         {
           "comment": "hardware access arrays",
