@@ -5681,9 +5681,9 @@ if load_tokens() then
             k += 1
         end
         print("")
-        -- back to the editor when it started the compiler
-        if file_exists("editor.on") then
-            if not file_exec("nexload editor.nex") then print("cannot start editor.nex, error", file_status) end
+        -- back to the IDE when it started the compiler
+        if file_exists("ide.on") then
+            if not file_exec("nexload ide.nex") then print("cannot start ide.nex, error", file_status) end
         end
     else
         print("codegen:", nsy, "symbols, out.asm written")

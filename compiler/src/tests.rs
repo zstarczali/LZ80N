@@ -5658,12 +5658,12 @@ fn selfhost_codegen_music() {
     }
 }
 
-/// The editor (editor.nex) on the virtual SD card, driven by an editor.key
+/// The editor (ide.nex) on the virtual SD card, driven by an ide.key
 /// script: type a program, save it, Build -> Compile; the compiler chain
 /// comes back to the editor, which shows the result (and, after an error,
 /// puts the cursor on its line).
 #[test]
-fn selfhost_editor() {
+fn selfhost_ide() {
     let dir = std::env::temp_dir().join("lz80n_export_editor");
     let _ = std::fs::remove_dir_all(&dir);
     let built = crate::export_selfhost(&dir).unwrap();
@@ -5704,10 +5704,10 @@ fn selfhost_editor() {
     // comes back to it
     let edit_and_compile = |script: Vec<u8>| {
         let mut fs = base.clone();
-        fs.files.insert("editor.key".into(), script);
-        let (mut fs, cpu, next) = run("editor.nex", fs);
+        fs.files.insert("ide.key".into(), script);
+        let (mut fs, cpu, next) = run("ide.nex", fs);
         assert_eq!(next.as_deref(), Some("lexer.nex"), "status: {}", row(&cpu, 31));
-        for f in ["editor.on", "chain.on", "in.lz80n", "editor.ses"] {
+        for f in ["ide.on", "chain.on", "in.lz80n", "ide.ses"] {
             assert!(fs.files.contains_key(f), "no {f}");
         }
         let mut stages = vec![];
@@ -5720,15 +5720,15 @@ fn selfhost_editor() {
                 Some(n) => next = n,
                 None => panic!("the chain ended at {next} without the editor"),
             }
-            if next == "editor.nex" {
+            if next == "ide.nex" {
                 break;
             }
         }
         // the editor again, with an empty script: it shows the result and ends
-        fs.files.insert("editor.key".into(), vec![]);
-        let (fs, cpu, next) = run("editor.nex", fs);
+        fs.files.insert("ide.key".into(), vec![]);
+        let (fs, cpu, next) = run("ide.nex", fs);
         assert_eq!(next, None);
-        assert!(!fs.files.contains_key("editor.on"), "editor.on left behind");
+        assert!(!fs.files.contains_key("ide.on"), "ide.on left behind");
         (stages, fs, cpu)
     };
     let mut script = b"function sq(word x) -> word\rreturn x * x\rend\rprint(\"sq\", sq(1))".to_vec();
@@ -5762,17 +5762,17 @@ fn selfhost_editor() {
     let status = row(&cpu, 31);
     assert!(status.contains("error 2:7"), "status: {status}");
     assert!(status.contains("Ln     2"), "status: {status}");
-    let ses = String::from_utf8_lossy(&fs.files["editor.ses"]).to_string();
-    assert!(ses.starts_with("bad.lz80n\n1\n6\n"), "editor.ses: {ses:?}");
+    let ses = String::from_utf8_lossy(&fs.files["ide.ses"]).to_string();
+    assert!(ses.starts_with("bad.lz80n\n1\n6\n"), "ide.ses: {ses:?}");
 }
 
 /// The editor reads the keyboard matrix: letters, SYMBOL SHIFT symbols,
 /// CAPS SHIFT letters and CAPS+0 (DELETE).
 #[test]
-fn selfhost_editor_keyboard() {
-    let src = include_str!("../../selfhost/editor.lz80n");
+fn selfhost_ide_keyboard() {
+    let src = include_str!("../../selfhost/ide.lz80n");
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../selfhost");
-    let asm = crate::compile_main(src, Some(&dir.join("editor.lz80n")), "editor.nex", true, &dir, false).unwrap();
+    let asm = crate::compile_main(src, Some(&dir.join("ide.lz80n")), "ide.nex", true, &dir, false).unwrap();
     let out = crate::asm::assemble(&asm, &dir).unwrap();
     let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
     cpu.esx = Some(crate::emu::EsxFs::default());
@@ -5812,4 +5812,147 @@ fn selfhost_editor_keyboard() {
     }
     let row: String = (0..80).map(|c| cpu.mem[0x6000 + 160 + c * 2] as char).collect();
     assert_eq!(row.trim_end(), "   1 hi=Ta");
+}
+
+/// The IDE alone (ide.nex built by lz80nc), on a virtual SD card.
+fn ide_cpu(files: &[(&str, &[u8])]) -> (crate::emu::Cpu, u16) {
+    let src = include_str!("../../selfhost/ide.lz80n");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../selfhost");
+    let asm = crate::compile_main(src, Some(&dir.join("ide.lz80n")), "ide.nex", true, &dir, false).unwrap();
+    let out = crate::asm::assemble(&asm, &dir).unwrap();
+    let end = out.symbols16()["__main_end"];
+    let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::with_files(files));
+    (cpu, end)
+}
+
+fn ide_row(cpu: &crate::emu::Cpu, r: usize) -> String {
+    (0..80).map(|c| cpu.mem[0x6000 + r * 160 + c * 2] as char).collect::<String>().trim_end().to_string()
+}
+
+fn ide_attr(cpu: &crate::emu::Cpu, r: usize, c: usize) -> u8 {
+    cpu.mem[0x6000 + r * 160 + c * 2 + 1] >> 1
+}
+
+/// Selections from the keyboard: EXT M (mark) and the cursor keys, EXT A,
+/// copy, cut and paste of characters and of lines.
+#[test]
+fn selfhost_ide_selection() {
+    let ext = |c: u8| 0x80 | c;
+    let (left, right, up, down) = (3u8, 4u8, 1u8, 2u8);
+    let mut k = b"abc\rdef".to_vec();
+    // "ab" to the end of "def"
+    k.extend([ext(up), ext(b'm'), right, right, ext(b'c'), ext(down), ext(right), ext(b'v')]);
+    // everything, pasted on a new last line
+    k.extend([ext(b'a'), ext(b'c'), ext(down), ext(right), 13, ext(b'v')]);
+    // abc / defab / abc / defab: cut "fab\n" (line 2 col 3 .. line 3 col 1),
+    // paste it at the end of the last line
+    k.extend([ext(up), down, ext(left), right, right, ext(b'm'), down, left, left, ext(b'x')]);
+    k.extend([ext(down), ext(right), ext(b'v')]);
+    // copy a whole line (no selection) and paste it above the first one
+    k.extend([ext(up), ext(b'c'), ext(b'v')]);
+    k.extend([ext(b's')]);
+    k.extend(b"t.txt\r");
+    let (mut cpu, end) = ide_cpu(&[("ide.key", &k)]);
+    let mut n = 0u64;
+    while cpu.pc != end {
+        cpu.tick().unwrap();
+        n += 1;
+        assert!(n < 2_000_000_000, "the IDE did not finish");
+    }
+    let fs = cpu.esx.as_ref().unwrap();
+    let got = String::from_utf8_lossy(&fs.files["t.txt"]).to_string();
+    assert_eq!(got, "abc\nabc\ndeabc\ndefabfab\n\n", "status: {}", ide_row(&cpu, 31));
+}
+
+/// The mouse: a drag selects (shown in the selection colour), EXT X cuts
+/// it, the right button's menu pastes it back; a click on a line number
+/// selects the line; the menu bar opens with a click.
+#[test]
+fn selfhost_ide_mouse() {
+    let text = b"first line\nsecond line\nthird line\n";
+    let (mut cpu, _) = ide_cpu(&[("p.txt", text), ("ide.ses", b"p.txt\n0\n0\n0\n0\n")]);
+    // whole frames, with the mouse moved by (dx, dy) pointer pixels and the
+    // buttons (bit 1 left, bit 0 right; 1 = up)
+    let mut px = 160i32;
+    let mut py = 128i32;
+    let mut frame = |cpu: &mut crate::emu::Cpu, n: u32| {
+        let f = cpu.frame_count;
+        while cpu.frame_count < f + n {
+            cpu.tick().unwrap();
+        }
+    };
+    frame(&mut cpu, 20);
+    let mut go = |cpu: &mut crate::emu::Cpu, x: i32, y: i32, buttons: u8| {
+        // the editor clamps to 0..319 / 0..255
+        let x = x.clamp(0, 319);
+        let y = y.clamp(0, 255);
+        while px != x || py != y {
+            let dx = (x - px).clamp(-100, 100);
+            let dy = (y - py).clamp(-100, 100);
+            cpu.mouse[0] = cpu.mouse[0].wrapping_add(dx as u8);
+            cpu.mouse[1] = cpu.mouse[1].wrapping_sub(dy as u8); // the mouse's y grows upwards
+            px += dx;
+            py += dy;
+            frame(cpu, 1);
+        }
+        cpu.mouse[2] = 0xFC | buttons;
+        frame(cpu, 2);
+    };
+    let cell = |col: i32, row: i32| ((5 + col) * 4 + 1, row * 8 + 3);
+    // drag from "first |line" (col 6, row 1) to "sec|ond" (col 3, row 2)
+    let (x, y) = cell(6, 1);
+    go(&mut cpu, x, y, 3);
+    go(&mut cpu, x, y, 1);
+    let (x, y) = cell(3, 2);
+    go(&mut cpu, x, y, 1);
+    go(&mut cpu, x, y, 3);
+    frame(&mut cpu, 2);
+    assert_eq!(ide_attr(&cpu, 1, 5 + 6), 36, "selected");
+    assert_eq!(ide_attr(&cpu, 1, 5 + 10), 36, "the line break selected");
+    assert_eq!(ide_attr(&cpu, 2, 5 + 2), 36, "selected");
+    assert_ne!(ide_attr(&cpu, 1, 5 + 5), 36, "not selected");
+    // EXTEND, then X: cut
+    let press = |cpu: &mut crate::emu::Cpu, keys: &[(usize, u8)]| {
+        let f = cpu.frame_count;
+        cpu.keys = [0x1F; 8];
+        for &(r, b) in keys {
+            cpu.keys[r] &= !(1 << b);
+        }
+        while cpu.frame_count < f + 3 {
+            cpu.tick().unwrap();
+        }
+        cpu.keys = [0x1F; 8];
+        while cpu.frame_count < f + 6 {
+            cpu.tick().unwrap();
+        }
+    };
+    press(&mut cpu, &[(0, 0), (7, 1)]);
+    press(&mut cpu, &[(0, 2)]);
+    assert_eq!(ide_row(&cpu, 1), "   1 first ond line");
+    // the right button at the end of line 3: its menu, then Paste
+    let (x, y) = cell(10, 2);
+    go(&mut cpu, x, y, 3);
+    go(&mut cpu, x, y, 2);
+    go(&mut cpu, x, y, 3);
+    frame(&mut cpu, 2);
+    assert!(ide_row(&cpu, 3).contains("Cut"), "the menu: {}", ide_row(&cpu, 3));
+    let paste_row = (0..32).find(|&r| ide_row(&cpu, r).contains("Paste")).expect("no Paste in the menu");
+    go(&mut cpu, x, paste_row as i32 * 8 + 3, 3);
+    go(&mut cpu, x, paste_row as i32 * 8 + 3, 1);
+    go(&mut cpu, x, paste_row as i32 * 8 + 3, 3);
+    frame(&mut cpu, 2);
+    assert_eq!(ide_row(&cpu, 2), "   2 third lineline");
+    assert_eq!(ide_row(&cpu, 3), "   3 sec");
+    // a line number selects the line
+    go(&mut cpu, 4, 8 + 3, 1);
+    go(&mut cpu, 4, 8 + 3, 3);
+    frame(&mut cpu, 2);
+    assert_eq!((ide_attr(&cpu, 1, 5), ide_attr(&cpu, 1, 5 + 14)), (36, 36));
+    // the menu bar: File
+    go(&mut cpu, 2 * 4 + 1, 3, 1);
+    go(&mut cpu, 2 * 4 + 1, 3, 3);
+    frame(&mut cpu, 2);
+    assert!(ide_row(&cpu, 1).contains("New"), "File menu: {}", ide_row(&cpu, 1));
+    assert!(ide_row(&cpu, 0).contains("LZ80N IDE"));
 }
