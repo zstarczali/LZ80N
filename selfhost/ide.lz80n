@@ -16,7 +16,7 @@
 --   EXTEND (CAPS+SYMBOL) then: S save, O open, N new, B compile, R compile
 --   and run, F find, G go to line, M mark (the cursor keys then select),
 --   A select all, C copy, X cut, V paste (the line without a selection),
---   K delete line, cursor left / right = start / end of the line,
+--   K delete line, I format the code, cursor left / right = start / end of the line,
 --   cursor up / down = top / end of the text.
 --
 -- Files: the program as text (LF lines); ide.ses keeps the session
@@ -589,6 +589,19 @@ function colour_ln(bool in_asm)
     end
 end
 
+-- the `asm` states of all the lines (cur_line stored)
+function asm_all()
+    bool st = false
+    word l = 0
+    while l < nlines do
+        if st then lasm[l] = 1 else lasm[l] = 0 end
+        get_ln(l)
+        colour_ln(st)
+        st = asm_after
+        l += 1
+    end
+end
+
 -- the `asm` states of the lines from line l on (until they stop changing)
 function update_asm(word l)
     bool st = false
@@ -753,11 +766,12 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "", "Build output  EXT L", "Language manual"
+    "Keys", "About", "", "Build output  EXT L", "Language manual",
+    "Format code   EXT I"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
-byte menu_order[19] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 16}
-byte menu_first[5] = {0, 4, 13, 16, 19}
+byte menu_order[20] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 13, 14, 18, 15, 19, 16}
+byte menu_first[5] = {0, 4, 14, 17, 20}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -892,6 +906,7 @@ string help_text[] = {
     "  S save  O open  N new  B compile  R compile & run",
     "  F find  G go to line  K delete line  L build output",
     "  H the manual at the word under the cursor",
+    "  I format the code (indents the blocks)",
     "  M mark (then the cursor keys select)  A select all",
     "  C copy  X cut  V paste (a line without a selection)",
     "  left / right: start / end of the line",
@@ -903,7 +918,7 @@ string help_text[] = {
     "",
     "Any key closes this."
 }
-const NHELP = 24
+const NHELP = 25
 
 -- the build output: the last lines of build.log in a box at the bottom
 const OUT_MAX = 16
@@ -2019,6 +2034,157 @@ function mark_cmd()
     redraw_all = true
 end
 
+-- ---------------------------------------------------------------- format
+
+-- Edit -> Format code: every line indented by its blocks (4 spaces a level:
+-- function, if, do, struct, class, interrupt, asm ... end; else / elseif one
+-- level back; open brackets), the spaces at the line ends removed. The lines
+-- inside an `asm` block stay as they are.
+byte fmt_open = 0
+byte fmt_close = 0
+bool fmt_lead = false       -- the line starts with end, else, elseif or a closing bracket
+
+function fmt_opener(byte a, byte b) -> bool
+    byte c = lbuf[a]
+    if c == 'f' then return word_is(a, b, "function") end
+    if c == 'i' then return word_is(a, b, "if") or word_is(a, b, "interrupt") end
+    if c == 'd' then return word_is(a, b, "do") end
+    if c == 's' then return word_is(a, b, "struct") end
+    if c == 'c' then return word_is(a, b, "class") end
+    if c == 'a' and word_is(a, b, "asm") then
+        -- `asm` then the end of the line: a block
+        while b < blen and lbuf[b] == ' ' do b += 1 end
+        return b == blen
+    end
+    return false
+end
+
+-- the blocks and brackets lbuf[a..blen) opens and closes (not in strings
+-- and comments)
+function fmt_scan(byte a)
+    fmt_open = 0
+    fmt_close = 0
+    fmt_lead = false
+    bool first = true
+    byte i = a
+    while i < blen do
+        byte c = lbuf[i]
+        if c == '-' and i + 1 < blen and lbuf[i + 1] == '-' then return end
+        if c == 34 or c == 39 then
+            i += 1
+            while i < blen and lbuf[i] ~= c do
+                if lbuf[i] == 92 then i += 1 end
+                i += 1
+            end
+            i += 1
+            first = false
+        elseif is_alpha(c) then
+            byte b = i
+            while b < blen and (is_alpha(lbuf[b]) or is_digit(lbuf[b])) do b += 1 end
+            if word_is(i, b, "end") then
+                fmt_close += 1
+                if first then fmt_lead = true end
+            elseif word_is(i, b, "else") or word_is(i, b, "elseif") then
+                if first then fmt_lead = true end
+            elseif fmt_opener(i, b) then
+                fmt_open += 1
+            end
+            first = false
+            i = b
+        elseif is_digit(c) then
+            while i < blen and (is_alpha(lbuf[i]) or is_digit(lbuf[i])) do i += 1 end
+            first = false
+        else
+            if c == '(' or c == '[' or c == '{' then
+                fmt_open += 1
+            elseif c == ')' or c == ']' or c == '}' then
+                fmt_close += 1
+                if first then fmt_lead = true end
+            end
+            if c ~= ' ' then first = false end
+            i += 1
+        end
+    end
+end
+
+-- does the `asm` block end at this line (its first word: end)?
+function fmt_asm_end(byte a) -> bool
+    if a + 3 > blen then return false end
+    if not word_is(a, a + 3, "end") then return false end
+    if a + 3 == blen then return true end
+    byte c = lbuf[a + 3]
+    return c == ' ' or c == ';'
+end
+
+-- line l (in lbuf) written again with ind spaces before its text
+-- lbuf[a..e): true when it changed
+function fmt_put(word l, byte ind, byte a, byte e) -> bool
+    if e == a then ind = 0 end
+    if word(ind) + e - a > 255 then ind = byte(255 - (e - a)) end
+    word n = word(ind) + e - a
+    if a == ind and e == blen then return false end
+    word s = lslot[l]
+    sset(s, 0, byte(n))
+    word k = 0
+    while k < ind do
+        k += 1
+        sset(s, k, ' ')
+    end
+    byte i = a
+    while i < e do
+        k += 1
+        sset(s, k, lbuf[i])
+        i += 1
+    end
+    return true
+end
+
+function format_code()
+    store_cur()
+    cur_line = 0xFFFF
+    asm_all()
+    word level = 0
+    word nchanged = 0
+    word l = 0
+    while l < nlines do
+        get_ln(l)
+        byte a = 0
+        while a < blen and lbuf[a] == ' ' do a += 1 end
+        byte e = blen
+        while e > a and lbuf[e - 1] == ' ' do e -= 1 end
+        if lasm[l] ~= 0 then
+            -- inside an `asm` block: only its `end` moves
+            if fmt_asm_end(a) then
+                if level > 0 then level -= 1 end
+                if fmt_put(l, byte(level * 4), a, e) then nchanged += 1 end
+            end
+        else
+            fmt_scan(a)
+            word ind = level
+            if fmt_lead and ind > 0 then ind -= 1 end
+            if ind > 60 then ind = 60 end
+            if fmt_put(l, byte(ind * 4), a, e) then nchanged += 1 end
+            level += fmt_open
+            if level >= fmt_close then level -= fmt_close else level = 0 end
+        end
+        l += 1
+    end
+    load_cur(cy)
+    if cx > cur_len then cx = cur_len end
+    if nchanged == 0 then
+        set_msg("format: nothing to change", C_STATUS)
+    else
+        if not modified then
+            modified = true
+            draw_menu_bar()
+        end
+        set_msg("format: " .. str(nchanged) .. " lines changed", C_STATUS)
+    end
+    if level ~= 0 then set_msg("format: a block or bracket is not closed", C_ERR) end
+    scroll_to_cursor()
+    redraw_all = true
+end
+
 -- ---------------------------------------------------------------- files
 
 byte fbuf[256]
@@ -2104,7 +2270,7 @@ function load_file(string name) -> bool
     file_close(fh)
     -- the final newline makes an empty last line: drop it
     if nlines > 1 and line_len(nlines - 1) == 0 then delete_ln(nlines - 1) end
-    update_asm(0)
+    asm_all()
     cy = 0
     cx = 0
     top = 0
@@ -2385,6 +2551,8 @@ function run_item(byte it)
         show_output()
     elseif it == 19 then
         hv_show("lib/help.txt", hv_cur)
+    elseif it == 20 then
+        format_code()
 
     end
 end
@@ -2439,6 +2607,8 @@ function ext_command(word c)
         show_output()
     elseif c == 'h' then
         context_help()
+    elseif c == 'i' then
+        format_code()
     elseif c == K_LEFT then
         move_to(cy, 0)
     elseif c == K_RIGHT then

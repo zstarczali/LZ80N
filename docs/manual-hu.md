@@ -1756,15 +1756,25 @@ működnek.
 | EXTEND, majd F G | keresés, ugrás sorra |
 | EXTEND, majd M A C X V K | jelölés, mindent kijelöl, másolás, kivágás, beillesztés, sor törlése |
 | EXTEND, majd L / H | a fordítás kimenete / a kézikönyv a kurzor alatti szónál |
+| EXTEND, majd I | a kód formázása |
 
 A **fordítás** (Build -> Compile, EXTEND B) elmenti a programot és elindítja
 a fordítót, amely az eredménnyel visszatér az IDE-be. Fordítás közben a
-képernyő továbbra is az IDE-t mutatja, a fordító üzenetei (és az egyes
+képernyő továbbra is az IDE-t mutatja (a program nélkül), a fordító üzenetei (és az egyes
 lépések ideje) egy ablakban jelennek meg; utána az IDE is megmutatja őket
 (Build -> Build output, EXTEND L). A hiba piros, és a kurzor a hibás sorra
 áll (include-olt fájlban hibánál azt a fájlt nyitja meg; a fordított fő
 fájl ugyanaz marad, ezt a menüsor mutatja). A **Compile & run** sikeres
 fordítás után el is indítja a programot.
+
+Az **Edit -> Format code** (EXTEND I) minden sort a blokkjai szerint húz be,
+szintenként 4 szóközzel: a `function`, `if`, `while` / `for` ... `do`,
+`struct`, `class`, `interrupt` és `asm` egy szintet nyit, az `end` lezárja,
+az `else` és az `elseif` egy szinttel kijjebb áll, a nyitott zárójelen belüli
+sorok (egy több soros `{...}` lista) egy szinttel beljebb. A sorvégi
+szóközöket is törli. Az `asm` blokk sorai változatlanok maradnak; a
+szövegek és a megjegyzések nem számítanak. Az állapotsor kiírja, hány sor
+változott, vagy hogy egy blokk vagy zárójel nincs lezárva.
 
 A **File -> Open** fájlböngésző: egy mappa almappáit és programfájljait
 (`.lz80n`, `.asm`, `.txt`, `.md`, `.bas`, `.log`) mutatja méretükkel, elöl
