@@ -90,13 +90,38 @@ function next_in() -> byte
     return byte(g)
 end
 
+-- size - pos, at most 60000 (word arithmetic while it is above 2)
+word rest = 0
+function sync_rest()
+    long r = size - pos
+    if r < 0 then r = 0 end
+    if r > 60000 then r = 60000 end
+    rest = word(r)
+end
+
 function at_end() -> bool
+    if rest > 2 then return false end
     return pos >= size
 end
 
 -- consume c0
 function bump() -> byte
     byte c = c0
+    if rest > 2 then
+        -- (the common case: far from the end)
+        pos += 1
+        rest -= 1
+        if c == 10 then
+            lno += 1
+            cno = 1
+        else
+            cno += 1
+        end
+        c0 = c1
+        c1 = next_in()
+        if rest <= 2 then sync_rest() end
+        return c
+    end
     if pos < size then pos += 1 end
     if c == 10 then
         lno += 1
@@ -107,6 +132,7 @@ function bump() -> byte
     c0 = c1
     c1 = 0
     if pos + 1 < size then c1 = next_in() end
+    sync_rest()
     return c
 end
 
@@ -184,8 +210,17 @@ byte fidx = 0
 byte nfiles = 1
 string src_names[8]
 
+-- a few tokens after `asset`: its path (a string) is made relative to the
+-- folder of the program, as the Rust compiler does with the declaring file
+byte asset_pend = 0
+
 function out_head(byte kind, word l, word c)
-    if kind == T_ASSET then has_assets = true end
+    if kind == T_ASSET then
+        has_assets = true
+        asset_pend = 6
+    elseif asset_pend > 0 then
+        asset_pend -= 1
+    end
     out_byte(kind)
     if l > 8191 then l = 8191 end
     out_word(l + word(fidx) * 8192)
@@ -365,6 +400,22 @@ function string_lit_text()
     str_emit = true
 end
 
+-- cur_dir in front of the text (an asset's path)
+function dir_path()
+    byte n = len(cur_dir)
+    word i = tlen
+    while i > 0 do
+        i -= 1
+        text[i + n] = text[i]
+    end
+    byte k = 0
+    while k < n do
+        text[k] = asc(cur_dir, k)
+        k += 1
+    end
+    tlen += n
+end
+
 function string_lit(word l, word c)
     bump()
     tlen = 0
@@ -376,8 +427,10 @@ function string_lit(word l, word c)
         end
         if ch == '"' then
             if str_emit then
+                if asset_pend > 0 and cur_dir ~= "" and (tlen == 0 or text[0] ~= '/') then dir_path() end
                 out_head(T_STR, l, c)
                 out_text()
+                asset_pend = 0
             end
             return
         end
@@ -589,7 +642,7 @@ end
 
 word ntokens = 0
 string included[16]
-string cur_dir = ""         -- the directory of the file being read
+string cur_dir = ""         -- the folder of the file being read
 byte nincluded = 0
 
 -- lex one file (no T_EOF); false if it cannot be opened
@@ -608,6 +661,7 @@ function lex_file(string name) -> bool
     end
     size = file_size(inh)
     pos = 0
+    sync_rest()
     c0 = 0
     c1 = 0
     lno = 1
@@ -662,7 +716,7 @@ function include_file(word l, word c)
     word ln = lno
     word cn = cno
     string dir = cur_dir
-    -- the directory of the included file
+    -- the folder of the included file
     cur_dir = ""
     byte j = len(path)
     while j > 0 and asc(path, j - 1) ~= '/' do j -= 1 end
@@ -679,6 +733,7 @@ function include_file(word l, word c)
     inh = h
     size = sz
     pos = p
+    sync_rest()
     c0 = a
     c1 = b
     lno = ln
@@ -692,8 +747,8 @@ const NMODULES = 6
 -- (a `|` keeps the words out of this source, which would otherwise pull the
 -- modules into itself; drop_bars removes it)
 string module_files[] = {
-    "lib_s|prites.lz80n", "lib_l|ayer2.lz80n", "lib_p|alette.lz80n",
-    "lib_file.lz80n", "lib_c|opper.lz80n", "lib_sound.lz80n"
+    "lib/lib_s|prites.lz80n", "lib/lib_l|ayer2.lz80n", "lib/lib_p|alette.lz80n",
+    "lib/lib_file.lz80n", "lib/lib_c|opper.lz80n", "lib/lib_sound.lz80n"
 }
 const NPATTERNS = 28
 string patterns[] = {
@@ -744,9 +799,17 @@ function find_modules()
     if h == FILE_ERROR then return end
     byte prog[28]               -- characters of each pattern matched so far
     for k = 0, NPATTERNS - 1 do prog[k] = 0 end
+    -- the characters that start a pattern: other characters are skipped
+    -- quickly while no pattern is half matched
+    byte starts[128]
+    for k = 0, 127 do starts[k] = 0 end
+    for k = 0, NPATTERNS - 1 do starts[asc(patterns[k], 0) & 127] = 1 end
+    byte busy = 0               -- patterns with prog > 0
     word g = file_getc(h)
     while g ~= FILE_EOF do
         byte ch = byte(g)
+        if busy ~= 0 or starts[ch & 127] ~= 0 then
+        busy = 0
         for k = 0, NPATTERNS - 1 do
             byte m = prog[k]
             if asc(patterns[k], m) == ch then
@@ -761,6 +824,8 @@ function find_modules()
                 m = 0
             end
             prog[k] = m
+            if m ~= 0 then busy += 1 end
+        end
         end
         g = file_getc(h)
     end
@@ -783,7 +848,7 @@ if ih ~= FILE_ERROR then
     file_close(ih)
     if nm ~= "" then prog_name = nm end
 end
-log_line("LZ80N: compiling " .. prog_name)
+log_say("LZ80N: compiling " .. prog_name)
 byte probe = file_open("expand.on", FILE_READ)
 if probe ~= FILE_ERROR then
     expand = true
@@ -792,7 +857,7 @@ end
 outh = file_open("tokens.bin", FILE_WRITE)
 if expand then
     -- the built-in constants (KEY_A, BLACK, ...) come first
-    if not lex_file("lib_consts.lz80n") then error(1, 1, "cannot read lib_consts.lz80n") end
+    if not lex_file("lib/lib_consts.lz80n") then error(1, 1, "cannot read lib/lib_consts.lz80n") end
     drop_all_bars()
     find_modules()
     for k = 0, NMODULES - 1 do
@@ -803,9 +868,15 @@ if expand then
 end
 included[0] = "in.lz80n"
 nincluded = 1
+-- in.lz80n is a copy of the program: its includes and assets are relative
+-- to the program's folder (from its name in ide.on)
+cur_dir = ""
+byte pj = len(prog_name)
+while pj > 0 and asc(prog_name, pj - 1) ~= '/' do pj -= 1 end
+if pj > 0 then cur_dir = sub(prog_name, 0, pj) end
 if not failed then
     if not lex_file("in.lz80n") then
-        log_line("cannot open in.lz80n, error " .. str(file_status))
+        log_say("cannot open in.lz80n, error " .. str(file_status))
     end
 end
 if not failed then out_head(T_EOF, lno, cno) end

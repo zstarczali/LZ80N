@@ -10,17 +10,27 @@
   same language as `lz80nc`, compiles itself (the bootstrap reaches a fixed
   point), and its stages are tested against the Rust compiler.
 * `lz80nc --export-selfhost DIR` writes it for the SD card: the `.nex`
-  files, the runtime and module texts, the manuals (`help.txt`,
-  `help-hu.txt`) and `version.txt`.
+  files; `lib/` with the runtime and module texts, the manual (laid out
+  for the 80-column screen) and `version.txt`; `src/` with its sources. The
+  release's Next package adds `examples/`. A program's includes and assets
+  are relative to its own folder.
 * The **LZ80N IDE** (`ide.nex`): a full-screen editor in the 80-column text
   mode with menus, syntax highlighting, a scroll bar, the Kempston mouse
   (click, drag to select, double click, a right-button menu, the wheel),
   selections, a clipboard, find and go to line, a file browser, the
-  language manual in English and Hungarian (EXTEND H: at the word under the
-  cursor), and Build -> Compile / Compile & run: the compiler's messages
-  appear like a command line session and in the IDE; an error puts the
-  cursor on its line, in included files too. The Next keyboard's extra keys
+  language manual without the parts about the PC (EXTEND H: at the word
+  under the cursor), and Build -> Compile / Compile & run: the compiler's
+  messages appear in a window on a screen that looks like the IDE, and in
+  the IDE afterwards; an error puts the cursor on its line, in included
+  files too. The Next keyboard's extra keys
   (NextRegs `$B0` / `$B1`) work as well.
+* Compiling on the Next: the runtime is assembled once by the export
+  (`lib/rt_core.bin` and its labels) instead of with every program; the
+  assembler reads blocks and skips the work its first pass does not need;
+  the code generator compiles only the functions the program can call;
+  a small program compiles about 6 times faster than at first (about 2
+  seconds of work at 28 MHz), one with the Layer 2 module about 2.5 times
+  (about 13 seconds).
 * The release packages contain it in `next/lz80n`; it is also a separate
   archive, `lz80n-1.4.0-zxnext-sdcard.zip`.
 

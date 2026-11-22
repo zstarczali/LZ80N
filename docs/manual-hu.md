@@ -1726,12 +1726,22 @@ majd NextBASIC-ben:
 .nexload ide.nex
 ```
 
+A mappában van az öt `.nex` program; a `lib/` mappában a futtatókörnyezet, a
+modulok és a kézikönyvek; az `examples/` mappában a példaprogramok a
+képeikkel, hangjaikkal és include fájljaikkal (kezdésnek nyisd meg az
+`examples/hello.lz80n`-t). Egy program include-jai és erőforrásai a saját
+mappájához képest értendők.
+
 ### 25.1 Az LZ80N IDE
 
 Az `ide.nex` teljes képernyős szerkesztő 80 oszlopos szöveges módban:
 menük (File, Edit, Build, Help), szintaxiskiemelés, sorszámok, görgetősáv,
 állapotsor, Kempston egér mutatóval (kattintás, kijelölés húzással, szó
-kijelölése dupla kattintással, a jobb gomb menüt nyit, a görgő görget).
+kijelölése dupla kattintással, a sorszámra kattintva az egész sor, a jobb
+gomb menüt nyit, a görgő görget, a görgetősáv lapoz és húzható). Indításkor
+nyitóképernyő jelenik meg (Help -> About újra megmutatja). A Next
+billentyűzet saját kurzor-, DELETE, EDIT, BREAK és EXTEND billentyűi is
+működnek.
 
 | Billentyűk | |
 |------------|---|
@@ -1748,17 +1758,23 @@ kijelölése dupla kattintással, a jobb gomb menüt nyit, a görgő görget).
 | EXTEND, majd L / H | a fordítás kimenete / a kézikönyv a kurzor alatti szónál |
 
 A **fordítás** (Build -> Compile, EXTEND B) elmenti a programot és elindítja
-a fordítót, amely az eredménnyel visszatér az IDE-be. A fordító üzenetei
-parancssorszerűen jelennek meg a képernyőn, utána az IDE is megmutatja őket
-(Build -> Build output); hibánál a kurzor a hibás sorra áll (include-olt
-fájlban hibánál azt a fájlt nyitja meg). A **Compile & run** sikeres
+a fordítót, amely az eredménnyel visszatér az IDE-be. Fordítás közben a
+képernyő továbbra is az IDE-t mutatja, a fordító üzenetei (és az egyes
+lépések ideje) egy ablakban jelennek meg; utána az IDE is megmutatja őket
+(Build -> Build output, EXTEND L). A hiba piros, és a kurzor a hibás sorra
+áll (include-olt fájlban hibánál azt a fájlt nyitja meg; a fordított fő
+fájl ugyanaz marad, ezt a menüsor mutatja). A **Compile & run** sikeres
 fordítás után el is indítja a programot.
 
-A **File -> Open** egy mappa almappáit és programfájljait mutatja. A
-**Help -> Language manual** az angol, a **Kezikonyv (magyar)** ezt a
-kézikönyvet mutatja (ékezetek nélkül, mert a Next betűkészletében nincsenek);
-balra / jobbra a fejezetek között lép, a tartalomjegyzék egy során az ENTER
-megnyitja a fejezetet, az F szöveget keres.
+A **File -> Open** fájlböngésző: egy mappa almappáit és programfájljait
+(`.lz80n`, `.asm`, `.txt`, `.md`, `.bas`, `.log`) mutatja méretükkel, elöl
+a mappákkal; az ENTER vagy a dupla kattintás megnyitja, egy betű az azzal
+kezdődő nevekre ugrik, a `<type a name>` nevet kér.
+
+A **Help -> Language manual** a kézikönyv angol változatát mutatja, a PC-s
+használatról szóló részek nélkül: balra / jobbra a fejezetek között lép, a
+tartalomjegyzék egy során az ENTER megnyitja a fejezetet, az F szöveget
+keres, az N újra keresi. Az EXTEND H a kurzor alatti szónál nyitja meg.
 
 ### 25.2 A fordítás lépései
 
@@ -1774,6 +1790,12 @@ COPY "myprog.lz80n" TO "in.lz80n"
 ```
 
 A hibák a `codegen.err`, `asm.err` vagy `assets.err` fájlba kerülnek; a
-`build.log` a lépések üzeneteit tartalmazza. Egy kis program fordítása
-28 MHz-en kb. 10-15 másodperc. A nyelv ugyanaz, mint a PC-s `lz80nc`-vel
-(a részletek: `selfhost/README.md`).
+`build.log` a lépések üzeneteit tartalmazza, amelyek fordítás közben egy, az
+IDE-hez hasonló képernyőn, egy ablakban is megjelennek. Egy kis program
+fordítása 28 MHz-en kb. 2 másodperc munka (plusz a lépések betöltése az SD
+kártyáról); egy Layer 2 modult használó programé kb. 13 másodperc. Csak azok
+a függvények fordulnak le, amelyeket a program meghívhat (egy modulban sok
+olyan van, amit nem használ), a futtatókörnyezet pedig előre lefordítva
+érkezik (`lib/rt_core.bin`).
+
+A nyelv ugyanaz, mint a PC-s `lz80nc`-vel (a részletek: `selfhost/README.md`).

@@ -671,6 +671,6 @@ bank 5 (the system variables) in slot 2, through the resident `rt_esx`
 
 `selfhost/` holds the compiler written in LZ80N (lexer, assets, codegen,
 assembler stages and the IDE); `lz80nc --export-selfhost DIR` builds them
-with the runtime and module texts, `help.txt` / `help-hu.txt` (the manuals
+with the runtime and module texts, `help.txt` (the English manual, laid out
 in ASCII) and `version.txt`. The stages chain with `file_exec("nexload ...")`;
 `selfhost/README.md` describes them and the IDE.

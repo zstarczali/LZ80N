@@ -88,6 +88,31 @@ pub fn assemble(src: &str, base_dir: &Path) -> Result<Assembled, Vec<AsmError>> 
     Ok(Assembled { nex, symbols: syms })
 }
 
+/// Assemble a block of code at `ORG $8000` (bank 2, as mapped at the start)
+/// up to the symbol `end`: its bytes and its symbols. The self-hosted
+/// compiler takes the runtime this way, ready-made.
+pub fn assemble_block(src: &str, base_dir: &Path, end: &str) -> Result<(Vec<u8>, HashMap<String, i64>), Vec<AsmError>> {
+    let lines: Vec<Line> = src.lines().enumerate().map(|(i, t)| Line::parse(i + 1, t)).collect();
+    let mut syms: HashMap<String, i64> = HashMap::new();
+    let mut prev: Option<HashMap<String, i64>> = None;
+    for _ in 0..MAX_PASSES {
+        let mut p = Pass::new(&mut syms, false, base_dir);
+        p.run(&lines);
+        if prev.as_ref() == Some(&*p.syms) {
+            break;
+        }
+        prev = Some(p.syms.clone());
+    }
+    let mut p = Pass::new(&mut syms, true, base_dir);
+    p.run(&lines);
+    if !p.errors.is_empty() {
+        return Err(p.errors);
+    }
+    let len = (p.syms[end] - 0x8000) as usize;
+    let bytes = p.bank_bytes(2)[..len].to_vec();
+    Ok((bytes, syms))
+}
+
 // ---------------------------------------------------------------- lines
 
 struct Line {
@@ -531,7 +556,11 @@ impl<'a> Pass<'a> {
             self.error("INCBIN needs a quoted file name");
             return;
         };
-        let path: PathBuf = self.base_dir.join(name);
+        let mut path: PathBuf = self.base_dir.join(name);
+        #[cfg(test)]
+        if !path.exists() {
+            path = crate::tests::sh_support_dir().join(name);
+        }
         let data = match std::fs::read(&path) {
             Ok(d) => d,
             Err(e) => {

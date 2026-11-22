@@ -8,6 +8,7 @@ mod ast;
 mod codegen;
 mod diag;
 mod font;
+mod helptext;
 mod include;
 mod lexer;
 mod parser;
@@ -162,8 +163,8 @@ pub const SELFHOST_SOURCES: &[(&str, &str)] = &[
 ];
 
 /// The files the self-hosted compiler reads from the SD card besides the
-/// program: the runtime texts, the file module, and `expand.on` (the lexer
-/// expands includes and modules).
+/// program: the runtime texts and the modules (in `lib/`), and `expand.on`
+/// (the lexer expands includes and modules).
 pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
     let startup = runtime::STARTUP.trim_end();
     let startup = startup.strip_suffix("ei").expect("startup ends with ei");
@@ -172,24 +173,24 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
         let row: Vec<String> = glyph.iter().map(|b| format!("${b:02X}")).collect();
         font.push_str(&format!("    db {}\n", row.join(",")));
     }
-    vec![
-        ("rt_start.asm".into(), startup.as_bytes().to_vec()),
-        ("rt_lib.asm".into(), runtime::RUNTIME.as_bytes().to_vec()),
-        ("rt_font.asm".into(), font.into_bytes()),
-        ("rt_long.asm".into(), runtime::long().into_bytes()),
-        ("rt_banked.asm".into(), runtime::BANKED.as_bytes().to_vec()),
-        ("rt_images.asm".into(), runtime::IMAGES.as_bytes().to_vec()),
-        ("rt_samples.asm".into(), runtime::SAMPLES.as_bytes().to_vec()),
-        ("rt_notes.asm".into(), codegen::notes_asm().into_bytes()),
-        ("rt_trig.asm".into(), codegen::trig_asm().into_bytes()),
-        ("rt_music.asm".into(), runtime::MUSIC.as_bytes().to_vec()),
-        ("lib_file.lz80n".into(), prelude::FILE.as_bytes().to_vec()),
-        ("lib_layer2.lz80n".into(), prelude::LAYER2.as_bytes().to_vec()),
-        ("lib_palette.lz80n".into(), prelude::PALETTE.as_bytes().to_vec()),
-        ("lib_copper.lz80n".into(), prelude::COPPER.as_bytes().to_vec()),
-        ("lib_sprites.lz80n".into(), prelude::SPRITES.as_bytes().to_vec()),
-        ("lib_sound.lz80n".into(), prelude::SOUND.as_bytes().to_vec()),
-        ("lib_consts.lz80n".into(), {
+    let mut files: Vec<(String, Vec<u8>)> = vec![
+        ("lib/rt_start.asm".into(), startup.as_bytes().to_vec()),
+        ("lib/rt_lib.asm".into(), runtime::RUNTIME.as_bytes().to_vec()),
+        ("lib/rt_font.asm".into(), font.into_bytes()),
+        ("lib/rt_long.asm".into(), runtime::long().into_bytes()),
+        ("lib/rt_banked.asm".into(), runtime::BANKED.as_bytes().to_vec()),
+        ("lib/rt_images.asm".into(), runtime::IMAGES.as_bytes().to_vec()),
+        ("lib/rt_samples.asm".into(), runtime::SAMPLES.as_bytes().to_vec()),
+        ("lib/rt_notes.asm".into(), codegen::notes_asm().into_bytes()),
+        ("lib/rt_trig.asm".into(), codegen::trig_asm().into_bytes()),
+        ("lib/rt_music.asm".into(), runtime::MUSIC.as_bytes().to_vec()),
+        ("lib/lib_file.lz80n".into(), prelude::FILE.as_bytes().to_vec()),
+        ("lib/lib_layer2.lz80n".into(), prelude::LAYER2.as_bytes().to_vec()),
+        ("lib/lib_palette.lz80n".into(), prelude::PALETTE.as_bytes().to_vec()),
+        ("lib/lib_copper.lz80n".into(), prelude::COPPER.as_bytes().to_vec()),
+        ("lib/lib_sprites.lz80n".into(), prelude::SPRITES.as_bytes().to_vec()),
+        ("lib/lib_sound.lz80n".into(), prelude::SOUND.as_bytes().to_vec()),
+        ("lib/lib_consts.lz80n".into(), {
             let mut c = String::from("-- the built-in constants (compiler/src/codegen.rs)\n");
             for (n, v) in codegen::builtin_consts() {
                 c.push_str(&format!("const {n} = {v}\n"));
@@ -197,7 +198,24 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
             c.into_bytes()
         }),
         ("expand.on".into(), b"1".to_vec()),
-    ]
+    ];
+    // the runtime and the font, assembled at $8000, and their labels: the
+    // self-hosted code generator puts them in with INCBIN and EQUs
+    let core_src = format!(
+        "    OPT --zxnext\n    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\n{}\n{}\nrt_core_end:\n",
+        runtime::RUNTIME,
+        String::from_utf8_lossy(&files.iter().find(|f| f.0 == "lib/rt_font.asm").unwrap().1)
+    );
+    let (bin, syms) = asm::assemble_block(&core_src, Path::new("."), "rt_core_end").expect("the runtime assembles");
+    let mut names: Vec<_> = syms.iter().filter(|(n, _)| !n.contains('.') && *n != "rt_core_end").collect();
+    names.sort();
+    let mut sym = String::from("; the labels of rt_core.bin (the runtime and the font at $8000)\n");
+    for (n, v) in names {
+        sym.push_str(&format!("{n} equ ${v:04X}\n"));
+    }
+    files.push(("lib/rt_core.bin".into(), bin));
+    files.push(("lib/rt_core.sym".into(), sym.into_bytes()));
+    files
 }
 
 /// A program built for the SD card: (file name, NEX, symbols).
@@ -209,27 +227,32 @@ pub type Built = (String, Vec<u8>, std::collections::HashMap<String, i64>);
 pub fn export_selfhost(dir: &Path) -> Result<Vec<Built>, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let write = |name: &str, data: &[u8]| {
-        std::fs::write(dir.join(name), data).map_err(|e| format!("{}: {e}", dir.join(name).display()))
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()))
     };
     for (name, data) in selfhost_support_files() {
         write(&name, &data)?;
     }
+    // the compiler's own sources (it can compile itself on the Next too)
     for (name, src) in SELFHOST_SOURCES {
-        write(name, src.as_bytes())?;
+        write(&format!("src/{name}"), src.as_bytes())?;
     }
     write("chain.on", b"1")?;
     // the language manuals for the IDE's help (plain ASCII: the font has no
     // accented letters)
-    write("help.txt", help_text(include_str!("../../docs/manual-en.md")).as_bytes())?;
-    write("help-hu.txt", help_text(include_str!("../../docs/manual-hu.md")).as_bytes())?;
+    write("lib/help.txt", help_text(&helptext::for_the_next(include_str!("../../docs/manual-en.md"))).as_bytes())?;
     // the IDE shows it (Help -> About, the splash screen)
-    write("version.txt", format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())?;
+    write("lib/version.txt", format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())?;
     let mut built = vec![];
     for stage in ["lexer", "codegen", "assets", "asm", "ide"] {
         let file = format!("{stage}.lz80n");
         let src = SELFHOST_SOURCES.iter().find(|(n, _)| *n == file).unwrap().1;
         let nex_name = format!("{stage}.nex");
-        let asm = compile_main(src, Some(&dir.join(&file)), &nex_name, true, dir, false).map_err(|errs| {
+        let src_dir = dir.join("src");
+        let asm = compile_main(src, Some(&src_dir.join(&file)), &nex_name, true, &src_dir, false).map_err(|errs| {
             errs.iter().map(|d| format!("{file}:{d}")).collect::<Vec<_>>().join("\n")
         })?;
         let out = asm::assemble(&asm, dir).map_err(|e| format!("{file}: {}", e[0]))?;
@@ -246,7 +269,10 @@ Copy this folder to the SD card, then in NextBASIC:\r\n\
   .nexload lexer.nex\r\n\r\n\
 Or start the LZ80N IDE: .nexload ide.nex (Build -> Compile / Compile & run\r\n\
 runs the stages below and comes back to the IDE; EXTEND+B / EXTEND+R).\r\n\
-File -> Open hello.lz80n (or any example) to try it.\r\n\r\n\
+File -> Open examples/hello.lz80n (or any example) to try it.\r\n\r\n\
+The folders: lib/ the runtime, the modules, the manuals; examples/ the\r\n\
+example programs (with their pictures, sounds and include files); src/ the\r\n\
+compiler's own sources. The compiler's work files stay here.\r\n\r\n\
 lexer.nex -> tokens.bin, then (when the program has assets) assets.nex ->\r\n\
 a_*.bin, then codegen.nex -> out.asm, then asm.nex -> out.nex. Create a file named run.on to start out.nex at the end. Errors:\r\n\
 on the screen, and in codegen.err / asm.err. Delete chain.on to run the\r\n\
@@ -255,55 +281,7 @@ stages one by one. Supported language: see selfhost/README.md.\r\n",
     Ok(built)
 }
 
-/// A manual (Markdown) as the IDE's help text: links keep their text only
-/// (`[Strings](#9-strings)` -> `Strings`), and the letters outside ASCII
-/// become their nearest ASCII ones (the Next font has 32..127 only).
-pub fn help_text(md: &str) -> String {
-    let mut out = String::new();
-    let mut rest = md;
-    while let Some(i) = rest.find("](") {
-        let (head, tail) = rest.split_at(i);
-        match (head.rfind('['), tail.find(')')) {
-            (Some(open), Some(close)) => {
-                out.push_str(&head[..open]);
-                out.push_str(&head[open + 1..]);
-                rest = &tail[close + 1..];
-            }
-            _ => {
-                out.push_str(head);
-                out.push_str("](");
-                rest = &tail[2..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out.chars()
-        .map(|c| match c {
-            'á' | 'à' | 'ä' => "a".to_string(),
-            'é' => "e".into(),
-            'í' => "i".into(),
-            'ó' | 'ö' | 'ő' => "o".into(),
-            'ú' | 'ü' | 'ű' => "u".into(),
-            'Á' => "A".into(),
-            'É' => "E".into(),
-            'Í' => "I".into(),
-            'Ó' | 'Ö' | 'Ő' => "O".into(),
-            'Ú' | 'Ü' | 'Ű' => "U".into(),
-            '–' | '—' => "-".into(),
-            '„' | '”' | '“' => "\"".into(),
-            '’' | '‘' => "'".into(),
-            '…' => "...".into(),
-            '→' => "->".into(),
-            '↔' => "<->".into(),
-            '×' => "x".into(),
-            '±' => "+/-".into(),
-            '°' => " deg".into(),
-            '\r' => String::new(),
-            c if c.is_ascii() => c.to_string(),
-            _ => "?".into(),
-        })
-        .collect()
-}
+pub use helptext::help_text;
 
 /// `--sjasmplus auto`: $SJASMPLUS, next to lz80nc, tools/sjasmplus, the PATH.
 fn find_sjasmplus(explicit: PathBuf) -> PathBuf {

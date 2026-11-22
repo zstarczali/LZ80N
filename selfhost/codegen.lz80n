@@ -81,15 +81,38 @@ function ob(byte b)
 end
 
 -- does the line start (after its 4 spaces) with s?
+byte lis_r = 0
 function lis(string s) -> bool
-    byte n = len(s)
-    if lcn < n + 4 then return false end
-    byte i = 0
-    while i < n do
-        if lcur[4 + i] ~= asc(s, i) then return false end
-        i += 1
+    -- (in assembly: it runs for every line of the output)
+    asm
+        ld hl,(p_lis_s)
+        ld b,(hl)
+        inc hl
+        ld a,(g_lcn)
+        sub 4
+        jr c,.no
+        cp b
+        jr c,.no
+        ld de,g_lcur+4
+        ld a,b
+        or a
+        jr z,.yes
+.l:
+        ld a,(de)
+        cp (hl)
+        jr nz,.no
+        inc hl
+        inc de
+        djnz .l
+.yes:
+        ld a,1
+        jr .end
+.no:
+        xor a
+.end:
+        ld (g_lis_r),a
     end
-    return true
+    return lis_r ~= 0
 end
 
 -- is character i of the line one of a b c d e h l (a register)?
@@ -101,12 +124,27 @@ end
 
 -- does the line contain c?
 function lhas(byte c) -> bool
-    byte i = 0
-    while i < lcn do
-        if lcur[i] == c then return true end
-        i += 1
+    asm
+        ld a,(g_lcn)
+        or a
+        jr z,.no
+        ld b,a
+        ld hl,g_lcur
+        ld a,(p_lhas_c)
+.l:
+        cp (hl)
+        jr z,.yes
+        inc hl
+        djnz .l
+.no:
+        xor a
+        jr .end
+.yes:
+        ld a,1
+.end:
+        ld (g_lis_r),a
     end
-    return false
+    return lis_r ~= 0
 end
 
 -- estimated bytes of the instruction in lcur (0 for labels and comments)
@@ -115,49 +153,51 @@ function line_cost() -> byte
     byte i = 0
     while i < lcn and (lcur[i] == ' ' or lcur[i] == 9) do i += 1 end
     if i >= lcn or lcur[i] == ';' then return 0 end
-    if lis("ld ") then
+    -- (the first letter first: lis copies its string)
+    byte c0 = lcur[4]
+    if (c0 == 'l' and lis("ld ")) then
         if lhas('x') or lhas('y') then return 4 end         -- ix / iy
-        if lis("ld (hl)") or lis("ld a,(hl)") or lis("ld a,(de)") or lis("ld a,(bc)") or lis("ld (de)") or lis("ld (bc)") then return 1 end
-        if lis("ld e,(hl)") or lis("ld d,(hl)") or lis("ld h,(hl)") or lis("ld l,(hl)") then return 1 end
-        if lis("ld de,(") or lis("ld bc,(") or lis("ld sp,(") then return 4 end
+        if (c0 == 'l' and lis("ld (hl)")) or (c0 == 'l' and lis("ld a,(hl)")) or (c0 == 'l' and lis("ld a,(de)")) or (c0 == 'l' and lis("ld a,(bc)")) or (c0 == 'l' and lis("ld (de)")) or (c0 == 'l' and lis("ld (bc)")) then return 1 end
+        if (c0 == 'l' and lis("ld e,(hl)")) or (c0 == 'l' and lis("ld d,(hl)")) or (c0 == 'l' and lis("ld h,(hl)")) or (c0 == 'l' and lis("ld l,(hl)")) then return 1 end
+        if (c0 == 'l' and lis("ld de,(")) or (c0 == 'l' and lis("ld bc,(")) or (c0 == 'l' and lis("ld sp,(")) then return 4 end
         if lhas('(') then
-            if lis("ld (") and (lcur[lcn - 2] == 'd' or lcur[lcn - 2] == 'b' or lcur[lcn - 2] == 's') then return 4 end
+            if (c0 == 'l' and lis("ld (")) and (lcur[lcn - 2] == 'd' or lcur[lcn - 2] == 'b' or lcur[lcn - 2] == 's') then return 4 end
             return 3
         end
-        if lis("ld hl,") or lis("ld de,") or lis("ld bc,") or lis("ld sp,") then
-            if lis("ld sp,hl") then return 1 end
+        if (c0 == 'l' and lis("ld hl,")) or (c0 == 'l' and lis("ld de,")) or (c0 == 'l' and lis("ld bc,")) or (c0 == 'l' and lis("ld sp,")) then
+            if (c0 == 'l' and lis("ld sp,hl")) then return 1 end
             return 3
         end
         -- ld r,r' or ld r,n
         if lcn == 10 and lreg(7) and lreg(9) then return 1 end
-        if lis("ld a,i") or lis("ld i,a") then return 2 end
+        if (c0 == 'l' and lis("ld a,i")) or (c0 == 'l' and lis("ld i,a")) then return 2 end
         return 2
     end
-    if lis("call ") or lis("jp ") then
-        if lis("jp (") then return 1 end
+    if (c0 == 'c' and lis("call ")) or (c0 == 'j' and lis("jp ")) then
+        if (c0 == 'j' and lis("jp (")) then return 1 end
         return 3
     end
-    if lis("jr ") or lis("djnz ") then return 2 end
-    if lis("add hl,") or lis("add a,") then
-        if lis("add a,") and not lreg(10) then return 2 end
+    if (c0 == 'j' and lis("jr ")) or (c0 == 'd' and lis("djnz ")) then return 2 end
+    if (c0 == 'a' and lis("add hl,")) or (c0 == 'a' and lis("add a,")) then
+        if (c0 == 'a' and lis("add a,")) and not lreg(10) then return 2 end
         return 1
     end
-    if lis("sbc hl") or lis("adc hl") or lis("ldir") or lis("lddr") or lis("ldi") or lis("neg") or lis("reti") or lis("im ") or lis("mul") then return 2 end
-    if lis("sra") or lis("srl") or lis("sla") or lis("rr ") or lis("rl ") or lis("rlc ") or lis("rrc ") or lis("bit ") or lis("set ") or lis("res ") then return 2 end
-    if lis("nextreg") then return 4 end
-    if lis("and ") or lis("or ") or lis("xor ") or lis("cp ") or lis("sub ") or lis("sbc a,") then
+    if (c0 == 's' and lis("sbc hl")) or (c0 == 'a' and lis("adc hl")) or (c0 == 'l' and lis("ldir")) or (c0 == 'l' and lis("lddr")) or (c0 == 'l' and lis("ldi")) or (c0 == 'n' and lis("neg")) or (c0 == 'r' and lis("reti")) or (c0 == 'i' and lis("im ")) or (c0 == 'm' and lis("mul")) then return 2 end
+    if (c0 == 's' and lis("sra")) or (c0 == 's' and lis("srl")) or (c0 == 's' and lis("sla")) or (c0 == 'r' and lis("rr ")) or (c0 == 'r' and lis("rl ")) or (c0 == 'r' and lis("rlc ")) or (c0 == 'r' and lis("rrc ")) or (c0 == 'b' and lis("bit ")) or (c0 == 's' and lis("set ")) or (c0 == 'r' and lis("res ")) then return 2 end
+    if (c0 == 'n' and lis("nextreg")) then return 4 end
+    if (c0 == 'a' and lis("and ")) or (c0 == 'o' and lis("or ")) or (c0 == 'x' and lis("xor ")) or (c0 == 'c' and lis("cp ")) or (c0 == 's' and lis("sub ")) or (c0 == 's' and lis("sbc a,")) then
         -- a register (or (hl)) operand is one byte
         byte j = lcn - 1
         if lreg(j) and (lcur[j - 1] == ' ' or lcur[j - 1] == ',') then return 1 end
         if lcur[j] == ')' then return 1 end
         return 2
     end
-    if lis("out (") or lis("in a,(") then
-        if lhas('c') and lis("out (c)") then return 2 end
-        if lis("in a,(c)") then return 2 end
+    if (c0 == 'o' and lis("out (")) or (c0 == 'i' and lis("in a,(")) then
+        if lhas('c') and (c0 == 'o' and lis("out (c)")) then return 2 end
+        if (c0 == 'i' and lis("in a,(c)")) then return 2 end
         return 2
     end
-    if lis("db ") or lis("dw ") or lis("dd ") then
+    if (c0 == 'd' and lis("db ")) or (c0 == 'd' and lis("dw ")) or (c0 == 'd' and lis("dd ")) then
         -- the line may be longer than lcur: a rough count
         byte n = 1
         byte k = 0
@@ -166,15 +206,15 @@ function line_cost() -> byte
             k += 1
         end
         if lcn == 40 then n = n * 2 + 8 end
-        if lis("dw ") then return n * 2 end
-        if lis("dd ") then return n * 4 end
+        if (c0 == 'd' and lis("dw ")) then return n * 2 end
+        if (c0 == 'd' and lis("dd ")) then return n * 4 end
         return n
     end
-    if lis("ds ") then return 64 end
-    if lis("rst") or lis("push") or lis("pop") or lis("ex ") or lis("exx") or lis("inc") or
-            lis("dec") or lis("ret") or lis("rla") or lis("rra") or lis("rlca") or lis("rrca") or
-            lis("cpl") or lis("scf") or lis("ccf") or lis("di") or lis("ei") or lis("halt") or
-            lis("nop") then return 1 end
+    if (c0 == 'd' and lis("ds ")) then return 64 end
+    if (c0 == 'r' and lis("rst")) or (c0 == 'p' and lis("push")) or (c0 == 'p' and lis("pop")) or (c0 == 'e' and lis("ex ")) or (c0 == 'e' and lis("exx")) or (c0 == 'i' and lis("inc")) or
+            (c0 == 'd' and lis("dec")) or (c0 == 'r' and lis("ret")) or (c0 == 'r' and lis("rla")) or (c0 == 'r' and lis("rra")) or (c0 == 'r' and lis("rlca")) or (c0 == 'r' and lis("rrca")) or
+            (c0 == 'c' and lis("cpl")) or (c0 == 's' and lis("scf")) or (c0 == 'c' and lis("ccf")) or (c0 == 'd' and lis("di")) or (c0 == 'e' and lis("ei")) or (c0 == 'h' and lis("halt")) or
+            (c0 == 'n' and lis("nop")) then return 1 end
     return 4
 end
 
@@ -225,12 +265,15 @@ function ocopy(string name)
         end
         return
     end
-    word c = file_getc(h)
-    while c ~= FILE_EOF do
-        ob(byte(c))
-        c = file_getc(h)
+    -- in blocks, past ob (the sizes were counted when it was written)
+    flush()
+    while true do
+        word got = file_read(h, addr(obuf), 256)
+        if got == 0 then break end
+        file_write(cur_h, addr(obuf), got)
     end
     file_close(h)
+    lcn = 0
 end
 
 -- ---------------------------------------------------------------- errors
@@ -277,8 +320,8 @@ const TY_SBYTE = 3
 const TY_WORD = 4
 const TY_SWORD = 5
 const TY_LONG = 6
-const TY_FIXED = 7          -- 8.8 fixed point (2 bytes)
-const TY_FIXED16 = 8        -- 16.16 fixed point (4 bytes)
+const TY_FIXED = 7          -- 8.8 fixed-pt (2 bytes)
+const TY_FIXED16 = 8        -- 16.16 fixed-pt (4 bytes)
 const TY_STR = 9
 const TY_STRUCT = 16        -- struct number k: TY_STRUCT + k
 const TY_BAD = 255
@@ -765,7 +808,7 @@ function const_eval(word e) -> bool
     return false
 end
 
--- ---------------------------------------------------------------- fixed point
+-- ---------------------------------------------------------------- fixed-pt
 -- `fixed` = 8.8 in HL, `fixed16` = 16.16 in DE:HL. Fixed literals and
 -- constants are raw 16.16 (rounded to 8.8 for `fixed`); integer constants
 -- adapt (x 256 / x 65536). The rules are those of compiler/src/codegen.rs.
@@ -1100,7 +1143,7 @@ function o_fx_widen()
     oi("ld l,0")
 end
 
--- a cast to or from a fixed point type: true if done
+-- a cast to or from a fixed-pt type: true if done
 function fx_cast(word a, byte c, byte w) -> bool
     byte from = nat(a)
     if c == TY_FIXED then
@@ -4133,13 +4176,9 @@ function check_irq_sharing()
         r += 1
     end
     if not any then return end
-    -- the calls of the main program: the edges of symbol 0
-    word it = prog_first
-    while it ~= 0 do
-        byte k = nk[it]
-        if k ~= I_FUNC and k ~= I_STRUCT and k ~= I_INTERRUPT and k ~= S_ASSET then collect_calls(0, it) end
-        it = nx[it]
-    end
+    -- the calls of the main program: the edges of symbol 0 (collect_calls
+    -- goes along the whole list; functions and structs in it are skipped)
+    collect_calls(0, prog_first)
     r = 1
     while r <= nsy and not failed do
         if sk[r] == SK_FUNC and (sdim[r] ~= 0 or (sstruct[r] == 0 and sname[r] ~= 0 and text_isx(sname[r], "s|ound_tick"))) then
@@ -4242,6 +4281,118 @@ function collect_calls(word f, word n)
             collect_calls(f, n4[n])
         end
         n = nx[n]
+    end
+end
+
+-- ---------------------------------------------------------------- live functions
+-- Only the functions the program can call are generated (a module has many
+-- the program does not use): the main program, the interrupt handlers, the
+-- sound driver and every function named in inline assembly (`f_name`) are
+-- the roots; the call graph gives the rest.
+
+far byte live_[8000]
+
+function is_idc(byte c) -> bool
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_'
+end
+
+-- the function named by tpool[a..b) (0: none)
+function func_by_text(word a, word b) -> word
+    word r = 1
+    while r <= nsy do
+        if sk[r] == SK_FUNC and sstruct[r] == 0 and sname[r] ~= 0 and tlen_(sname[r]) == b - a then
+            word o = toff_(sname[r])
+            word i = 0
+            while i < b - a and tpool[o + i] == tpool[a + i] do i += 1 end
+            if i == b - a then return r end
+        end
+        r += 1
+    end
+    return 0
+end
+
+-- the functions named `f_name` in the inline assembly of node list n
+-- become live roots
+function asm_roots(word n)
+    while n ~= 0 do
+        byte k = nk[n]
+        if k == S_ASM then
+            word o = toff_(n1[n])
+            word e = o + tlen_(n1[n])
+            word i = o
+            while i + 2 < e do
+                -- (`rt_note...` needs the note table, as a call of note_period does)
+                if tpool[i] == 'r' and i + 7 < e and tpool[i + 1] == 't' and tpool[i + 2] == '_' and tpool[i + 3] == 'n' and tpool[i + 4] == 'o' and tpool[i + 5] == 't' and tpool[i + 6] == 'e' then uses_notes = true end
+                if tpool[i] == 'f' and tpool[i + 1] == '_' and (i == o or not is_idc(tpool[i - 1])) then
+                    word a = i + 2
+                    word b = a
+                    while b < e and is_idc(tpool[b]) do b += 1 end
+                    word fn = func_by_text(a, b)
+                    if fn ~= 0 then live_[fn] = 1 end
+                    i = b
+                else
+                    i += 1
+                end
+            end
+        elseif k == S_IF or k == S_WHILE or k == S_ARM then
+            asm_roots(n2[n])
+            if k == S_IF then asm_roots(n1[n]) end
+        elseif k == S_FOR then
+            asm_roots(n4[n])
+        end
+        n = nx[n]
+    end
+end
+
+function mark_live()
+    if nedge >= MAXEDGE - 1 then
+        -- (the call graph is incomplete: every function)
+        word q = 1
+        while q <= nsy do
+            live_[q] = 1
+            q += 1
+        end
+        return
+    end
+    -- the main program's calls (symbol 0): collect_calls and asm_roots go
+    -- along the whole list (functions and structs in it are skipped)
+    collect_calls(0, prog_first)
+    asm_roots(prog_first)
+    word r = 1
+    while r <= nsy do
+        if sk[r] == SK_FUNC then
+            asm_roots(fn_body(r))
+            if sdim[r] ~= 0 or (sstruct[r] == 0 and sname[r] ~= 0 and text_isx(sname[r], "s|ound_tick")) then live_[r] = 1 end
+        end
+        r += 1
+    end
+    -- from the roots along the calls
+    word sp_ = 0
+    stack_[sp_] = 0
+    sp_ += 1
+    r = 1
+    while r <= nsy do
+        if live_[r] ~= 0 and sp_ < 2999 then
+            stack_[sp_] = r
+            sp_ += 1
+        end
+        r += 1
+    end
+    while sp_ > 0 do
+        sp_ -= 1
+        word f = stack_[sp_]
+        word ed = efirst[f]
+        while ed ~= 0 do
+            word c = eto[ed]
+            if live_[c] == 0 then
+                live_[c] = 1
+                if sp_ < 2999 then
+                    stack_[sp_] = c
+                    sp_ += 1
+                end
+            end
+            ed = enext[ed]
+        end
     end
 end
 
@@ -5155,13 +5306,17 @@ function ocopy_range(string name, long at, long n)
         return
     end
     file_seek(h, at)
+    flush()
     while n > 0 do
-        word c = file_getc(h)
-        if c == FILE_EOF then break end
-        ob(byte(c))
-        n -= 1
+        word want = 256
+        if n < 256 then want = word(n) end
+        word got = file_read(h, addr(obuf), want)
+        if got == 0 then break end
+        file_write(cur_h, addr(obuf), got)
+        n -= got
     end
     file_close(h)
+    lcn = 0
 end
 
 -- room for est bytes in a code page: cur_page (a new one when needed)
@@ -5412,7 +5567,12 @@ function generate()
     oi("DEVICE ZXSPECTRUMNEXT")
     oi("ORG $8000")
     onl()
-    ocopy("rt_start.asm")
+    -- the runtime and the font, assembled by the export (rt_core.bin at
+    -- $8000) and their labels (rt_core.sym: EQUs): the assembler does not
+    -- go through them on every compile
+    oi("incbin \"lib/rt_core.bin\"")
+    ocopy("lib/rt_core.sym")
+    ocopy("lib/rt_start.asm")
     irq_lines()
     if nlines > 0 then
         os("    ; raster interrupts: ULA interrupt off, line interrupt at ")
@@ -5478,26 +5638,26 @@ function generate()
         end
         return
     end
+    mark_live()
     word f = 1
     while f <= nsy and not failed do
-        if sk[f] == SK_FUNC then gen_function(f) end
+        if sk[f] == SK_FUNC and live_[f] ~= 0 then gen_function(f) end
         f += 1
     end
     if failed then return end
-    if cur_page ~= 0 then ocopy("rt_banked.asm") end
-    ocopy("rt_lib.asm")         -- starts with __main_end
-    if uses_long then ocopy("rt_long.asm") end
+    if cur_page ~= 0 then ocopy("lib/rt_banked.asm") end
+    if uses_long then ocopy("lib/rt_long.asm") end
     bool any_img = false
     byte ai = 0
     while ai < nassets do
         if tabb[B_AS_KIND + ai] == AK_IMG then any_img = true end
         ai += 1
     end
-    if any_img then ocopy("rt_images.asm") end
-    if uses_samples then ocopy("rt_samples.asm") end
-    if uses_notes then ocopy("rt_notes.asm") end
-    if uses_music then ocopy("rt_music.asm") end
-    if uses_trig then ocopy("rt_trig.asm") end
+    if any_img then ocopy("lib/rt_images.asm") end
+    if uses_samples then ocopy("lib/rt_samples.asm") end
+    if uses_notes then ocopy("lib/rt_notes.asm") end
+    if uses_music then ocopy("lib/rt_music.asm") end
+    if uses_trig then ocopy("lib/rt_trig.asm") end
     -- the background driver of the sound module
     word drv = 0
     word df = 1
@@ -5556,7 +5716,6 @@ function generate()
     if slot1 then os("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n") end
     if shadow then os("    ex af,af'\n    pop af\n    ex af,af'\n    exx\n    pop hl\n    pop de\n    pop bc\n    exx\n") end
     os("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n")
-    ocopy("rt_font.asm")
     if far_arr_pages > 0 then
         os("; clear the far pages at startup\nrt_far_zero:\n    ld hl,rt_far_zero_tab\n.p:\n    ld a,(hl)\n    or a\n    ret z\n")
         os("    push hl\n    ld (rt_farpage),a\n    nextreg $51,a\n    xor a\n    ld de,$2000\n    ld bc,8192\n")
@@ -5664,7 +5823,7 @@ end
 -- ---------------------------------------------------------------- main
 
 log_start(false)
-print("codegen: generating code...")
+log_note("codegen: generating code...")
 if load_tokens() then
     if not failed then
         ti = 1

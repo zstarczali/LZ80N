@@ -79,9 +79,12 @@ Tests:
 * `selfhost_asm_all_examples` (ignored, ~80 s): all 24 examples, NEX byte
   for byte: `cargo test --release selfhost_asm_all -- --ignored`.
 
-Two passes (layout, then output; more only if a value changes). Speed at
-28 MHz: about 220 lines per second, e.g. 9.5 s for `hello` (2132 lines),
-54 s for `shooter` (9134 lines); `images` takes 99 s (large data, many pages).
+Two passes (layout, then output; more only if a value changes). The runtime
+comes pre-assembled (`lib/rt_core.bin`, `incbin`), and the code generator
+emits only the live functions (those reachable from the main program, the
+interrupt handlers and inline `asm`), so `hello` takes about 1.3 s here
+(lexer 0.2 + code generator 0.7 + assembler 1.3 s in all, at first 11.7 s)
+and a Layer 2 program such as `life` about 13 s (at first 34 s).
 
 ## codegen.lz80n
 
@@ -184,9 +187,22 @@ up to 32 KB.
   `run.on` does not exist. The IDE reloads the file, shows the result
   in the status line, and puts the cursor on the line and column of a
   code generator error.
+* Speed: the runtime and the font are assembled once by the export
+  (`lib/rt_core.bin`, with their labels as EQUs in `lib/rt_core.sym`) and
+  taken by INCBIN, so a small program's `out.asm` is about 600 lines instead
+  of 2200. The assembler reads the source in blocks (the line scan in
+  assembly), skips INCBIN data and the 8K page clearing in its first pass,
+  and avoids 32-bit arithmetic for every byte; the code generator copies
+  its temporary files in blocks; the lexer keeps a 16-bit count of the
+  characters left. `hello.lz80n`: lexer 0.2 s, code generator 0.5 s,
+  assembler 1.3 s at 28 MHz (it was 0.2 + 2.4 + 9.1 s); `life.lz80n` (with
+  the Layer 2 module) 3.1 + 5.6 + 13.3 s (4.5 + 12.2 + 17.2 s).
+  `profile_stage` (ignored) shows where a stage spends its time.
 * The build log: every stage writes its lines (with the time it took) to
   the screen and to `build.log`, and shows the lines of the stages before
-  it first, so the screen reads like one command line session. After a
+  it first. The screen looks like the IDE (its menu bar, the program's
+  first lines, the status line) with the log in a window, as if the IDE
+  were still running. After a
   compile the IDE shows the log in a box (Build -> Build output, EXT L,
   shows it again).
 * The Next keyboard's extra keys (cursor keys, DELETE, EDIT, BREAK,
@@ -198,13 +214,13 @@ up to 32 KB.
   one, a letter jumps to the names starting with it, `<type a name>` asks
   for a name. It reads folders with the file module's new `file_opendir`
   and `file_readdir` (esxDOS F_OPENDIR / F_READDIR).
-* Help -> Language manual: the LZ80N manual (`help.txt`, written by the
-  export from `docs/manual-en.md`; `help-hu.txt`, the Hungarian one, in
-  ASCII letters) in the text area: left / right go to the chapters, ENTER
+* Help -> Language manual: the LZ80N manual (`lib/help.txt`, written by the
+  export from `docs/manual-en.md` without the parts about the PC, laid out
+  for 80 columns in ASCII letters) in the text area: left / right go to the chapters, ENTER
   on a line of the contents opens its chapter, F finds a text, N again.
   EXT H opens it at the word under the cursor.
 * A splash screen at the start: a box with the logo and the version
-  (`version.txt`, which the export writes); Help -> About shows it again.
+  (`lib/version.txt`, which the export writes); Help -> About shows it again.
 * Menus, the help and the build output are drawn over the text row by row
   (each screen row written once), and the cursor does not blink under
   them: no flicker. Moving in a menu only recolours two rows; opening and
@@ -283,9 +299,10 @@ lz80nc --export-selfhost DIR
 ```
 
 writes everything into DIR: `lexer.nex`, `codegen.nex`, `assets.nex`,
-`asm.nex`, `ide.nex` (built from
-these sources), the runtime and module files, the sources themselves, and
-`chain.on`. Copy DIR to the SD card (a 2 MB Next), then in NextBASIC:
+`asm.nex`, `ide.nex` (built from these sources), `lib/` (the runtime and
+module files, the manuals, `version.txt`), `src/` (the sources themselves),
+and `chain.on`. `scripts/zxnext-package.sh` makes the release's package from
+it: without `src/`, with `examples/`. Copy DIR to the SD card (a 2 MB Next), then in NextBASIC:
 
 ```
 .cd /lz80n                     (the folder you copied)

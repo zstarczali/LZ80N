@@ -22,24 +22,95 @@ byte inh
 bool in_eof = false
 
 -- read the next line into lbuf (without the newline); false at the end
+-- the source is read in 512-byte blocks
+byte rb[512]
+word rb_pos = 0
+word rb_len = 0
+
 function read_text_ln() -> bool
     llen = 0
     if in_eof then return false end
     bool any = false
     while true do
-        word g = file_getc(inh)
-        if g == FILE_EOF then
-            in_eof = true
-            return any
+        if rb_pos >= rb_len then
+            rb_len = file_read(inh, addr(rb), 512)
+            rb_pos = 0
+            if rb_len == 0 then
+                in_eof = true
+                return any
+            end
         end
         any = true
-        if g == 10 then return true end
-        if g ~= 13 and llen < 512 then
-            lbuf[llen] = byte(g)
-            llen += 1
-        end
+        scan_ln()
+        if rl_lf ~= 0 then return true end
     end
     return any
+end
+
+-- rb[rb_pos..rb_len) into lbuf up to a line feed (CRs dropped, at most 512
+-- characters kept); rl_lf: 1 when the line feed was found
+byte rl_lf = 0
+function scan_ln()
+    asm
+        push ix
+        ld hl,(g_rb_len)
+        ld de,(g_rb_pos)
+        or a
+        sbc hl,de
+        ld b,h
+        ld c,l                  ; bc = bytes left
+        ld hl,g_rb
+        add hl,de               ; hl = the next byte
+        push hl
+        ld hl,512
+        ld de,(g_llen)
+        or a
+        sbc hl,de
+        push hl
+        pop ix                  ; ix = room left in lbuf
+        ld hl,g_lbuf
+        add hl,de
+        ex de,hl                ; de = where the next character goes
+        pop hl
+.loop:
+        ld a,b
+        or c
+        jr z,.empty
+        dec bc
+        ld a,ixh
+        or ixl
+        ld a,(hl)
+        inc hl
+        jr z,.full
+        cp 10
+        jr z,.lf
+        cp 13
+        jr z,.loop
+        ld (de),a
+        inc de
+        dec ix
+        jr .loop
+.full:
+        cp 10
+        jr nz,.loop
+.lf:
+        ld a,1
+        jr .done
+.empty:
+        xor a
+.done:
+        ld (g_rl_lf),a
+        ld bc,g_rb
+        or a
+        sbc hl,bc
+        ld (g_rb_pos),hl
+        ex de,hl
+        ld bc,g_lbuf
+        or a
+        sbc hl,bc
+        ld (g_llen),hl
+        pop ix
+    end
 end
 
 function lc(byte c) -> byte
@@ -676,9 +747,22 @@ byte guard[8]               -- MMU option per slot: 'e', 'n', 'w' or 0
 long pc = 0
 long last_write = -1
 
+-- image slot s (1..35): far array (s - 1) / 7, from ((s - 1) % 7) * 8192
+-- (tables: no division for every byte)
+byte slot_arr[36]
+word slot_base[36]
+function slot_tables()
+    byte k = 1
+    while k <= SLOT_PAGES do
+        slot_arr[k] = (k - 1) / 7
+        slot_base[k] = word((k - 1) % 7) * 8192
+        k += 1
+    end
+end
+
 function img_put(byte s, word off, byte b)
-    byte a = (s - 1) / 7
-    word o = word((s - 1) % 7) * 8192 + off
+    byte a = slot_arr[s]
+    word o = slot_base[s] + off
     if a == 0 then
         img0[o] = b
     elseif a == 1 then
@@ -693,8 +777,8 @@ function img_put(byte s, word off, byte b)
 end
 
 function img_get(byte s, word off) -> byte
-    byte a = (s - 1) / 7
-    word o = word((s - 1) % 7) * 8192 + off
+    byte a = slot_arr[s]
+    word o = slot_base[s] + off
     if a == 0 then return img0[o] end
     if a == 1 then return img1[o] end
     if a == 2 then return img2[o] end
@@ -711,15 +795,35 @@ function page_slot(byte p) -> byte
     end
     nslots += 1
     pdir[p] = nslots
-    word i = 0
-    while i < 8192 do
-        img_put(nslots, i, 0)
-        i += 1
-    end
+    -- (no clearing: far arrays start as zeros, and a slot is used once)
     return nslots
 end
 
+byte e_hi = 0                -- emit: the high 16 bits of pc, or-ed
+
 function emit(byte b)
+    -- the common case: inside the 64K and not the start of an 8K slot (no
+    -- 32-bit arithmetic)
+    asm
+        ld a,(g_pc+2)
+        ld hl,g_pc+3
+        or (hl)
+        ld (g_e_hi),a
+    end
+    word w = word(pc)
+    if e_hi == 0 and w & 0x1FFF ~= 0 then
+        if strict then
+            byte page = slots[byte(w >> 13)]
+            if page < 224 then
+                byte s = pdir[page]
+                if s == 0 then s = page_slot(page) end
+                if s ~= 0 then img_put(s, w & 0x1FFF, b) end
+            end
+        end
+        last_write = pc
+        pc += 1
+        return
+    end
     -- crossing the end of an MMU slot guarded with `e` / `n`
     if last_write >= 0 and last_write + 1 == pc and (pc & 0x1FFF) == 0 then
         byte sl = byte(last_write >> 13)
@@ -906,7 +1010,30 @@ end
 function reg8(byte o, word s, word e) -> bool
     byte code = 255
     byte p = 0
-    if rng_is(s, e, "b") then
+    -- (by length first: this runs for every operand)
+    word n = e - s
+    if n == 0 or n > 3 then return false end
+    if n == 1 then
+        byte c = lc(lbuf[s])
+        if c == 'b' then
+            code = 0
+        elseif c == 'c' then
+            code = 1
+        elseif c == 'd' then
+            code = 2
+        elseif c == 'e' then
+            code = 3
+        elseif c == 'h' then
+            code = 4
+        elseif c == 'l' then
+            code = 5
+        elseif c == 'a' then
+            code = 7
+        end
+    elseif lc(lbuf[s]) ~= 'x' and lc(lbuf[s]) ~= 'y' and lc(lbuf[s + 1]) ~= 'x' and lc(lbuf[s + 1]) ~= 'y' then
+        -- two or three letters: only the halves of ix / iy are registers
+        return false
+    elseif rng_is(s, e, "b") then
         code = 0
     elseif rng_is(s, e, "c") then
         code = 1
@@ -953,7 +1080,10 @@ function parse_op(byte o)
     oxe[o] = e
     if reg8(o, s, e) then return end
     byte r = 0
-    if rng_is(s, e, "bc") then
+    word n = e - s
+    if n ~= 2 then
+        r = 0
+    elseif rng_is(s, e, "bc") then
         r = R_BC
     elseif rng_is(s, e, "de") then
         r = R_DE
@@ -973,15 +1103,15 @@ function parse_op(byte o)
         oc[o] = r
         return
     end
-    if rng_is(s, e, "af'") then
+    if n == 3 and rng_is(s, e, "af'") then
         ok[o] = K_AFALT
         return
     end
-    if rng_is(s, e, "i") then
+    if n == 1 and rng_is(s, e, "i") then
         ok[o] = K_I
         return
     end
-    if rng_is(s, e, "r") then
+    if n == 1 and rng_is(s, e, "r") then
         ok[o] = K_R
         return
     end
@@ -1786,12 +1916,78 @@ function page_used(byte p) -> bool
     byte s = pdir[p]
     if s == 0 then return false end
     if pkeep[p] ~= 0 then return true end
-    word i = 0
-    while i < 8192 do
-        if img_get(s, i) ~= 0 then return true end
-        i += 1
+    byte a = slot_arr[s]
+    word o = slot_base[s]
+    word e = o + 8192
+    -- (one loop per array: the slot's place is worked out once)
+    if a == 0 then
+        while o < e do
+            if img0[o] ~= 0 then return true end
+            o += 1
+        end
+    elseif a == 1 then
+        while o < e do
+            if img1[o] ~= 0 then return true end
+            o += 1
+        end
+    elseif a == 2 then
+        while o < e do
+            if img2[o] ~= 0 then return true end
+            o += 1
+        end
+    elseif a == 3 then
+        while o < e do
+            if img3[o] ~= 0 then return true end
+            o += 1
+        end
+    else
+        while o < e do
+            if img4[o] ~= 0 then return true end
+            o += 1
+        end
     end
     return false
+end
+
+-- the 8K of image slot s (0: zeros) into the output
+function page_out(byte s)
+    word j = 0
+    if s == 0 then
+        while j < 8192 do
+            out_byte(0)
+            j += 1
+        end
+        return
+    end
+    byte a = slot_arr[s]
+    word o = slot_base[s]
+    word e = o + 8192
+    if a == 0 then
+        while o < e do
+            out_byte(img0[o])
+            o += 1
+        end
+    elseif a == 1 then
+        while o < e do
+            out_byte(img1[o])
+            o += 1
+        end
+    elseif a == 2 then
+        while o < e do
+            out_byte(img2[o])
+            o += 1
+        end
+    elseif a == 3 then
+        while o < e do
+            out_byte(img3[o])
+            o += 1
+        end
+    else
+        while o < e do
+            out_byte(img4[o])
+            o += 1
+        end
+    end
 end
 
 function has_bank(byte b) -> bool
@@ -1872,12 +2068,7 @@ function nex_write()
         byte b = nex_order[k]
         if has_bank(b) then
             for half = 0, 1 do
-                byte s = pdir[b * 2 + half]
-                word j = 0
-                while j < 8192 do
-                    if s == 0 then out_byte(0) else out_byte(img_get(s, j)) end
-                    j += 1
-                end
+                page_out(pdir[b * 2 + half])
             end
         end
     end
@@ -2071,7 +2262,15 @@ function incbin(word s, word e)
         if fail() then msg("INCBIN offset/length outside the file") end
         return
     end
-    -- (read in blocks: file_getc is busy with the source)
+    -- the passes before the last only need the size (when the data stays
+    -- inside the 64K and does not reach the end of an 8K slot)
+    if not strict and n > 0 and pc >= 0 and pc + n <= 0x10000 and (pc & 0xE000) == ((pc + n - 1) & 0xE000) then
+        file_close(h)
+        pc += n
+        last_write = pc - 1
+        return
+    end
+    -- (read in blocks)
     if strict then file_seek(h, off) end
     word got = 0
     word bp = 0
@@ -2223,6 +2422,37 @@ end
 
 -- strip a `;` comment (outside quotes): the new length
 function strip_comment()
+    -- most lines have neither `;` nor quotes: a quick look first
+    asm
+        ld hl,(g_llen)
+        ld a,h
+        or l
+        jr z,.none
+        ld b,h
+        ld c,l
+        ld hl,g_lbuf
+.s:
+        ld a,(hl)
+        cp ';'
+        jr z,.some
+        cp '"'
+        jr z,.some
+        cp 39
+        jr z,.some
+        inc hl
+        dec bc
+        ld a,b
+        or c
+        jr nz,.s
+.none:
+        xor a
+        jr .e
+.some:
+        ld a,1
+.e:
+        ld (g_e_hi),a
+    end
+    if e_hi == 0 then return end
     byte quote = 0
     word i = 0
     while i < llen do
@@ -2323,6 +2553,8 @@ function run_pass()
     for i = 0, 223 do pdir[i] = 0 end
     nslots = 0
     in_eof = false
+    rb_pos = 0
+    rb_len = 0
     inh = file_open(in_name, FILE_READ)
     if inh == FILE_ERROR then
         failed = true
@@ -2342,10 +2574,11 @@ end
 
 -- in.asm, or out.asm (written by codegen.nex)
 log_start(false)
-print("asm: assembling...")
+log_note("asm: assembling...")
 string in_name = "in.asm"
 if not file_exists(in_name) then in_name = "out.asm" end
 mn_init()
+slot_tables()
 nex_init_order()
 strict = false
 run_pass()

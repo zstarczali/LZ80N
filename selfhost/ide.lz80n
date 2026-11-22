@@ -2,7 +2,7 @@
 --
 -- A full-screen editor in the 80x32 tilemap mode: a menu bar (File, Edit,
 -- Build, Help), syntax highlighting, a scroll bar, the Kempston mouse with a
--- sprite pointer (click, drag to select, double click a word, right click a
+-- sprite mouse arrow (click, drag to select, double click a word, right click a
 -- menu, the wheel), and Build -> Compile / Compile & run, which saves the
 -- program, starts the self-hosted compiler (lexer.nex -> ... -> asm.nex) and
 -- comes back here with the result; an error puts the cursor on its line.
@@ -36,7 +36,7 @@ const TW = 74               -- text columns (column 79: the scroll bar)
 const TILEMAP = 0x6000
 const FONT = 0x7400         -- tile definitions (80x32 needs $6000..$73FF)
 
--- colours: tilemap palette pairs (paper, ink)
+-- colours: tilemap colour pairs (paper, ink)
 const C_TEXT = 20
 const C_KEY = 21
 const C_TYPE = 22
@@ -220,7 +220,7 @@ function text_reset()
 end
 
 -- n new empty lines at position at: false when the text is full
-function insert_lines(word at, word n) -> bool
+function insert_lns(word at, word n) -> bool
     if nfree < n or nlines + n > MAXLINES then return false end
     word i = nlines
     while i > at do
@@ -241,12 +241,12 @@ function insert_lines(word at, word n) -> bool
     return true
 end
 
-function insert_line(word at) -> bool
-    return insert_lines(at, 1)
+function insert_ln(word at) -> bool
+    return insert_lns(at, 1)
 end
 
 -- n lines from position at
-function delete_lines(word at, word n)
+function delete_lns(word at, word n)
     word i = 0
     while i < n do
         freeslot[nfree] = lslot[at + i]
@@ -262,8 +262,8 @@ function delete_lines(word at, word n)
     nlines -= n
 end
 
-function delete_line(word at)
-    delete_lines(at, 1)
+function delete_ln(word at)
+    delete_lns(at, 1)
 end
 
 function line_len(word l) -> byte
@@ -273,7 +273,7 @@ end
 -- line l into buf (its length: blen)
 byte lbuf[256]
 byte blen = 0
-function get_line(word l)
+function get_ln(word l)
     if l == cur_line then
         blen = cur_len
         word i = 0
@@ -361,7 +361,7 @@ function load_cur(word l)
     if l == cur_line then return end
     store_cur()
     cur_line = 0xFFFF
-    get_line(l)
+    get_ln(l)
     cur_len = blen
     word i = 0
     while i < blen do
@@ -511,7 +511,7 @@ end
 -- colours of lbuf (line in_asm: inside an `asm` block); the state after the
 -- line in asm_after
 bool asm_after = false
-function colour_line(bool in_asm)
+function colour_ln(bool in_asm)
     asm_after = in_asm
     byte i = 0
     if in_asm then
@@ -593,8 +593,8 @@ end
 function update_asm(word l)
     bool st = false
     if l > 0 and l <= nlines then
-        get_line(l - 1)
-        colour_line(lasm[l - 1] ~= 0)
+        get_ln(l - 1)
+        colour_ln(lasm[l - 1] ~= 0)
         st = asm_after
     end
     while l < nlines do
@@ -602,8 +602,8 @@ function update_asm(word l)
         if st then want = 1 end
         if lasm[l] == want and l > cy + 1 then return end
         lasm[l] = want
-        get_line(l)
-        colour_line(st)
+        get_ln(l)
+        colour_ln(st)
         st = asm_after
         l += 1
     end
@@ -653,8 +653,8 @@ function build_text_row(byte r)
     if l < nlines then
         row_num(0, 4, l + 1, C_GUT)
         rowa[4] = C_GUT * 2
-        get_line(l)
-        colour_line(lasm[l] ~= 0)
+        get_ln(l)
+        colour_ln(lasm[l] ~= 0)
         word c = left_
         byte x = GUTTER
         while x < 79 and c <= blen do
@@ -723,8 +723,11 @@ function draw_status()
         rowa[c + len(prompt_text)] = C_CURSOR * 2
     else
         if hv_open then
-            row_text(1, "Manual: arrows, left/right chapter, ENTER, F find, N next, BREAK close", C_STATUS)
-            if message ~= "" then row_text(1, message, msg_colour) end
+            if message ~= "" then
+                row_text(1, message, msg_colour)
+            else
+                row_text(1, "Manual: arrows, left/right chapter, ENTER, F find, N next, BREAK close", C_STATUS)
+            end
             put_row(STATUS_ROW)
             return
         end
@@ -744,17 +747,17 @@ function draw_status()
 end
 
 -- the open menu: a box below its name, or the pop-up menu of the right
--- button at the pointer
+-- button at the mouse arrow
 string menu_items[] = {
     "New           EXT N", "Open...       EXT O", "Save          EXT S", "Save as...",
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "", "Build output  EXT L", "Language manual EXT H", "Kezikonyv (magyar)"
+    "Keys", "About", "", "Build output  EXT L", "Language manual"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
-byte menu_order[20] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 20, 16}
-byte menu_first[5] = {0, 4, 13, 16, 20}
+byte menu_order[19] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 16}
+byte menu_first[5] = {0, 4, 13, 16, 19}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -1051,27 +1054,27 @@ end
 -- the tilemap's text rows moved by n rows (up: the text goes up)
 word sh_src = 0
 word sh_dst = 0
-word sh_cnt = 0
 function shift_rows(byte n, bool up)
-    sh_cnt = word(TEXT_ROWS - n) * 160
-    if up then
-        sh_dst = TILEMAP + TEXT_TOP * 160
-        sh_src = sh_dst + word(n) * 160
+    -- row by row, columns 0..78: the scroll bar (column 79) stays as it is
+    -- (draw_thumb sets it afterwards), so it does not jump for a moment
+    byte cnt = TEXT_ROWS - n
+    byte i = 0
+    while i < cnt do
+        byte d = TEXT_TOP + TEXT_ROWS - 1 - i
+        byte s_ = d - n
+        if up then
+            d = TEXT_TOP + i
+            s_ = d + n
+        end
+        sh_dst = TILEMAP + word(d) * 160
+        sh_src = TILEMAP + word(s_) * 160
         asm
             ld hl,(g_sh_src)
             ld de,(g_sh_dst)
-            ld bc,(g_sh_cnt)
+            ld bc,158
             ldir
         end
-    else
-        sh_dst = TILEMAP + (TEXT_TOP + TEXT_ROWS) * 160 - 1
-        sh_src = sh_dst - word(n) * 160
-        asm
-            ld hl,(g_sh_src)
-            ld de,(g_sh_dst)
-            ld bc,(g_sh_cnt)
-            lddr
-        end
+        i += 1
     end
 end
 
@@ -1335,10 +1338,10 @@ function mouse_init()
     sprites_visible(true, true)
 end
 
--- the text position under the pointer: false if not in the text
+-- the text position under the mouse arrow: false if not in the text
 word hit_line = 0
 byte hit_col = 0
-function pointer_text() -> bool
+function mouse_text() -> bool
     word r = py / 8
     if r < TEXT_TOP or r >= TEXT_TOP + TEXT_ROWS then return false end
     word c = px / 4
@@ -1421,7 +1424,7 @@ function mouse_poll()
     if rdown and not rwas then right_click() end
 end
 
--- the pointer over a menu: its item, or another menu of the bar
+-- the mouse arrow over a menu: its item, or another menu of the bar
 function hover()
     if not menu_open then return end
     word r = py / 8
@@ -1522,7 +1525,7 @@ function right_click()
     end
     if prompt_kind ~= 0 then return end
     drag = false
-    if not sel_on and pointer_text() then
+    if not sel_on and mouse_text() then
         word l = hit_line
         if l >= nlines then l = nlines - 1 end
         move_to(l, hit_col)
@@ -1681,9 +1684,9 @@ function insert_char(byte c)
     scroll_to_cursor()
 end
 
-function new_line()
+function new_ln()
     load_cur(cy)
-    if not insert_line(cy + 1) then
+    if not insert_ln(cy + 1) then
         set_msg("the text is full", C_ERR)
         return
     end
@@ -1743,7 +1746,7 @@ function backspace()
         i += 1
     end
     cur_line = 0xFFFF          -- dropped, not stored
-    delete_line(cy)
+    delete_ln(cy)
     cy = above
     load_cur(above)
     i = 0
@@ -1788,7 +1791,7 @@ function delete_forward()
         i += 1
     end
     store_cur()
-    delete_line(nl_)
+    delete_ln(nl_)
     update_asm(cy)
     changed()
     redraw_all = true
@@ -1816,7 +1819,7 @@ function copy_sel() -> bool
     clip_line = false
     word l = s_l1
     while l <= s_l2 do
-        get_line(l)
+        get_ln(l)
         word a = 0
         if l == s_l1 then a = s_c1 end
         word b = blen
@@ -1865,7 +1868,7 @@ function delete_sel()
     if not sel_on then return end
     sel_order()
     store_cur()
-    get_line(s_l2)
+    get_ln(s_l2)
     byte suf[256]
     word n = 0
     word i = s_c2
@@ -1887,7 +1890,7 @@ function delete_sel()
         i += 1
     end
     store_cur()
-    if s_l2 > s_l1 then delete_lines(s_l1 + 1, s_l2 - s_l1) end
+    if s_l2 > s_l1 then delete_lns(s_l1 + 1, s_l2 - s_l1) end
     cy = s_l1
     cx = s_c1
     sel_on = false
@@ -1897,7 +1900,7 @@ function delete_sel()
     scroll_to_cursor()
 end
 
-function delete_this_line()
+function delete_this_ln()
     sel_clear()
     marking = false
     load_cur(cy)
@@ -1908,7 +1911,7 @@ function delete_this_line()
         return
     end
     cur_line = 0xFFFF
-    delete_line(cy)
+    delete_ln(cy)
     if cy >= nlines then cy = nlines - 1 end
     load_cur(cy)
     if cx > cur_len then cx = cur_len end
@@ -1926,7 +1929,7 @@ function cut_cmd()
         return
     end
     copy_cmd()
-    delete_this_line()
+    delete_this_ln()
     set_msg("line cut", C_STATUS)
 end
 
@@ -1945,7 +1948,7 @@ function paste_cmd()
     end
     load_cur(cy)
     store_cur()
-    if not insert_lines(cy + 1, nl_) then
+    if not insert_lns(cy + 1, nl_) then
         set_msg("the text is full", C_ERR)
         return
     end
@@ -2064,14 +2067,14 @@ function load_file(string name) -> bool
     end
     cur_line = 0xFFFF
     text_reset()
-    insert_line(0)
+    insert_ln(0)
     word l = 0
     bool long_ = false
     bool full = false
     word c = file_getc(fh)
     while c ~= FILE_EOF do
         if c == 10 then
-            if not insert_line(l + 1) then
+            if not insert_ln(l + 1) then
                 full = true
                 break
             end
@@ -2100,7 +2103,7 @@ function load_file(string name) -> bool
     end
     file_close(fh)
     -- the final newline makes an empty last line: drop it
-    if nlines > 1 and line_len(nlines - 1) == 0 then delete_line(nlines - 1) end
+    if nlines > 1 and line_len(nlines - 1) == 0 then delete_ln(nlines - 1) end
     update_asm(0)
     cy = 0
     cx = 0
@@ -2122,7 +2125,7 @@ end
 function new_text()
     cur_line = 0xFFFF
     text_reset()
-    insert_line(0)
+    insert_ln(0)
     cy = 0
     cx = 0
     top = 0
@@ -2213,7 +2216,7 @@ function find_next()
     word start = word(cx) + 1
     word tries = 0
     while tries <= nlines do
-        get_line(l)
+        get_ln(l)
         word i = start
         while i + flen <= blen do
             byte j = 0
@@ -2362,7 +2365,7 @@ function run_item(byte it)
     elseif it == 8 then
         mark_cmd()
     elseif it == 9 then
-        delete_this_line()
+        delete_this_ln()
     elseif it == 10 then
         prompt(3, "Find:", find_text)
     elseif it == 11 then
@@ -2381,10 +2384,8 @@ function run_item(byte it)
     elseif it == 18 then
         show_output()
     elseif it == 19 then
-        hv_show("help.txt", hv_cur)
-    elseif it == 20 then
-        if hv_file ~= "help-hu.txt" then hv_cur = 0 end
-        hv_show("help-hu.txt", hv_cur)
+        hv_show("lib/help.txt", hv_cur)
+
     end
 end
 
@@ -2433,7 +2434,7 @@ function ext_command(word c)
     elseif c == 'm' then
         mark_cmd()
     elseif c == 'k' then
-        delete_this_line()
+        delete_this_ln()
     elseif c == 'l' then
         show_output()
     elseif c == 'h' then
@@ -2520,7 +2521,7 @@ function handle_key(word k)
     elseif k == K_ENTER then
         if sel_on then delete_sel() end
         marking = false
-        if not sel_on then new_line() end
+        if not sel_on then new_ln() end
     elseif k == K_BREAK then
         marking = false
         sel_clear()
@@ -2971,25 +2972,37 @@ function browser_wheel(sbyte d)
 end
 
 -- ---------------------------------------------------------------- the manual
--- Help -> Language manual: help.txt (help-hu.txt: Hungarian), the LZ80N
+-- Help -> Language manual: help.txt, the LZ80N
 -- manual, in the text area: the cursor keys move, left / right go to the
 -- previous / next chapter, ENTER on a line of the contents opens that
 -- chapter, F finds a text (N: again), EXT H in the editor looks up the
 -- word under the cursor. BREAK closes it.
 
-far byte ht[65280]          -- the text
-far word hl_off[4000]       -- the wrapped lines: offset, length, kind
+far byte ht0[65280]         -- the text (two arrays: a manual is over 64K)
+far byte ht1[65280]
+far word hl_off[4000]       -- the lines: offset, array, length, kind
+far byte hl_arr[4000]
 far byte hl_len[4000]
-far byte hl_kind[4000]      -- 0 text, 1 heading, 2 code, 3 table
+far byte hl_kind[4000]      -- 0 text, 1 chapter, 2 section, 3 code, 4 table
+                            -- head, 5 table row, 6 rule (help.txt marks)
 word hl_n = 0
-word ht_len = 0
 word hv_top = 0
 word hv_cur = 0
 bool hv_open = false
 string hv_file = ""
 string hv_find = ""
 
--- read a manual and wrap its lines at the text width
+function ht_get(byte a, word o) -> byte
+    if a == 0 then return ht0[o] end
+    return ht1[o]
+end
+
+-- byte i of line l
+function hl_byte(word l, byte i) -> byte
+    return ht_get(hl_arr[l], hl_off[l] + i)
+end
+
+-- read a manual (help.txt: lines already laid out by the export)
 function hv_load(string name) -> bool
     if hv_file == name then return true end
     byte h = file_open(name, FILE_READ)
@@ -2998,53 +3011,50 @@ function hv_load(string name) -> bool
         redraw_line = true
         return false
     end
-    ht_len = 0
+    set_msg("reading the manual...", C_STATUS)
+    draw_status()
+    hl_n = 0
+    byte arr = 0
+    word pos = 0
     word c = file_getc(h)
-    while c ~= FILE_EOF and ht_len < 65280 do
-        ht[ht_len] = byte(c)
-        ht_len += 1
-        c = file_getc(h)
+    while c ~= FILE_EOF and hl_n < 4000 do
+        -- one line into lbuf
+        byte n = 0
+        while c ~= FILE_EOF and c ~= 10 do
+            if n < 250 then
+                lbuf[n] = byte(c)
+                n += 1
+            end
+            c = file_getc(h)
+        end
+        if c == 10 then c = file_getc(h) end
+        byte kind = 0
+        byte from = 0
+        if n > 0 and lbuf[0] >= 0x11 and lbuf[0] <= 0x16 then
+            kind = lbuf[0] - 0x10
+            from = 1
+        end
+        -- into the arrays (a line does not cross from one to the other)
+        if word(65280) - pos < n then
+            if arr == 1 then break end
+            arr = 1
+            pos = 0
+        end
+        hl_off[hl_n] = pos
+        hl_arr[hl_n] = arr
+        hl_len[hl_n] = n - from
+        hl_kind[hl_n] = kind
+        byte i = from
+        while i < n do
+            if arr == 0 then ht0[pos] = lbuf[i] else ht1[pos] = lbuf[i] end
+            pos += 1
+            i += 1
+        end
+        hl_n += 1
     end
     file_close(h)
-    -- the lines, wrapped at word boundaries at 77 columns
-    hl_n = 0
-    bool code = false
-    word p = 0
-    while p < ht_len and hl_n < 4000 do
-        word e = p
-        while e < ht_len and ht[e] ~= 10 do e += 1 end
-        byte kind = 0
-        if ht[p] == '`' and e - p >= 3 and ht[p + 1] == '`' then
-            code = not code
-            kind = 2
-        elseif code then
-            kind = 2
-        elseif ht[p] == '#' then
-            kind = 1
-        elseif ht[p] == '|' then
-            kind = 3
-        end
-        word q = p
-        bool first = true
-        while (q < e or first) and hl_n < 4000 do
-            first = false
-            word n = e - q
-            if n > 77 then
-                n = 77
-                -- back to a space, unless there is none
-                word b = n
-                while b > 20 and ht[q + b] ~= ' ' do b -= 1 end
-                if b > 20 then n = b + 1 end
-            end
-            hl_off[hl_n] = q
-            hl_len[hl_n] = byte(n)
-            hl_kind[hl_n] = kind
-            hl_n += 1
-            q += n
-        end
-        p = e + 1
-    end
     hv_file = name
+    set_msg("", C_STATUS)
     return true
 end
 
@@ -3055,6 +3065,7 @@ function hv_show(string name, word at_)
     hv_cur = at_
     hv_top = at_
     if hv_top > 3 then hv_top -= 3 else hv_top = 0 end
+    set_msg("", C_STATUS)
     redraw_all = true
 end
 
@@ -3063,28 +3074,52 @@ function hv_close()
     redraw_all = true
 end
 
+-- a line of the manual: the colour of its kind, inline code (between the
+-- marks 1 and 2) in the code colour
 function hv_row(byte r)
     word l = hv_top + (r - TEXT_TOP)
     row_clear(C_TEXT)
     if l < hl_n then
-        byte colour = C_TEXT
         byte k = hl_kind[l]
-        if k == 1 then colour = C_KEY end
-        if k == 2 then colour = C_NUM end
-        if k == 3 then colour = C_TYPE end
-        word o = hl_off[l]
+        byte colour = C_TEXT
+        if k == 1 then
+            colour = C_MENU
+            byte x = 0
+            while x < 79 do
+                rowa[x] = C_MENU * 2
+                x += 1
+            end
+        elseif k == 2 then
+            colour = C_KEY
+        elseif k == 3 then
+            colour = C_NUM
+        elseif k == 4 then
+            colour = C_TYPE
+        elseif k == 6 then
+            colour = C_GUT
+        end
+        byte now = colour
         byte n = hl_len[l]
         byte i = 0
-        while i < n do
-            rowc[1 + i] = ht[o + i]
-            rowa[1 + i] = colour * 2
+        byte x = 1
+        while i < n and x < 79 do
+            byte c = hl_byte(l, i)
+            if c == 1 then
+                now = C_NUM
+            elseif c == 2 then
+                now = colour
+            else
+                rowc[x] = c
+                rowa[x] = now * 2
+                x += 1
+            end
             i += 1
         end
         if l == hv_cur then
-            byte x = 0
-            while x < 79 do
-                rowa[x] = C_SEL * 2
-                x += 1
+            byte x2 = 0
+            while x2 < 79 do
+                rowa[x2] = C_SEL * 2
+                x2 += 1
             end
         end
     end
@@ -3119,10 +3154,9 @@ end
 -- does line l start with the text t?
 function hv_starts(word l, string t) -> bool
     if hl_len[l] < len(t) then return false end
-    word o = hl_off[l]
     byte i = 0
     while i < len(t) do
-        if ht[o + i] ~= asc(t, i) then return false end
+        if hl_byte(l, i) ~= asc(t, i) then return false end
         i += 1
     end
     return true
@@ -3139,7 +3173,7 @@ function hv_chapter(bool next)
             if l == 0 then return end
             l -= 1
         end
-        if hv_starts(l, "## ") then
+        if hl_kind[l] == 1 then
             hv_top = l
             hv_go(l)
             draw_hv()
@@ -3153,12 +3187,11 @@ function hv_has(word l, string t) -> bool
     byte n = len(t)
     byte ln = hl_len[l]
     if n == 0 or ln < n then return false end
-    word o = hl_off[l]
     byte i = 0
     while i + n <= ln do
         byte j = 0
         while j < n do
-            byte a = ht[o + i + j]
+            byte a = hl_byte(l, i + j)
             byte b = asc(t, j)
             if a >= 'A' and a <= 'Z' then a += 32 end
             if b >= 'A' and b <= 'Z' then b += 32 end
@@ -3200,20 +3233,20 @@ end
 
 -- ENTER: a line of the contents ("12. ...") opens its chapter
 function hv_enter()
-    word o = hl_off[hv_cur]
-    byte n = hl_len[hv_cur]
+    word lc = hv_cur
+    byte n = hl_len[lc]
     byte i = 0
-    while i < n and ht[o + i] >= '0' and ht[o + i] <= '9' do i += 1 end
-    if i == 0 or i >= n or ht[o + i] ~= '.' then return end
-    string head = "## "
+    while i < n and hl_byte(lc, i) >= '0' and hl_byte(lc, i) <= '9' do i += 1 end
+    if i == 0 or i >= n or hl_byte(lc, i) ~= '.' then return end
+    string head = ""
     byte k = 0
     while k <= i do
-        head = head .. chr(ht[o + k])
+        head = head .. chr(hl_byte(lc, k))
         k += 1
     end
     word l = 0
     while l < hl_n do
-        if hv_starts(l, head) then
+        if hl_kind[l] == 1 and hv_starts(l, head) then
             hv_top = l
             hv_cur = l
             draw_hv()
@@ -3224,6 +3257,10 @@ function hv_enter()
 end
 
 function hv_key(word k)
+    if message ~= "" then
+        set_msg("", C_STATUS)
+        redraw_line = true
+    end
     if k == K_BREAK or k == K_MENU then
         hv_close()
     elseif k == K_UP then
@@ -3260,9 +3297,9 @@ function context_help()
     while a > 0 and (is_alpha(cur[a - 1]) or is_digit(cur[a - 1])) do a -= 1 end
     byte b = cx
     while b < cur_len and (is_alpha(cur[b]) or is_digit(cur[b])) do b += 1 end
-    if not hv_load("help.txt") then return end
+    if not hv_load("lib/help.txt") then return end
     if a == b then
-        hv_show("help.txt", 0)
+        hv_show("lib/help.txt", 0)
         return
     end
     string w = ""
@@ -3271,13 +3308,14 @@ function context_help()
         w = w .. chr(cur[i])
         i += 1
     end
-    -- after the contents: a heading, then `word(`, then `word`, then the word
+    -- after the contents: code starting with `word(`, then the code `word`,
+    -- then code starting with it, then the word (1 and 2 mark code)
     word start = 0
-    while start < hl_n and not hv_starts(start, "## 1.") do start += 1 end
+    while start < hl_n and not (hl_kind[start] == 1 and hv_starts(start, "1.")) do start += 1 end
     if start == hl_n then start = 0 end
-    word l = hv_search("`" .. w .. "(", start)
-    if l == hl_n then l = hv_search("`" .. w .. "`", start) end
-    if l == hl_n then l = hv_search("`" .. w, start) end
+    word l = hv_search(chr(1) .. w .. "(", start)
+    if l == hl_n then l = hv_search(chr(1) .. w .. chr(2), start) end
+    if l == hl_n then l = hv_search(chr(1) .. w, start) end
     if l == hl_n then l = hv_search(w, start) end
     if l == hl_n then
         set_msg("not in the manual: " .. w, C_ERR)
@@ -3285,7 +3323,7 @@ function context_help()
         return
     end
     hv_find = w
-    hv_show("help.txt", l)
+    hv_show("lib/help.txt", l)
 end
 
 -- ---------------------------------------------------------------- splash
@@ -3344,8 +3382,8 @@ end
 
 -- the version of the compiler (version.txt next to the .nex files)
 function version_text() -> string
-    if not file_exists("version.txt") then return "" end
-    sh = file_open("version.txt", FILE_READ)
+    if not file_exists("lib/version.txt") then return "" end
+    sh = file_open("lib/version.txt", FILE_READ)
     if sh == FILE_ERROR then return "" end
     read_ln()
     file_close(sh)

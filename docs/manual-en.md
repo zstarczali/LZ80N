@@ -1705,12 +1705,20 @@ then in NextBASIC:
 .nexload ide.nex
 ```
 
+The folder holds the five `.nex` programs; `lib/` the runtime, the modules
+and the manuals; `examples/` the example programs with their pictures,
+sounds and include files (open `examples/hello.lz80n` to start). A
+program's includes and assets are relative to its own folder.
+
 ### 25.1 The LZ80N IDE
 
 `ide.nex` is a full-screen editor in the 80-column text mode: menus (File,
 Edit, Build, Help), syntax highlighting, line numbers, a scroll bar, a
 status line, the Kempston mouse with a pointer (click, drag to select,
-double click a word, the right button opens a menu, the wheel scrolls).
+double click a word, click a line number for the whole line, the right
+button opens a menu, the wheel scrolls, the scroll bar pages and drags).
+It starts with a splash screen (Help -> About shows it again). The Next
+keyboard's own cursor, DELETE, EDIT, BREAK and EXTEND keys work too.
 
 | Keys | |
 |------|---|
@@ -1727,16 +1735,23 @@ double click a word, the right button opens a menu, the wheel scrolls).
 | EXTEND, then L / H | the build output / the manual at the word under the cursor |
 
 **Compile** (Build -> Compile, EXTEND B) saves the program and starts the
-compiler; it comes back to the IDE with the result. The compiler's messages
-appear on the screen like in a command line session and are shown in the
-IDE afterwards (Build -> Build output); an error puts the cursor on its
-line (in an included file it opens that file). **Compile & run** starts the
-program when it compiled.
+compiler; it comes back to the IDE with the result. While it works the
+screen still looks like the IDE, with the compiler's messages (and the time
+of each stage) in a window; the IDE shows them again afterwards (Build ->
+Build output, EXTEND L). An error is in red and puts the cursor on its line
+(in an included file it opens that file; the main file stays the one that
+is compiled, as the menu bar shows). **Compile & run** starts the program
+when it compiled.
 
-**File -> Open** shows the folders and the program files of a folder.
-**Help -> Language manual** shows this manual (Hungarian:
-**Kezikonyv (magyar)**); left / right go to the chapters, ENTER on a line of
-the contents opens its chapter, F finds a text.
+**File -> Open** is a file browser: the folders and the program files
+(`.lz80n`, `.asm`, `.txt`, `.md`, `.bas`, `.log`) of a folder with their
+sizes, folders first; ENTER or a double click opens one, a letter jumps to
+the names starting with it, `<type a name>` asks for a name.
+
+**Help -> Language manual** shows this manual, without the parts about the
+PC: left / right go to the chapters, ENTER on a line of the contents opens
+its chapter, F finds a text, N finds it again. EXTEND H opens it at the
+word under the cursor.
 
 ### 25.2 The stages
 
@@ -1751,6 +1766,12 @@ COPY "myprog.lz80n" TO "in.lz80n"
 ```
 
 Errors go to `codegen.err`, `asm.err` or `assets.err`; `build.log` has the
-messages of the stages. A small program takes about 10-15 seconds at 28 MHz.
+messages of the stages, which also appear on the screen in a window that
+looks like the IDE. A small program takes about 2 seconds of work at
+28 MHz (plus loading the stages from the SD card); one that uses the Layer 2
+module about 13 seconds. Only the functions the program can call are
+compiled (a module has many it does not use), and the runtime comes
+ready-made (`lib/rt_core.bin`).
+
 The language is the same as with `lz80nc` on a PC (`selfhost/README.md`
 lists the details).

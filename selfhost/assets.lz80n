@@ -1570,7 +1570,7 @@ function convert(byte a)
 end
 
 log_start(false)
-print("assets: converting...")
+log_note("assets: converting...")
 scan_assets()
 word count = 0
 byte ia = 0
@@ -1582,7 +1582,7 @@ end
 if failed then
     byte eh = file_open("assets.err", FILE_WRITE)
     string m = "error " .. err_path .. ": " .. err_text
-    log_line(m)
+    log_say(m)
     if eh ~= FILE_ERROR then
         file_write(eh, addr(m) + 1, len(m))
         file_close(eh)
