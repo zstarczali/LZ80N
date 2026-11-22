@@ -1,0 +1,1799 @@
+-- selfhost/editor.lz80n - the LZ80N editor (IDE) for the ZX Spectrum Next
+--
+-- A full-screen editor in the 80x32 tilemap mode: a menu bar (File, Edit,
+-- Build, Help), syntax highlighting, the Kempston mouse with a sprite
+-- pointer, and Build -> Compile / Compile & run, which saves the program,
+-- starts the self-hosted compiler (lexer.nex -> ... -> asm.nex) and comes
+-- back here with the result; an error puts the cursor on its line.
+--
+-- Keys (Spectrum keyboard; the Next's extra keys give the same codes):
+--   CAPS+5..8 cursor, CAPS+0 DELETE (backspace), CAPS+9 GRAPH (delete
+--   forward), CAPS+3 / CAPS+4 page up / down, CAPS+1 EDIT (the menus),
+--   CAPS+SPACE BREAK (cancel), CAPS+2 caps lock, SYMBOL SHIFT for the
+--   symbols of the keys (and SYM+Q `[`, SYM+W `]`, SYM+E `^`, SYM+A `~`,
+--   SYM+S `|`, SYM+D `\`, SYM+F `{`, SYM+G `}`, SYM+X backquote).
+--   EXTEND (CAPS+SYMBOL) then: S save, O open, N new, B compile, R compile
+--   and run, F find, G go to line, C copy line, X cut line, V paste,
+--   K delete line, cursor left / right = start / end of the line,
+--   cursor up / down = top / end of the text.
+--
+-- Files: the program as text (LF lines); editor.ses keeps the session
+-- (file, cursor) across a compile. editor.key, when present, is read as
+-- keystrokes instead of the keyboard (for tests), and the editor ends at
+-- its end.
+
+-- ---------------------------------------------------------------- screen
+
+const COLS = 80
+const ROWS = 32
+const TEXT_TOP = 1          -- rows 1..30: the text
+const TEXT_ROWS = 30
+const STATUS_ROW = 31
+const GUTTER = 5            -- line numbers
+const TW = 75               -- text columns
+const TILEMAP = 0x6000
+const FONT = 0x7400         -- tile definitions (80x32 needs $6000..$73FF)
+
+-- colours: tilemap palette pairs (paper, ink)
+const C_TEXT = 20
+const C_KEY = 21
+const C_TYPE = 22
+const C_NUM = 23
+const C_STR = 24
+const C_COM = 25
+const C_ASM = 26
+const C_GUT = 27
+const C_MENU = 28
+const C_MENUHI = 29
+const C_STATUS = 30
+const C_CURSOR = 31
+const C_ERR = 32
+const C_BOX = 33
+const C_BUILTIN = 34
+const C_MENUKEY = 35
+byte pal_paper[16] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02}
+byte pal_ink[16] = {0xB6, 0x1F, 0x1C, 0xFC, 0xF4, 0x6E, 0xB3, 0x6D, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xE7, 0xFC}
+
+byte rowc[80]               -- one screen row: characters
+byte rowa[80]               --   and attributes
+
+-- rowc / rowa to screen row r
+function put_row(byte r)
+    asm
+        ld a,(p_put_row_r)
+        ld e,a
+        ld d,160
+        mul d,e
+        ld hl,$6000
+        add hl,de
+        ld de,g_rowc
+        push ix
+        ld ix,g_rowa
+        ld b,80
+.l:
+        ld a,(de)
+        ld (hl),a
+        inc hl
+        ld a,(ix+0)
+        ld (hl),a
+        inc hl
+        inc de
+        inc ix
+        djnz .l
+        pop ix
+    end
+end
+
+function row_clear(byte colour)
+    byte a = colour * 2
+    word i = 0
+    while i < 80 do
+        rowc[i] = ' '
+        rowa[i] = a
+        i += 1
+    end
+end
+
+-- text into the row at column c (clipped)
+function row_text(byte c, string t, byte colour)
+    byte i = 0
+    while i < len(t) and c < 80 do
+        rowc[c] = asc(t, i)
+        rowa[c] = colour * 2
+        c += 1
+        i += 1
+    end
+end
+
+function screen_init()
+    -- 80x32 tilemap, attributes, text mode, over the ULA; the font moved
+    -- above the bigger map
+    nextreg[0x6B] = 0xC9
+    nextreg[0x6F] = 0x34
+    asm
+        ld hl,rt_font
+        ld de,$7400+32*8
+        ld bc,96*8
+        ldir
+    end
+    nextreg[0x43] = 0x30
+    nextreg[0x40] = 40
+    for k = 0, 15 do
+        nextreg[0x41] = pal_paper[k]
+        nextreg[0x41] = pal_ink[k]
+    end
+    nextreg[0x4A] = 0x00
+    row_clear(C_TEXT)
+    for r = 0, 31 do put_row(byte(r)) end
+end
+
+-- ---------------------------------------------------------------- the text
+-- line slots of 256 bytes (length, then up to 255 characters) in 8 far
+-- arrays of 255 slots; lslot[] maps line numbers to slots
+
+const MAXLINES = 2040
+far byte sa0[65280]
+far byte sa1[65280]
+far byte sa2[65280]
+far byte sa3[65280]
+far byte sa4[65280]
+far byte sa5[65280]
+far byte sa6[65280]
+far byte sa7[65280]
+far word lslot[2040]
+far byte lasm[2040]         -- the line is inside an `asm` block
+far word freeslot[2040]
+word nfree = 0
+word nlines = 0
+
+function sget(word s, word i) -> byte
+    byte a = byte(s / 255)
+    word o = (s % 255) * 256 + i
+    if a == 0 then return sa0[o] end
+    if a == 1 then return sa1[o] end
+    if a == 2 then return sa2[o] end
+    if a == 3 then return sa3[o] end
+    if a == 4 then return sa4[o] end
+    if a == 5 then return sa5[o] end
+    if a == 6 then return sa6[o] end
+    return sa7[o]
+end
+
+function sset(word s, word i, byte v)
+    byte a = byte(s / 255)
+    word o = (s % 255) * 256 + i
+    if a == 0 then
+        sa0[o] = v
+    elseif a == 1 then
+        sa1[o] = v
+    elseif a == 2 then
+        sa2[o] = v
+    elseif a == 3 then
+        sa3[o] = v
+    elseif a == 4 then
+        sa4[o] = v
+    elseif a == 5 then
+        sa5[o] = v
+    elseif a == 6 then
+        sa6[o] = v
+    else
+        sa7[o] = v
+    end
+end
+
+function text_reset()
+    nfree = 0
+    word s = MAXLINES
+    while s > 0 do
+        s -= 1
+        freeslot[nfree] = s
+        nfree += 1
+    end
+    nlines = 0
+end
+
+-- a new empty line at position at: false when the text is full
+function insert_line(word at) -> bool
+    if nfree == 0 or nlines >= MAXLINES then return false end
+    nfree -= 1
+    word s = freeslot[nfree]
+    sset(s, 0, 0)
+    word i = nlines
+    while i > at do
+        lslot[i] = lslot[i - 1]
+        lasm[i] = lasm[i - 1]
+        i -= 1
+    end
+    lslot[at] = s
+    lasm[at] = 0
+    nlines += 1
+    return true
+end
+
+function delete_line(word at)
+    freeslot[nfree] = lslot[at]
+    nfree += 1
+    word i = at
+    while i + 1 < nlines do
+        lslot[i] = lslot[i + 1]
+        lasm[i] = lasm[i + 1]
+        i += 1
+    end
+    nlines -= 1
+end
+
+function line_len(word l) -> byte
+    return sget(lslot[l], 0)
+end
+
+-- line l into buf (its length: blen)
+byte lbuf[256]
+byte blen = 0
+function get_line(word l)
+    if l == cur_line then
+        blen = cur_len
+        word i = 0
+        while i < cur_len do
+            lbuf[i] = cur[i]
+            i += 1
+        end
+        return
+    end
+    word s = lslot[l]
+    blen = sget(s, 0)
+    word i = 0
+    while i < blen do
+        lbuf[i] = sget(s, i + 1)
+        i += 1
+    end
+end
+
+-- the line being edited, in cur[]
+byte cur[256]
+byte cur_len = 0
+word cur_line = 0xFFFF
+
+function store_cur()
+    if cur_line == 0xFFFF or cur_line >= nlines then return end
+    word s = lslot[cur_line]
+    sset(s, 0, cur_len)
+    word i = 0
+    while i < cur_len do
+        sset(s, i + 1, cur[i])
+        i += 1
+    end
+end
+
+function load_cur(word l)
+    if l == cur_line then return end
+    store_cur()
+    cur_line = 0xFFFF
+    get_line(l)
+    cur_len = blen
+    word i = 0
+    while i < blen do
+        cur[i] = lbuf[i]
+        i += 1
+    end
+    cur_line = l
+end
+
+-- ---------------------------------------------------------------- editor state
+
+string fname = ""
+bool modified = false
+word cy = 0                 -- cursor line
+byte cx = 0                 -- cursor column
+word top = 0                -- first line on the screen
+byte left_ = 0              -- first column on the screen
+string message = ""
+byte msg_colour = C_STATUS
+bool redraw_all = true
+bool redraw_line = false
+bool blink = true
+word blink_t = 0
+
+function set_msg(string m, byte c)
+    message = m
+    msg_colour = c
+end
+
+-- ---------------------------------------------------------------- highlighting
+
+byte cbuf[256]              -- the colour of each character of lbuf
+
+function is_alpha(byte c) -> bool
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'
+end
+
+function is_digit(byte c) -> bool
+    return c >= '0' and c <= '9'
+end
+
+-- is lbuf[a..b) the word w?
+function word_is(byte a, byte b, string w) -> bool
+    if b - a ~= len(w) then return false end
+    byte i = 0
+    while i < len(w) do
+        if lbuf[a + i] ~= asc(w, i) then return false end
+        i += 1
+    end
+    return true
+end
+
+string keywords[] = {
+    "and", "or", "not", "if", "then", "elseif", "else", "end", "while", "do",
+    "for", "function", "return", "break", "const", "var", "true", "false",
+    "asm", "struct", "class", "asset", "interrupt", "far", "include", "extends",
+    "self", "super"
+}
+const NKEYWORDS = 28
+string types[] = {"bool", "byte", "sbyte", "word", "sword", "long", "fixed", "fixed16", "string"}
+const NTYPES = 9
+
+function word_kind(byte a, byte b) -> byte
+    byte k = 0
+    while k < NKEYWORDS do
+        if word_is(a, b, keywords[k]) then return C_KEY end
+        k += 1
+    end
+    k = 0
+    while k < NTYPES do
+        if word_is(a, b, types[k]) then return C_TYPE end
+        k += 1
+    end
+    -- a call: a built-in or a function
+    byte j = b
+    while j < blen and lbuf[j] == ' ' do j += 1 end
+    if j < blen and lbuf[j] == '(' then return C_BUILTIN end
+    return C_TEXT
+end
+
+-- colours of lbuf (line in_asm: inside an `asm` block); the state after the
+-- line in asm_after
+bool asm_after = false
+function colour_line(bool in_asm)
+    asm_after = in_asm
+    byte i = 0
+    if in_asm then
+        -- the block ends at a line that is `end` (before any `;`)
+        byte a = 0
+        while a < blen and lbuf[a] == ' ' do a += 1 end
+        byte b = a
+        while b < blen and lbuf[b] ~= ';' do b += 1 end
+        while b > a and lbuf[b - 1] == ' ' do b -= 1 end
+        bool is_end = word_is(a, b, "end")
+        while i < blen do
+            if is_end then cbuf[i] = C_KEY else cbuf[i] = C_ASM end
+            if lbuf[i] == ';' and not is_end then
+                while i < blen do
+                    cbuf[i] = C_COM
+                    i += 1
+                end
+            end
+            i += 1
+        end
+        if is_end then asm_after = false end
+        return
+    end
+    while i < blen do
+        byte c = lbuf[i]
+        if c == '-' and i + 1 < blen and lbuf[i + 1] == '-' then
+            while i < blen do
+                cbuf[i] = C_COM
+                i += 1
+            end
+        elseif c == '"' or c == 39 then
+            byte q = c
+            cbuf[i] = C_STR
+            i += 1
+            while i < blen and lbuf[i] ~= q do
+                if lbuf[i] == '\\' and i + 1 < blen then
+                    cbuf[i] = C_STR
+                    i += 1
+                end
+                cbuf[i] = C_STR
+                i += 1
+            end
+            if i < blen then
+                cbuf[i] = C_STR
+                i += 1
+            end
+        elseif is_digit(c) or c == '$' or (c == '%' and i + 1 < blen and (lbuf[i + 1] == '0' or lbuf[i + 1] == '1')) then
+            cbuf[i] = C_NUM
+            i += 1
+            while i < blen and (is_alpha(lbuf[i]) or is_digit(lbuf[i]) or lbuf[i] == '.') do
+                -- `..` after a number is the concatenation
+                if lbuf[i] == '.' and i + 1 < blen and lbuf[i + 1] == '.' then break end
+                cbuf[i] = C_NUM
+                i += 1
+            end
+        elseif is_alpha(c) then
+            byte a = i
+            while i < blen and (is_alpha(lbuf[i]) or is_digit(lbuf[i])) do i += 1 end
+            byte kd = word_kind(a, i)
+            byte j = a
+            while j < i do
+                cbuf[j] = kd
+                j += 1
+            end
+            if word_is(a, i, "asm") then
+                -- `asm` then the end of the line: a block follows
+                byte r = i
+                while r < blen and lbuf[r] == ' ' do r += 1 end
+                if r == blen then asm_after = true end
+            end
+        else
+            cbuf[i] = C_TEXT
+            i += 1
+        end
+    end
+end
+
+-- the `asm` states of the lines from line l on (until they stop changing)
+function update_asm(word l)
+    bool st = false
+    if l > 0 and l <= nlines then
+        get_line(l - 1)
+        colour_line(lasm[l - 1] ~= 0)
+        st = asm_after
+    end
+    while l < nlines do
+        byte want = 0
+        if st then want = 1 end
+        if lasm[l] == want and l > cy + 1 then return end
+        lasm[l] = want
+        get_line(l)
+        colour_line(st)
+        st = asm_after
+        l += 1
+    end
+end
+
+-- ---------------------------------------------------------------- drawing
+
+-- decimal of v right-aligned in rowc[c .. c + w)
+function row_num(byte c, byte w, word v, byte colour)
+    byte i = w
+    while i > 0 do
+        i -= 1
+        if v == 0 and i < w - 1 then
+            rowc[c + i] = ' '
+        else
+            rowc[c + i] = '0' + byte(v % 10)
+        end
+        rowa[c + i] = colour * 2
+        v = v / 10
+    end
+end
+
+function draw_text_row(byte r)
+    word l = top + (r - TEXT_TOP)
+    row_clear(C_TEXT)
+    if l < nlines then
+        row_num(0, 4, l + 1, C_GUT)
+        rowa[4] = C_GUT * 2
+        get_line(l)
+        colour_line(lasm[l] ~= 0)
+        word c = left_
+        byte x = GUTTER
+        while x < 80 and c < blen do
+            rowc[x] = lbuf[c]
+            rowa[x] = cbuf[c] * 2
+            x += 1
+            c += 1
+        end
+        if l == cy and blink and not menu_open and prompt_kind == 0 then
+            word sx = word(cx) - left_ + GUTTER
+            if sx >= GUTTER and sx < 80 then rowa[sx] = C_CURSOR * 2 end
+        end
+    else
+        rowc[0] = '~'
+        rowa[0] = C_GUT * 2
+    end
+    put_row(r)
+end
+
+string menu_names[] = {"File", "Edit", "Build", "Help"}
+byte menu_x[4] = {1, 7, 13, 20}
+const NMENUS = 4
+
+function draw_menu_bar()
+    row_clear(C_MENU)
+    byte m = 0
+    while m < NMENUS do
+        byte colour = C_MENU
+        if menu_open and m == menu_cur then colour = C_MENUHI end
+        rowc[menu_x[m] - 1] = ' '
+        rowa[menu_x[m] - 1] = colour * 2
+        row_text(menu_x[m], menu_names[m], colour)
+        rowc[menu_x[m] + len(menu_names[m])] = ' '
+        rowa[menu_x[m] + len(menu_names[m])] = colour * 2
+        rowa[menu_x[m]] = C_MENUKEY * 2
+        if colour == C_MENUHI then rowa[menu_x[m]] = C_MENUHI * 2 end
+        m += 1
+    end
+    string t = fname
+    if t == "" then t = "(new)" end
+    if modified then t = t .. " *" end
+    byte c = 80 - len(t) - 1
+    row_text(c, t, C_MENU)
+    row_text(60, "LZ80N", C_MENUKEY)
+    put_row(0)
+end
+
+function draw_status()
+    row_clear(C_STATUS)
+    if prompt_kind ~= 0 then
+        row_text(1, prompt_label, C_STATUS)
+        byte c = len(prompt_label) + 2
+        row_text(c, prompt_text, C_STATUS)
+        rowa[c + len(prompt_text)] = C_CURSOR * 2
+    else
+        row_text(1, "Ln ", C_STATUS)
+        row_num(4, 5, cy + 1, C_STATUS)
+        row_text(10, "Col ", C_STATUS)
+        row_num(14, 3, word(cx) + 1, C_STATUS)
+        if caps_lock then row_text(19, "CAPS", C_STATUS) end
+        if extend then row_text(24, "EXT", C_STATUS) end
+        if message ~= "" then
+            byte mc = msg_colour
+            row_text(29, message, mc)
+        end
+    end
+    put_row(STATUS_ROW)
+end
+
+-- the open menu (a box below its name)
+string menu_items[] = {
+    "New           EXT N", "Open...       EXT O", "Save          EXT S", "Save as...",
+    "Cut line      EXT X", "Copy line     EXT C", "Paste line    EXT V", "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
+    "Compile       EXT B", "Compile & run EXT R",
+    "Keys"
+}
+byte menu_first[5] = {0, 4, 11, 13, 14}
+bool menu_open = false
+byte menu_cur = 0
+byte menu_item = 0
+
+function draw_menu_box()
+    byte first = menu_first[menu_cur]
+    byte n = menu_first[menu_cur + 1] - first
+    byte x = menu_x[menu_cur] - 1
+    byte i = 0
+    while i <= n do
+        byte r = TEXT_TOP + i
+        draw_text_row(r)
+        if i < n then
+            byte colour = C_BOX
+            if i == menu_item then colour = C_MENUHI end
+            byte k = 0
+            while k < 22 do
+                rowc[x + k] = ' '
+                rowa[x + k] = colour * 2
+                k += 1
+            end
+            row_text(x + 1, menu_items[first + i], colour)
+        else
+            -- the bottom edge
+            byte k = 0
+            while k < 22 do
+                rowa[x + k] = C_BOX * 2
+                rowc[x + k] = ' '
+                k += 1
+            end
+        end
+        put_row(r)
+        i += 1
+    end
+end
+
+-- the help box
+bool help_open = false
+string help_text[] = {
+    "LZ80N editor - keys",
+    "",
+    "CAPS+5 6 7 8     cursor left down up right",
+    "CAPS+3 / CAPS+4  page up / page down",
+    "CAPS+0           delete (backspace)",
+    "CAPS+9           delete forward",
+    "CAPS+1 (EDIT)    menus (cursor keys, ENTER)",
+    "CAPS+SPACE       cancel (BREAK)",
+    "CAPS+2           caps lock",
+    "SYM+Q W E        [ ] ^",
+    "SYM+A S D F G    ~ | \\ { }",
+    "",
+    "EXTEND (CAPS+SYM), then:",
+    "  S save  O open  N new  B compile  R compile & run",
+    "  F find  G go to line",
+    "  C copy  X cut  V paste  K delete line",
+    "  left / right: start / end of the line",
+    "  up / down: start / end of the text",
+    "",
+    "The mouse: click to move the cursor, click the menus;",
+    "the wheel scrolls.",
+    "",
+    "Any key closes this."
+}
+const NHELP = 23
+
+function draw_help()
+    byte i = 0
+    while i < NHELP + 2 do
+        byte r = TEXT_TOP + 1 + i
+        draw_text_row(r)
+        byte k = 0
+        while k < 60 do
+            rowc[10 + k] = ' '
+            rowa[10 + k] = C_BOX * 2
+            k += 1
+        end
+        if i > 0 and i <= NHELP then row_text(12, help_text[i - 1], C_BOX) end
+        put_row(r)
+        i += 1
+    end
+end
+
+function redraw()
+    if redraw_all then
+        draw_menu_bar()
+        byte r = TEXT_TOP
+        while r < TEXT_TOP + TEXT_ROWS do
+            draw_text_row(r)
+            r += 1
+        end
+        if menu_open then draw_menu_box() end
+        if help_open then draw_help() end
+        draw_status()
+        redraw_all = false
+        redraw_line = false
+        return
+    end
+    if redraw_line then
+        if cy >= top and cy < top + TEXT_ROWS then draw_text_row(byte(cy - top) + TEXT_TOP) end
+        draw_menu_bar()
+        draw_status()
+        redraw_line = false
+    end
+end
+
+-- keep the cursor on the screen
+function scroll_to_cursor()
+    if cy < top then
+        top = cy
+        redraw_all = true
+    end
+    if cy >= top + TEXT_ROWS then
+        top = cy - TEXT_ROWS + 1
+        redraw_all = true
+    end
+    if cx < left_ then
+        left_ = cx
+        redraw_all = true
+    end
+    if word(cx) >= word(left_) + TW then
+        left_ = cx - TW + 1
+        redraw_all = true
+    end
+end
+
+-- ---------------------------------------------------------------- keyboard
+
+const K_UP = 1
+const K_DOWN = 2
+const K_LEFT = 3
+const K_RIGHT = 4
+const K_PGUP = 5
+const K_PGDN = 6
+const K_MENU = 7
+const K_BS = 8
+const K_DELF = 9
+const K_BREAK = 10
+const K_ENTER = 13
+const K_EXT = 0x200          -- + letter / cursor code: an EXTEND command
+
+-- the key matrix: row = address line A8..A15, 5 keys each (bit 0 first)
+byte k_plain[40] = {
+    0, 'z', 'x', 'c', 'v',
+    'a', 's', 'd', 'f', 'g',
+    'q', 'w', 'e', 'r', 't',
+    '1', '2', '3', '4', '5',
+    '0', '9', '8', '7', '6',
+    'p', 'o', 'i', 'u', 'y',
+    13, 'l', 'k', 'j', 'h',
+    ' ', 0, 'm', 'n', 'b'
+}
+byte k_sym[40] = {
+    0, ':', '`', '?', '/',
+    '~', '|', '\\', '{', '}',
+    '[', ']', '^', '<', '>',
+    '!', '@', '#', '$', '%',
+    '_', ')', '(', 39, '&',
+    '"', ';', 0, 0, 0,
+    13, '=', '+', '-', '^',
+    ' ', 0, '.', ',', '*'
+}
+word row_port[8] = {0xFEFE, 0xFDFE, 0xFBFE, 0xF7FE, 0xEFFE, 0xDFFE, 0xBFFE, 0x7FFE}
+
+byte kstate[8]              -- this frame (1 = pressed)
+byte kprev[8]
+byte held = 255             -- the key that repeats
+word held_t = 0
+bool caps_lock = false
+bool extend = false
+bool ext_down = false
+
+-- the code of key k (matrix index) with the shifts
+function key_code(byte k, bool caps, bool sym) -> word
+    if caps and sym then return 0 end
+    if caps then
+        if k == 15 then return K_MENU end      -- 1 EDIT
+        if k == 16 then
+            caps_lock = not caps_lock
+            redraw_line = true
+            return 0
+        end
+        if k == 17 then return K_PGUP end      -- 3
+        if k == 18 then return K_PGDN end      -- 4
+        if k == 19 then return K_LEFT end      -- 5
+        if k == 24 then return K_DOWN end      -- 6
+        if k == 23 then return K_UP end        -- 7
+        if k == 22 then return K_RIGHT end     -- 8
+        if k == 21 then return K_DELF end      -- 9 GRAPH
+        if k == 20 then return K_BS end        -- 0 DELETE
+        if k == 35 then return K_BREAK end     -- SPACE
+    end
+    byte c = k_plain[k]
+    if sym then c = k_sym[k] end
+    if c >= 'a' and c <= 'z' and (caps ~= caps_lock) then c -= 32 end
+    return c
+end
+
+word script_pos = 0
+word script_len = 0
+far byte script[60000]
+bool scripted = false
+
+function key_down(byte k) -> bool
+    return kstate[k / 5] & (1 << (k % 5)) ~= 0
+end
+
+-- the next key, 0 if none (EXTEND commands: K_EXT + letter or cursor code)
+function get_key() -> word
+    if scripted then
+        if script_pos >= script_len then return 0xFFFF end
+        byte b = script[script_pos]
+        script_pos += 1
+        if b >= 0x80 then return K_EXT + (b & 0x7F) end
+        return b
+    end
+    byte r = 0
+    while r < 8 do
+        kprev[r] = kstate[r]
+        kstate[r] = ~port[row_port[r]] & 31
+        r += 1
+    end
+    bool caps = kstate[0] & 1 ~= 0
+    bool sym = kstate[7] & 2 ~= 0
+    -- EXTEND: CAPS and SYMBOL together
+    if caps and sym then
+        if not ext_down then
+            ext_down = true
+            extend = not extend
+            redraw_line = true
+        end
+        return 0
+    end
+    ext_down = false
+    -- a new key: the first one found that was not down before
+    byte k = 0
+    while k < 40 do
+        if k ~= 0 and k ~= 36 and key_down(k) and kprev[k / 5] & (1 << (k % 5)) == 0 then
+            held = k
+            held_t = 0
+            return finish_key(key_code(k, caps, sym))
+        end
+        k += 1
+    end
+    if held ~= 255 then
+        if not key_down(held) then
+            held = 255
+            return 0
+        end
+        held_t += 1
+        if held_t > 20 and held_t % 3 == 0 then return finish_key(key_code(held, caps, sym)) end
+    end
+    return 0
+end
+
+-- after EXTEND the next key is a command
+function finish_key(word c) -> word
+    if c == 0 or not extend then return c end
+    extend = false
+    redraw_line = true
+    if c >= 'A' and c <= 'Z' then c += 32 end
+    return K_EXT + c
+end
+
+-- ---------------------------------------------------------------- mouse
+
+byte mx_last = 0
+byte my_last = 0
+word px = 160
+word py = 128
+bool mouse_seen = false
+byte mb_last = 0
+byte wheel_last = 0
+bool mouse_ok = false
+
+byte arrow[256] = {
+    0xFF, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0x00, 0xFF, 0xE3, 0xFF, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xFF, 0xFF, 0xE3, 0xE3, 0xFF, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xFF, 0x00, 0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xFF, 0xFF, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+    0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3
+}
+
+function mouse_init()
+    port[0x303B] = 0
+    word i = 0
+    while i < 256 do
+        port[0x5B] = arrow[i]
+        i += 1
+    end
+    mx_last = port[0xFBDF]
+    my_last = port[0xFFDF]
+    mb_last = port[0xFADF]
+    wheel_last = mb_last >> 4
+    sprites_visible(true, true)
+end
+
+-- the text position under the pointer: false if not in the text
+word hit_line = 0
+byte hit_col = 0
+function pointer_text() -> bool
+    word r = py / 8
+    if r < TEXT_TOP or r >= TEXT_TOP + TEXT_ROWS then return false end
+    word c = px / 4
+    hit_line = top + (r - TEXT_TOP)
+    if c < GUTTER then c = GUTTER end
+    hit_col = byte(c - GUTTER + left_)
+    return true
+end
+
+function mouse_poll()
+    byte mx = port[0xFBDF]
+    byte my = port[0xFFDF]
+    byte mb = port[0xFADF]
+    sword dx = sword(sbyte(mx - mx_last))
+    sword dy = sword(sbyte(my - my_last))
+    mx_last = mx
+    my_last = my
+    if dx ~= 0 or dy ~= 0 then
+        if not mouse_seen then
+            mouse_seen = true
+            sprite[0].show(0)
+        end
+        sword nx = sword(px) + dx
+        sword ny = sword(py) - dy
+        if nx < 0 then nx = 0 end
+        if nx > 319 then nx = 319 end
+        if ny < 0 then ny = 0 end
+        if ny > 255 then ny = 255 end
+        px = word(nx)
+        py = word(ny)
+        sprite[0].position(px, py)
+    end
+    -- the wheel: 4-bit counter
+    byte wh = mb >> 4
+    sbyte dw = sbyte(wh - wheel_last)
+    wheel_last = wh
+    if mouse_seen and dw ~= 0 then
+        if dw > 7 then dw -= 16 end
+        if dw < -8 then dw += 16 end
+        scroll_by(sword(dw) * 3)
+    end
+    -- the left button (bit 1, 0 = pressed): a click
+    bool down = mb & 2 == 0
+    bool was = mb_last & 2 == 0
+    mb_last = mb
+    if mouse_seen and down and not was then click() end
+end
+
+function scroll_by(sword d)
+    sword t = sword(top) + d
+    sword most = sword(nlines) - TEXT_ROWS
+    if most < 0 then most = 0 end
+    if t > most then t = most end
+    if t < 0 then t = 0 end
+    top = word(t)
+    if cy < top then move_to(top, cx) end
+    if cy >= top + TEXT_ROWS then move_to(top + TEXT_ROWS - 1, cx) end
+    redraw_all = true
+end
+
+function click()
+    word r = py / 8
+    word c = px / 4
+    if help_open then
+        help_open = false
+        redraw_all = true
+        return
+    end
+    if r == 0 then
+        -- the menu bar
+        byte m = 0
+        while m < NMENUS do
+            if c + 1 >= menu_x[m] and c < menu_x[m] + len(menu_names[m]) + 1 then
+                if menu_open and menu_cur == m then
+                    menu_open = false
+                else
+                    menu_open = true
+                    menu_cur = m
+                    menu_item = 0
+                end
+                redraw_all = true
+                return
+            end
+            m += 1
+        end
+        return
+    end
+    if menu_open then
+        byte first = menu_first[menu_cur]
+        byte n = menu_first[menu_cur + 1] - first
+        byte x = menu_x[menu_cur] - 1
+        menu_open = false
+        redraw_all = true
+        if r >= TEXT_TOP and r < TEXT_TOP + n and c >= x and c < x + 22 then
+            run_item(first + byte(r - TEXT_TOP))
+        end
+        return
+    end
+    if prompt_kind ~= 0 then return end
+    if pointer_text() then
+        word l = hit_line
+        if l >= nlines then l = nlines - 1 end
+        move_to(l, hit_col)
+    end
+end
+
+-- ---------------------------------------------------------------- editing
+
+function move_to(word l, byte c)
+    if l ~= cy then
+        word old = cy
+        load_cur(l)
+        cy = l
+        if old >= top and old < top + TEXT_ROWS then draw_text_row(byte(old - top) + TEXT_TOP) end
+    else
+        load_cur(l)
+    end
+    cx = c
+    if cx > cur_len then cx = cur_len end
+    redraw_line = true
+    blink = true
+    blink_t = 0
+    scroll_to_cursor()
+end
+
+function changed()
+    if not modified then
+        modified = true
+        draw_menu_bar()
+    end
+    redraw_line = true
+end
+
+function insert_char(byte c)
+    load_cur(cy)
+    if cur_len >= 255 then
+        set_msg("the line is full (255 characters)", C_ERR)
+        return
+    end
+    byte i = cur_len
+    while i > cx do
+        cur[i] = cur[i - 1]
+        i -= 1
+    end
+    cur[cx] = c
+    cur_len += 1
+    cx += 1
+    changed()
+    scroll_to_cursor()
+end
+
+function new_line()
+    load_cur(cy)
+    if not insert_line(cy + 1) then
+        set_msg("the text is full", C_ERR)
+        return
+    end
+    -- the rest of the line to the new one, with the indentation
+    byte ind = 0
+    while ind < cur_len and ind < cx and cur[ind] == ' ' do ind += 1 end
+    word s = lslot[cy + 1]
+    byte n = 0
+    byte k = 0
+    while k < ind do
+        sset(s, n + 1, ' ')
+        n += 1
+        k += 1
+    end
+    byte i = cx
+    while i < cur_len do
+        sset(s, n + 1, cur[i])
+        n += 1
+        i += 1
+    end
+    sset(s, 0, n)
+    cur_len = cx
+    store_cur()
+    update_asm(cy)
+    move_to(cy + 1, ind)
+    changed()
+    redraw_all = true
+end
+
+function backspace()
+    load_cur(cy)
+    if cx > 0 then
+        byte i = cx - 1
+        while i + 1 < cur_len do
+            cur[i] = cur[i + 1]
+            i += 1
+        end
+        cur_len -= 1
+        cx -= 1
+        changed()
+        scroll_to_cursor()
+        return
+    end
+    if cy == 0 then return end
+    -- join with the line above
+    word above = cy - 1
+    byte alen = line_len(above)
+    if word(alen) + cur_len > 255 then
+        set_msg("the joined line would be too long", C_ERR)
+        return
+    end
+    byte keep = cur_len
+    byte tmp[256]
+    byte i = 0
+    while i < keep do
+        tmp[i] = cur[i]
+        i += 1
+    end
+    cur_line = 0xFFFF          -- dropped, not stored
+    delete_line(cy)
+    cy = above
+    load_cur(above)
+    i = 0
+    while i < keep do
+        cur[cur_len] = tmp[i]
+        cur_len += 1
+        i += 1
+    end
+    cx = alen
+    store_cur()
+    update_asm(cy)
+    changed()
+    redraw_all = true
+    scroll_to_cursor()
+end
+
+function delete_forward()
+    load_cur(cy)
+    if cx < cur_len then
+        byte i = cx
+        while i + 1 < cur_len do
+            cur[i] = cur[i + 1]
+            i += 1
+        end
+        cur_len -= 1
+        changed()
+        return
+    end
+    if cy + 1 >= nlines then return end
+    -- join the next line
+    word nl_ = cy + 1
+    byte nlen = line_len(nl_)
+    if word(nlen) + cur_len > 255 then
+        set_msg("the joined line would be too long", C_ERR)
+        return
+    end
+    word s = lslot[nl_]
+    byte i = 0
+    while i < nlen do
+        cur[cur_len] = sget(s, i + 1)
+        cur_len += 1
+        i += 1
+    end
+    store_cur()
+    delete_line(nl_)
+    update_asm(cy)
+    changed()
+    redraw_all = true
+end
+
+-- the line clipboard
+byte clip[256]
+byte clip_len = 0
+bool clip_full = false
+
+function copy_line()
+    load_cur(cy)
+    byte i = 0
+    while i < cur_len do
+        clip[i] = cur[i]
+        i += 1
+    end
+    clip_len = cur_len
+    clip_full = true
+    set_msg("line copied", C_STATUS)
+    redraw_line = true
+end
+
+function delete_this_line()
+    load_cur(cy)
+    if nlines == 1 then
+        cur_len = 0
+        cx = 0
+        changed()
+        return
+    end
+    cur_line = 0xFFFF
+    delete_line(cy)
+    if cy >= nlines then cy = nlines - 1 end
+    load_cur(cy)
+    if cx > cur_len then cx = cur_len end
+    update_asm(cy)
+    changed()
+    redraw_all = true
+end
+
+function cut_line()
+    copy_line()
+    delete_this_line()
+    set_msg("line cut", C_STATUS)
+end
+
+function paste_line()
+    if not clip_full then return end
+    load_cur(cy)
+    store_cur()
+    if not insert_line(cy) then
+        set_msg("the text is full", C_ERR)
+        return
+    end
+    word s = lslot[cy]
+    sset(s, 0, clip_len)
+    byte i = 0
+    while i < clip_len do
+        sset(s, i + 1, clip[i])
+        i += 1
+    end
+    cur_line = 0xFFFF
+    load_cur(cy + 1)
+    cy += 1
+    update_asm(cy - 1)
+    changed()
+    redraw_all = true
+    scroll_to_cursor()
+end
+
+-- ---------------------------------------------------------------- files
+
+byte fbuf[256]
+word fpos = 0
+byte fh = 255
+
+function fput(byte b)
+    fbuf[fpos] = b
+    fpos += 1
+    if fpos == 256 then
+        file_write(fh, addr(fbuf), 256)
+        fpos = 0
+    end
+end
+
+function save_file(string name) -> bool
+    store_cur()
+    fh = file_open(name, FILE_WRITE)
+    if fh == FILE_ERROR then
+        set_msg("cannot write " .. name, C_ERR)
+        return false
+    end
+    fpos = 0
+    word l = 0
+    while l < nlines do
+        word s = lslot[l]
+        byte n = sget(s, 0)
+        byte i = 0
+        while i < n do
+            fput(sget(s, i + 1))
+            i += 1
+        end
+        fput(10)
+        l += 1
+    end
+    if fpos > 0 then file_write(fh, addr(fbuf), fpos) end
+    file_close(fh)
+    return true
+end
+
+function load_file(string name) -> bool
+    fh = file_open(name, FILE_READ)
+    if fh == FILE_ERROR then
+        set_msg("cannot read " .. name, C_ERR)
+        return false
+    end
+    cur_line = 0xFFFF
+    text_reset()
+    insert_line(0)
+    word l = 0
+    bool long_ = false
+    bool full = false
+    word c = file_getc(fh)
+    while c ~= FILE_EOF do
+        if c == 10 then
+            if not insert_line(l + 1) then
+                full = true
+                break
+            end
+            l += 1
+        elseif c ~= 13 then
+            word s = lslot[l]
+            byte n = sget(s, 0)
+            if c == 9 then
+                -- a tab: spaces to the next multiple of 4
+                byte k = 4 - n % 4
+                while k > 0 and n < 255 do
+                    n += 1
+                    sset(s, n, ' ')
+                    k -= 1
+                end
+                sset(s, 0, n)
+            elseif n < 255 then
+                n += 1
+                sset(s, n, byte(c))
+                sset(s, 0, n)
+            else
+                long_ = true
+            end
+        end
+        c = file_getc(fh)
+    end
+    file_close(fh)
+    -- the final newline makes an empty last line: drop it
+    if nlines > 1 and line_len(nlines - 1) == 0 then delete_line(nlines - 1) end
+    update_asm(0)
+    cy = 0
+    cx = 0
+    top = 0
+    left_ = 0
+    load_cur(0)
+    modified = false
+    if full then
+        set_msg("too many lines: the rest was not loaded", C_ERR)
+    elseif long_ then
+        set_msg("lines longer than 255 characters were cut", C_ERR)
+    else
+        set_msg("", C_STATUS)
+    end
+    redraw_all = true
+    return true
+end
+
+function new_text()
+    cur_line = 0xFFFF
+    text_reset()
+    insert_line(0)
+    cy = 0
+    cx = 0
+    top = 0
+    left_ = 0
+    load_cur(0)
+    modified = false
+    fname = ""
+    redraw_all = true
+end
+
+-- ---------------------------------------------------------------- prompts
+
+byte prompt_kind = 0        -- 0 none, 1 open, 2 save as, 3 find, 4 go to line
+string prompt_label = ""
+string prompt_text = ""
+string find_text = ""
+
+function prompt(byte kind, string label, string init)
+    prompt_kind = kind
+    prompt_label = label
+    prompt_text = init
+    redraw_all = true
+end
+
+function prompt_key(word k)
+    if k == K_BREAK then
+        prompt_kind = 0
+        set_msg("", C_STATUS)
+        redraw_all = true
+        return
+    end
+    if k == K_BS then
+        if len(prompt_text) > 0 then prompt_text = sub(prompt_text, 0, len(prompt_text) - 1) end
+        redraw_line = true
+        return
+    end
+    if k == K_ENTER then
+        byte kind = prompt_kind
+        prompt_kind = 0
+        redraw_all = true
+        prompt_done(kind, prompt_text)
+        return
+    end
+    if k >= 32 and k < 127 and len(prompt_text) < 60 then
+        prompt_text = prompt_text .. chr(byte(k))
+        redraw_line = true
+    end
+end
+
+function prompt_done(byte kind, string t)
+    if kind == 1 then
+        if t == "" then return end
+        if load_file(t) then
+            fname = t
+            set_msg("loaded " .. t, C_STATUS)
+        end
+    elseif kind == 2 then
+        if t == "" then return end
+        if save_file(t) then
+            fname = t
+            modified = false
+            set_msg("saved " .. t, C_STATUS)
+        end
+    elseif kind == 3 then
+        find_text = t
+        find_next()
+    elseif kind == 4 then
+        sword n = val(t)
+        if n < 1 then n = 1 end
+        if word(n) > nlines then n = sword(nlines) end
+        move_to(word(n) - 1, 0)
+        redraw_all = true
+    end
+end
+
+-- the next match of find_text after the cursor
+function find_next()
+    if find_text == "" then return end
+    store_cur()
+    byte flen = len(find_text)
+    word l = cy
+    word start = word(cx) + 1
+    word tries = 0
+    while tries <= nlines do
+        get_line(l)
+        word i = start
+        while i + flen <= blen do
+            byte j = 0
+            while j < flen and lbuf[i + j] == asc(find_text, j) do j += 1 end
+            if j == flen then
+                move_to(l, byte(i))
+                set_msg("found", C_STATUS)
+                redraw_all = true
+                return
+            end
+            i += 1
+        end
+        l += 1
+        if l >= nlines then l = 0 end
+        start = 0
+        tries += 1
+    end
+    set_msg("not found: " .. find_text, C_ERR)
+    redraw_line = true
+end
+
+-- ---------------------------------------------------------------- commands
+
+bool confirm_pending = false
+word confirm_cmd = 0
+
+-- true if the text may be dropped (asks for the command again first)
+function may_drop(word cmd) -> bool
+    if not modified or (confirm_pending and confirm_cmd == cmd) then
+        confirm_pending = false
+        return true
+    end
+    confirm_pending = true
+    confirm_cmd = cmd
+    set_msg("unsaved changes: repeat the command to drop them", C_ERR)
+    redraw_line = true
+    return false
+end
+
+function cmd_save()
+    if fname == "" then
+        prompt(2, "Save as:", "")
+        return
+    end
+    if save_file(fname) then
+        modified = false
+        set_msg("saved " .. fname, C_STATUS)
+        redraw_all = true
+    end
+end
+
+-- save, then the compiler: lexer.nex ... asm.nex, which come back here
+function cmd_compile(bool run)
+    if fname == "" then
+        set_msg("save the program first (EXT S)", C_ERR)
+        redraw_line = true
+        return
+    end
+    if not save_file(fname) then return end
+    modified = false
+    if fname ~= "in.lz80n" then
+        if not save_file("in.lz80n") then return end
+    end
+    for k = 0, 3 do
+        string e = "codegen.err"
+        if k == 1 then e = "asm.err" end
+        if k == 2 then e = "assets.err" end
+        if k == 3 then e = "out.nex" end
+        if file_exists(e) then file_delete(e) end
+    end
+    touch("chain.on")
+    touch("editor.on")
+    if run then touch("run.on") elseif file_exists("run.on") then file_delete("run.on") end
+    save_session(true)
+    set_msg("compiling...", C_STATUS)
+    redraw_all = true
+    redraw()
+    if not file_exec("nexload lexer.nex") then
+        set_msg("cannot start lexer.nex", C_ERR)
+        save_session(false)
+        redraw_all = true
+    end
+    quit_now = true
+end
+
+function touch(string name)
+    if file_exists(name) then return end
+    byte h = file_open(name, FILE_WRITE)
+    if h ~= FILE_ERROR then file_close(h) end
+end
+
+function run_item(byte it)
+    if it == 0 then
+        if may_drop(K_EXT + 'n') then new_text() end
+    elseif it == 1 then
+        if may_drop(K_EXT + 'o') then prompt(1, "Open:", fname) end
+    elseif it == 2 then
+        cmd_save()
+    elseif it == 3 then
+        prompt(2, "Save as:", fname)
+    elseif it == 4 then
+        cut_line()
+    elseif it == 5 then
+        copy_line()
+    elseif it == 6 then
+        paste_line()
+    elseif it == 7 then
+        delete_this_line()
+    elseif it == 8 then
+        prompt(3, "Find:", find_text)
+    elseif it == 9 then
+        find_next()
+    elseif it == 10 then
+        prompt(4, "Go to line:", "")
+    elseif it == 11 then
+        cmd_compile(false)
+    elseif it == 12 then
+        cmd_compile(true)
+    elseif it == 13 then
+        help_open = true
+        redraw_all = true
+    end
+end
+
+function menu_key(word k)
+    byte first = menu_first[menu_cur]
+    byte n = menu_first[menu_cur + 1] - first
+    if k == K_BREAK or k == K_MENU then
+        menu_open = false
+    elseif k == K_LEFT then
+        if menu_cur == 0 then menu_cur = NMENUS - 1 else menu_cur -= 1 end
+        menu_item = 0
+    elseif k == K_RIGHT then
+        menu_cur += 1
+        if menu_cur == NMENUS then menu_cur = 0 end
+        menu_item = 0
+    elseif k == K_UP then
+        if menu_item == 0 then menu_item = n - 1 else menu_item -= 1 end
+    elseif k == K_DOWN then
+        menu_item += 1
+        if menu_item == n then menu_item = 0 end
+    elseif k == K_ENTER then
+        menu_open = false
+        redraw_all = true
+        run_item(first + menu_item)
+    end
+    redraw_all = true
+end
+
+function ext_command(word c)
+    if c == 's' then
+        cmd_save()
+    elseif c == 'o' then
+        run_item(1)
+    elseif c == 'n' then
+        run_item(0)
+    elseif c == 'b' then
+        cmd_compile(false)
+    elseif c == 'r' then
+        cmd_compile(true)
+    elseif c == 'f' then
+        run_item(8)
+    elseif c == 'g' then
+        run_item(10)
+    elseif c == 'c' then
+        copy_line()
+    elseif c == 'x' then
+        cut_line()
+    elseif c == 'v' then
+        paste_line()
+    elseif c == 'k' then
+        delete_this_line()
+    elseif c == K_LEFT then
+        move_to(cy, 0)
+    elseif c == K_RIGHT then
+        load_cur(cy)
+        move_to(cy, cur_len)
+    elseif c == K_UP then
+        move_to(0, 0)
+    elseif c == K_DOWN then
+        move_to(nlines - 1, 0)
+    end
+end
+
+function handle_key(word k)
+    if help_open then
+        help_open = false
+        redraw_all = true
+        return
+    end
+    if prompt_kind ~= 0 then
+        prompt_key(k)
+        return
+    end
+    if menu_open then
+        menu_key(k)
+        return
+    end
+    if k ~= confirm_cmd then confirm_pending = false end
+    if message ~= "" and k < K_EXT then
+        set_msg("", C_STATUS)
+        redraw_line = true
+    end
+    if k >= K_EXT then
+        ext_command(k - K_EXT)
+        return
+    end
+    if k == K_MENU then
+        menu_open = true
+        menu_item = 0
+        redraw_all = true
+    elseif k == K_LEFT then
+        if cx > 0 then
+            move_to(cy, cx - 1)
+        elseif cy > 0 then
+            move_to(cy - 1, 255)
+        end
+    elseif k == K_RIGHT then
+        load_cur(cy)
+        if cx < cur_len then
+            move_to(cy, cx + 1)
+        elseif cy + 1 < nlines then
+            move_to(cy + 1, 0)
+        end
+    elseif k == K_UP then
+        if cy > 0 then move_to(cy - 1, cx) end
+    elseif k == K_DOWN then
+        if cy + 1 < nlines then move_to(cy + 1, cx) end
+    elseif k == K_PGUP then
+        if cy > TEXT_ROWS then move_to(cy - TEXT_ROWS, cx) else move_to(0, cx) end
+    elseif k == K_PGDN then
+        if cy + TEXT_ROWS < nlines then move_to(cy + TEXT_ROWS, cx) else move_to(nlines - 1, cx) end
+    elseif k == K_BS then
+        backspace()
+    elseif k == K_DELF then
+        delete_forward()
+    elseif k == K_ENTER then
+        new_line()
+    elseif k == K_BREAK then
+        set_msg("", C_STATUS)
+        redraw_line = true
+    elseif k >= 32 and k < 127 then
+        insert_char(byte(k))
+        -- typing `asm` / `end` changes the blocks below
+        update_asm(cy)
+    end
+end
+
+-- ---------------------------------------------------------------- session
+
+string sline = ""
+byte sh = 255
+
+-- one line of the open session file (false at the end)
+function read_ln() -> bool
+    sline = ""
+    word c = file_getc(sh)
+    if c == FILE_EOF then return false end
+    while c ~= FILE_EOF and c ~= 10 do
+        if c ~= 13 and len(sline) < 64 then sline = sline .. chr(byte(c)) end
+        c = file_getc(sh)
+    end
+    return true
+end
+
+function save_session(bool compiling)
+    store_cur()
+    byte h = file_open("editor.ses", FILE_WRITE)
+    if h == FILE_ERROR then return end
+    fh = h
+    fpos = 0
+    for_text(fname)
+    for_text(str(cy))
+    for_text(str(cx))
+    for_text(str(top))
+    if compiling then for_text("1") else for_text("0") end
+    if fpos > 0 then file_write(fh, addr(fbuf), fpos) end
+    file_close(fh)
+end
+
+function for_text(string t)
+    byte i = 0
+    while i < len(t) do
+        fput(asc(t, i))
+        i += 1
+    end
+    fput(10)
+end
+
+-- the first number in t from position p, and where it ends
+word num_end = 0
+function num_at(string t, byte p) -> word
+    word v = 0
+    while p < len(t) and (asc(t, p) < '0' or asc(t, p) > '9') do p += 1 end
+    while p < len(t) and asc(t, p) >= '0' and asc(t, p) <= '9' do
+        v = v * 10 + (asc(t, p) - '0')
+        p += 1
+    end
+    num_end = p
+    return v
+end
+
+-- the result of a compile: an error file of a stage
+function check_result()
+    string e = ""
+    if file_exists("assets.err") then
+        e = "assets.err"
+    elseif file_exists("codegen.err") then
+        e = "codegen.err"
+    elseif file_exists("asm.err") then
+        e = "asm.err"
+    end
+    if e == "" then
+        if file_exists("out.nex") then
+            set_msg("compiled: out.nex", C_STATUS)
+        else
+            set_msg("the compiler did not finish", C_ERR)
+        end
+        return
+    end
+    sh = file_open(e, FILE_READ)
+    if sh == FILE_ERROR then return end
+    read_ln()
+    file_close(sh)
+    if e == "codegen.err" then
+        -- `error LINE:COL message`
+        word l = num_at(sline, 0)
+        word c = num_at(sline, byte(num_end))
+        if l >= 1 and l <= nlines then
+            move_to(l - 1, 0)
+            if c >= 1 then move_to(l - 1, byte(c - 1)) end
+        end
+        set_msg(sline, C_ERR)
+    elseif e == "asm.err" then
+        set_msg("assembler: " .. sline, C_ERR)
+    else
+        set_msg(sline, C_ERR)
+    end
+end
+
+function load_session()
+    if not file_exists("editor.ses") then return end
+    sh = file_open("editor.ses", FILE_READ)
+    if sh == FILE_ERROR then return end
+    string name = ""
+    word l = 0
+    word c = 0
+    word t = 0
+    bool compiled = false
+    if read_ln() then name = sline end
+    if read_ln() then l = num_at(sline, 0) end
+    if read_ln() then c = num_at(sline, 0) end
+    if read_ln() then t = num_at(sline, 0) end
+    if read_ln() then compiled = sline == "1" end
+    file_close(sh)
+    if name == "" or not file_exists(name) then return end
+    if not load_file(name) then return end
+    fname = name
+    if l >= nlines then l = nlines - 1 end
+    top = t
+    if top >= nlines then top = 0 end
+    move_to(l, byte(c))
+    if compiled then
+        check_result()
+        save_session(false)
+    end
+    redraw_all = true
+end
+
+-- ---------------------------------------------------------------- main
+
+bool quit_now = false
+
+function load_script()
+    if not file_exists("editor.key") then return end
+    byte h = file_open("editor.key", FILE_READ)
+    if h == FILE_ERROR then return end
+    word c = file_getc(h)
+    while c ~= FILE_EOF and script_len < 60000 do
+        script[script_len] = byte(c)
+        script_len += 1
+        c = file_getc(h)
+    end
+    file_close(h)
+    scripted = true
+end
+
+screen_init()
+mouse_init()
+new_text()
+load_session()
+if file_exists("editor.on") then file_delete("editor.on") end
+load_script()
+redraw()
+while not quit_now do
+    if not scripted then vsync() end
+    mouse_poll()
+    word k = get_key()
+    if k == 0xFFFF then break end           -- the end of editor.key
+    if k ~= 0 then handle_key(k) end
+    blink_t += 1
+    if blink_t >= 25 and not scripted then
+        blink_t = 0
+        blink = not blink
+        redraw_line = true
+    end
+    redraw()
+end
+if scripted and not quit_now then
+    store_cur()
+    save_session(false)
+end

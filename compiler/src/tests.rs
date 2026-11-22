@@ -5657,3 +5657,159 @@ fn selfhost_codegen_music() {
         assert_eq!(rcpu.ay, cpu.ay, "program {i}: AY registers");
     }
 }
+
+/// The editor (editor.nex) on the virtual SD card, driven by an editor.key
+/// script: type a program, save it, Build -> Compile; the compiler chain
+/// comes back to the editor, which shows the result (and, after an error,
+/// puts the cursor on its line).
+#[test]
+fn selfhost_editor() {
+    let dir = std::env::temp_dir().join("lz80n_export_editor");
+    let _ = std::fs::remove_dir_all(&dir);
+    let built = crate::export_selfhost(&dir).unwrap();
+    let mut base = crate::emu::EsxFs::default();
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        base.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
+    }
+    // one program: until its end or until it starts the next one
+    let run = |name: &str, fs: crate::emu::EsxFs| -> (crate::emu::EsxFs, crate::emu::Cpu, Option<String>) {
+        let (_, nex, syms) = built.iter().find(|b| b.0 == name).unwrap_or_else(|| panic!("no {name}"));
+        let mut cpu = load_nex(nex).unwrap();
+        let mut fs = fs;
+        fs.exec.clear();
+        cpu.esx = Some(fs);
+        let end = syms["__main_end"] as u16;
+        let mut n = 0u64;
+        while cpu.pc != end {
+            cpu.tick().unwrap();
+            n += 1;
+            assert!(n < 4_000_000_000, "{name} did not finish");
+            if !cpu.esx.as_ref().unwrap().exec.is_empty() {
+                break;
+            }
+        }
+        let fs = cpu.esx.take().unwrap();
+        let next = fs.exec.first().and_then(|c| c.strip_prefix("nexload ")).map(String::from);
+        (fs, cpu, next)
+    };
+    // a screen row of the 80x32 tilemap at $6000
+    let row = |cpu: &crate::emu::Cpu, r: usize| -> String {
+        (0..80).map(|c| cpu.mem[0x6000 + r * 160 + c * 2] as char).collect::<String>().trim_end().to_string()
+    };
+    // EXTEND + key, cursor keys
+    let ext = |c: u8| 0x80 | c;
+    let (left, up) = (3u8, 1u8);
+    // the editor types, saves (Save as prompt), compiles, then the chain
+    // comes back to it
+    let edit_and_compile = |script: Vec<u8>| {
+        let mut fs = base.clone();
+        fs.files.insert("editor.key".into(), script);
+        let (mut fs, cpu, next) = run("editor.nex", fs);
+        assert_eq!(next.as_deref(), Some("lexer.nex"), "status: {}", row(&cpu, 31));
+        for f in ["editor.on", "chain.on", "in.lz80n", "editor.ses"] {
+            assert!(fs.files.contains_key(f), "no {f}");
+        }
+        let mut stages = vec![];
+        let mut next = "lexer.nex".to_string();
+        loop {
+            stages.push(next.clone());
+            let (f, _, n) = run(&next, fs);
+            fs = f;
+            match n {
+                Some(n) => next = n,
+                None => panic!("the chain ended at {next} without the editor"),
+            }
+            if next == "editor.nex" {
+                break;
+            }
+        }
+        // the editor again, with an empty script: it shows the result and ends
+        fs.files.insert("editor.key".into(), vec![]);
+        let (fs, cpu, next) = run("editor.nex", fs);
+        assert_eq!(next, None);
+        assert!(!fs.files.contains_key("editor.on"), "editor.on left behind");
+        (stages, fs, cpu)
+    };
+    let mut script = b"function sq(word x) -> word\rreturn x * x\rend\rprint(\"sq\", sq(1))".to_vec();
+    script.extend([left, left, b'2']);
+    script.extend([ext(b's')]);
+    script.extend(b"prog.lz80n\r");
+    script.push(ext(b'b'));
+    let (stages, fs, cpu) = edit_and_compile(script);
+    assert_eq!(stages, ["lexer.nex", "codegen.nex", "asm.nex"]);
+    let prog = "function sq(word x) -> word\nreturn x * x\nend\nprint(\"sq\", sq(12))\n";
+    assert_eq!(String::from_utf8_lossy(&fs.files["prog.lz80n"]), prog);
+    assert_eq!(fs.files["in.lz80n"], fs.files["prog.lz80n"]);
+    assert!(row(&cpu, 31).contains("compiled: out.nex"), "status: {}", row(&cpu, 31));
+    assert!(row(&cpu, 0).contains("prog.lz80n"), "menu bar: {}", row(&cpu, 0));
+    assert_eq!(row(&cpu, 1), "   1 function sq(word x) -> word");
+    assert_eq!(row(&cpu, 4), "   4 print(\"sq\", sq(12))");
+    // the highlighting: `function` a keyword, `word` a type
+    let attr = |r: usize, c: usize| cpu.mem[0x6000 + r * 160 + c * 2 + 1] >> 1;
+    assert_eq!((attr(1, 5), attr(1, 17), attr(4, 11)), (21, 22, 24));
+    let asm = String::from_utf8(fs.files["out.asm"].clone()).unwrap();
+    assert_eq!(run_asm(&asm), crate::tests::run("sh_editor", prog).unwrap());
+
+    // an error: the editor comes back with the cursor on its line
+    let mut script = b"print(1)\rprint(nope)".to_vec();
+    script.extend([ext(up), ext(b's')]);
+    script.extend(b"bad.lz80n\r");
+    script.push(ext(b'b'));
+    let (stages, fs, cpu) = edit_and_compile(script);
+    assert_eq!(stages, ["lexer.nex", "codegen.nex"]);
+    assert!(fs.files.contains_key("codegen.err"));
+    let status = row(&cpu, 31);
+    assert!(status.contains("error 2:7"), "status: {status}");
+    assert!(status.contains("Ln     2"), "status: {status}");
+    let ses = String::from_utf8_lossy(&fs.files["editor.ses"]).to_string();
+    assert!(ses.starts_with("bad.lz80n\n1\n6\n"), "editor.ses: {ses:?}");
+}
+
+/// The editor reads the keyboard matrix: letters, SYMBOL SHIFT symbols,
+/// CAPS SHIFT letters and CAPS+0 (DELETE).
+#[test]
+fn selfhost_editor_keyboard() {
+    let src = include_str!("../../selfhost/editor.lz80n");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../selfhost");
+    let asm = crate::compile_main(src, Some(&dir.join("editor.lz80n")), "editor.nex", true, &dir, false).unwrap();
+    let out = crate::asm::assemble(&asm, &dir).unwrap();
+    let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+    cpu.esx = Some(crate::emu::EsxFs::default());
+    // (half-row, bit) of the keys; CAPS = (0, 0), SYMBOL = (7, 1)
+    let (caps, sym) = ((0usize, 0u8), (7usize, 1u8));
+    let keys: Vec<Vec<(usize, u8)>> = vec![
+        vec![(6, 4)],         // h
+        vec![(5, 2)],         // i
+        vec![sym, (6, 1)],    // =
+        vec![caps, (2, 4)],   // T
+        vec![(4, 1)],         // 9
+        vec![caps, (4, 0)],   // DELETE
+        vec![(1, 0)],         // a
+    ];
+    let mut k = 0;
+    let mut phase = 0u32;
+    let start = cpu.frame_count;
+    let mut n = 0u64;
+    while k < keys.len() || cpu.frame_count < start + 6 * keys.len() as u32 + 50 {
+        let f = cpu.frame_count;
+        cpu.tick().unwrap();
+        n += 1;
+        assert!(n < 400_000_000, "too slow");
+        if cpu.frame_count == f || k >= keys.len() || cpu.frame_count < start + 20 {
+            continue;
+        }
+        phase += 1;
+        // 3 frames down, 3 frames up
+        cpu.keys = [0xFF; 8];
+        if phase % 6 < 3 {
+            for &(r, b) in &keys[k] {
+                cpu.keys[r] &= !(1 << b);
+            }
+        } else if phase % 6 == 5 {
+            k += 1;
+        }
+    }
+    let row: String = (0..80).map(|c| cpu.mem[0x6000 + 160 + c * 2] as char).collect();
+    assert_eq!(row.trim_end(), "   1 hi=Ta");
+}
