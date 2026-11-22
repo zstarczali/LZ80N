@@ -1774,6 +1774,31 @@ function file_exec(string cmd) -> bool
     return not file_failed()
 end
 
+-- open a directory ("." = the current one) to read its entries with
+-- file_readdir; a handle (close it with file_close) or FILE_ERROR
+function file_opendir(string path) -> byte
+    file_cname(path)
+    file_fn = 0xA3
+    file_a = '*'
+    file_bc = 0x1000            -- B = $10: long file names
+    file_sys()
+    if file_failed() then return FILE_ERROR end
+    return file_a
+end
+
+-- the next entry of a directory into the buffer at address (>= $4000, 280
+-- bytes): attributes (bit 4: a directory), the name ending with 0, time and
+-- date (2 + 2 bytes), size (4 bytes); false at the end of the directory
+function file_readdir(byte h, word address) -> bool
+    file_fn = 0xA4
+    file_a = h
+    file_ix = address
+    file_hl = address
+    file_sys()
+    if file_failed() then return false end
+    return file_a ~= 0
+end
+
 -- next byte of a file read byte by byte; FILE_EOF at the end. The buffer
 -- serves one file: reading another one with file_getc starts it again
 -- (mixing file_getc and file_read on the same file skips bytes).
@@ -1849,7 +1874,7 @@ pub const LIBRARY_NAMES: &[(&str, &[&str])] = &[
         "file",
         &[
             "file_open", "file_close", "file_read", "file_write", "file_seek", "file_pos", "file_size",
-            "file_delete", "file_getc", "file_exists", "file_exec", "file_status", "FILE_READ", "FILE_WRITE", "FILE_APPEND",
+            "file_delete", "file_getc", "file_exists", "file_exec", "file_opendir", "file_readdir", "file_status", "FILE_READ", "FILE_WRITE", "FILE_APPEND",
             "FILE_ERROR", "FILE_EOF",
         ],
     ),

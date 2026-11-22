@@ -192,6 +192,17 @@ up to 32 KB.
 * The Next keyboard's extra keys (cursor keys, DELETE, EDIT, BREAK,
   EXTEND, ...) are read from NextRegs $B0 / $B1 too, for machines that do
   not put them into the key matrix.
+* File -> Open (EXT O) is a file browser: the folders and the program
+  files (`.lz80n`, `.asm`, `.txt`, `.md`, `.bas`, `.log`) of a folder,
+  folders first, sorted, with their sizes; ENTER or a double click opens
+  one, a letter jumps to the names starting with it, `<type a name>` asks
+  for a name. It reads folders with the file module's new `file_opendir`
+  and `file_readdir` (esxDOS F_OPENDIR / F_READDIR).
+* Help -> Language manual: the LZ80N manual (`help.txt`, written by the
+  export from `docs/manual-en.md`; `help-hu.txt`, the Hungarian one, in
+  ASCII letters) in the text area: left / right go to the chapters, ENTER
+  on a line of the contents opens its chapter, F finds a text, N again.
+  EXT H opens it at the word under the cursor.
 * A splash screen at the start: a box with the logo and the version
   (`version.txt`, which the export writes); Help -> About shows it again.
 * Menus, the help and the build output are drawn over the text row by row
@@ -244,7 +255,8 @@ up to 32 KB.
   `selfhost_ide_mouse`: the emulated Kempston mouse: drag, the right
   button's menu, line numbers, the menu bar;
   `selfhost_ide_splash`: the splash screen (a box over the editor), the
-  menu highlight; `selfhost_ide_scroll`: scrolling gives the same screen
+  menu highlight; `selfhost_ide_browser`: the file browser;
+  `selfhost_ide_manual`: the manual, EXT H; `selfhost_ide_scroll`: scrolling gives the same screen
   as drawing it from scratch;
 * `selfhost_compiles_lexer`, `selfhost_compiles_parser_and_assembler`: the
   self-hosted compiler compiles the lexer, the parser and the assembler; they
