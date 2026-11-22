@@ -3,7 +3,7 @@ name: release
 # Builds LZ80N for Windows, macOS and Linux (x64 and ARM64), makes the PDF
 # manuals and packs everything (compiler, SjASMPlus, manuals, examples,
 # README.txt) into one archive per platform. The compiler that runs on the
-# Next itself (lz80nc --export-selfhost: lexer.nex ... asm.nex, editor.nex)
+# Next itself (lz80nc --export-selfhost: lexer.nex ... asm.nex, ide.nex)
 # goes into every archive (next/) and into lz80n-<version>-zxnext-sdcard.zip.
 #
 # * push a tag `v1.2.3` (it must match compiler/Cargo.toml) -> GitHub release
@@ -77,8 +77,7 @@ jobs:
         run: |
           v=$(grep -m1 '^version' compiler/Cargo.toml | cut -d'"' -f2)
           (cd compiler && cargo build --release --locked)
-          ./compiler/target/release/lz80nc --export-selfhost next/lz80n
-          for f in lexer codegen assets asm editor; do test -s "next/lz80n/$f.nex"; done
+          scripts/zxnext-package.sh ./compiler/target/release/lz80nc next
           (cd next && zip -qr "../lz80n-$v-zxnext-sdcard.zip" lz80n)
           ls -l next/lz80n "lz80n-$v-zxnext-sdcard.zip"
 

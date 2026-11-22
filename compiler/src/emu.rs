@@ -41,6 +41,10 @@ pub struct Cpu {
     /// Keyboard half-rows (index = address line A8..A15), active low.
     pub keys: [u8; 8],
     pub kempston: u8,
+    /// Kempston mouse: x ($FBDF), y ($FFDF), buttons and wheel ($FADF,
+    /// buttons active low: bit 0 right, bit 1 left, bit 2 middle; wheel in
+    /// bits 7-4).
+    pub mouse: [u8; 3],
     pub halted: bool,
     /// Sprite engine state: 64 x 256-byte patterns, 128 x 5 attribute bytes.
     pub patterns: Vec<u8>,
@@ -164,7 +168,7 @@ impl Cpu {
             sp: 0xFFFF, pc: 0, i: 0, alt: [0; 8],
             mem: vec![0; 65536],
             nextreg: { let mut n = [0; 256]; n[0x12] = 8; n[0x13] = 11; n }, nr_sel: 0, border: 7,
-            keys: [0x1F; 8], kempston: 0, halted: false,
+            keys: [0x1F; 8], kempston: 0, mouse: [0, 0, 0xFF], halted: false,
             patterns: vec![0; 16384], pattern_ptr: 0, sprite_attr: [[0; 5]; 128],
             palettes: [[0; 256]; 8], pal_idx: 0,
             pages: std::collections::HashMap::new(), slot0: 0xFF, slot1: 0xFF, slot2: 10, l2_port: 0,
@@ -533,6 +537,9 @@ impl Cpu {
             0xFFFD => self.ay[self.ay_chip][self.ay_reg],
             0x253B => self.nextreg[self.nr_sel as usize],
             p if p & 0xFF == 0x1F => self.kempston,
+            0xFBDF => self.mouse[0],
+            0xFFDF => self.mouse[1],
+            0xFADF => self.mouse[2],
             0x303B => self.sprite_status(),
             p if p & 1 == 0 => {
                 let mut v = 0x1F;

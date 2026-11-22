@@ -34,12 +34,10 @@ jobs:
             ./compiler/target/release/lz80nc "$f"
           done
 
-      # the compiler that runs on the Next (lexer.nex ... asm.nex, editor.nex):
+      # the compiler and the IDE that run on the Next, with the examples:
       # Actions -> this run -> Artifacts -> lz80n-zxnext (copy lz80n/ to the SD card)
-      - name: Export the ZX Spectrum Next compiler
-        run: |
-          ./compiler/target/release/lz80nc --export-selfhost next/lz80n
-          for f in lexer codegen assets asm editor; do test -s "next/lz80n/$f.nex"; done
+      - name: Package for the ZX Spectrum Next
+        run: scripts/zxnext-package.sh ./compiler/target/release/lz80nc next
 
       - uses: actions/upload-artifact@v4
         with:

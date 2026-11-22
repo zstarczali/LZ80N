@@ -1,10 +1,11 @@
--- selfhost/editor.lz80n - the LZ80N editor (IDE) for the ZX Spectrum Next
+-- selfhost/ide.lz80n - the LZ80N IDE for the ZX Spectrum Next
 --
 -- A full-screen editor in the 80x32 tilemap mode: a menu bar (File, Edit,
--- Build, Help), syntax highlighting, the Kempston mouse with a sprite
--- pointer, and Build -> Compile / Compile & run, which saves the program,
--- starts the self-hosted compiler (lexer.nex -> ... -> asm.nex) and comes
--- back here with the result; an error puts the cursor on its line.
+-- Build, Help), syntax highlighting, a scroll bar, the Kempston mouse with a
+-- sprite pointer (click, drag to select, double click a word, right click a
+-- menu, the wheel), and Build -> Compile / Compile & run, which saves the
+-- program, starts the self-hosted compiler (lexer.nex -> ... -> asm.nex) and
+-- comes back here with the result; an error puts the cursor on its line.
 --
 -- Keys (Spectrum keyboard; the Next's extra keys give the same codes):
 --   CAPS+5..8 cursor, CAPS+0 DELETE (backspace), CAPS+9 GRAPH (delete
@@ -13,13 +14,14 @@
 --   symbols of the keys (and SYM+Q `[`, SYM+W `]`, SYM+E `^`, SYM+A `~`,
 --   SYM+S `|`, SYM+D `\`, SYM+F `{`, SYM+G `}`, SYM+X backquote).
 --   EXTEND (CAPS+SYMBOL) then: S save, O open, N new, B compile, R compile
---   and run, F find, G go to line, C copy line, X cut line, V paste,
+--   and run, F find, G go to line, M mark (the cursor keys then select),
+--   A select all, C copy, X cut, V paste (the line without a selection),
 --   K delete line, cursor left / right = start / end of the line,
 --   cursor up / down = top / end of the text.
 --
--- Files: the program as text (LF lines); editor.ses keeps the session
--- (file, cursor) across a compile. editor.key, when present, is read as
--- keystrokes instead of the keyboard (for tests), and the editor ends at
+-- Files: the program as text (LF lines); ide.ses keeps the session
+-- (file, cursor) across a compile. ide.key, when present, is read as
+-- keystrokes instead of the keyboard (for tests), and the IDE ends at
 -- its end.
 
 -- ---------------------------------------------------------------- screen
@@ -30,7 +32,7 @@ const TEXT_TOP = 1          -- rows 1..30: the text
 const TEXT_ROWS = 30
 const STATUS_ROW = 31
 const GUTTER = 5            -- line numbers
-const TW = 75               -- text columns
+const TW = 74               -- text columns (column 79: the scroll bar)
 const TILEMAP = 0x6000
 const FONT = 0x7400         -- tile definitions (80x32 needs $6000..$73FF)
 
@@ -51,8 +53,12 @@ const C_ERR = 32
 const C_BOX = 33
 const C_BUILTIN = 34
 const C_MENUKEY = 35
-byte pal_paper[16] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02}
-byte pal_ink[16] = {0xB6, 0x1F, 0x1C, 0xFC, 0xF4, 0x6E, 0xB3, 0x6D, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xE7, 0xFC}
+const C_SEL = 36
+const C_TRACK = 37
+const C_THUMB = 38
+const NPAIRS = 19
+byte pal_paper[19] = {0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x02, 0x1F, 0x49, 0xFF, 0xA0, 0x25, 0xE3, 0x02, 0x4B, 0x25, 0x92}
+byte pal_ink[19] = {0xB6, 0x1F, 0x1C, 0xFC, 0xF4, 0x6E, 0xB3, 0x6D, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xE7, 0xFC, 0xFF, 0x49, 0xFF}
 
 byte rowc[80]               -- one screen row: characters
 byte rowa[80]               --   and attributes
@@ -118,7 +124,7 @@ function screen_init()
     end
     nextreg[0x43] = 0x30
     nextreg[0x40] = 40
-    for k = 0, 15 do
+    for k = 0, NPAIRS - 1 do
         nextreg[0x41] = pal_paper[k]
         nextreg[0x41] = pal_ink[k]
     end
@@ -192,34 +198,51 @@ function text_reset()
     nlines = 0
 end
 
--- a new empty line at position at: false when the text is full
-function insert_line(word at) -> bool
-    if nfree == 0 or nlines >= MAXLINES then return false end
-    nfree -= 1
-    word s = freeslot[nfree]
-    sset(s, 0, 0)
+-- n new empty lines at position at: false when the text is full
+function insert_lines(word at, word n) -> bool
+    if nfree < n or nlines + n > MAXLINES then return false end
     word i = nlines
     while i > at do
-        lslot[i] = lslot[i - 1]
-        lasm[i] = lasm[i - 1]
         i -= 1
+        lslot[i + n] = lslot[i]
+        lasm[i + n] = lasm[i]
     end
-    lslot[at] = s
-    lasm[at] = 0
-    nlines += 1
+    i = 0
+    while i < n do
+        nfree -= 1
+        word s = freeslot[nfree]
+        sset(s, 0, 0)
+        lslot[at + i] = s
+        lasm[at + i] = 0
+        i += 1
+    end
+    nlines += n
     return true
 end
 
-function delete_line(word at)
-    freeslot[nfree] = lslot[at]
-    nfree += 1
-    word i = at
-    while i + 1 < nlines do
-        lslot[i] = lslot[i + 1]
-        lasm[i] = lasm[i + 1]
+function insert_line(word at) -> bool
+    return insert_lines(at, 1)
+end
+
+-- n lines from position at
+function delete_lines(word at, word n)
+    word i = 0
+    while i < n do
+        freeslot[nfree] = lslot[at + i]
+        nfree += 1
         i += 1
     end
-    nlines -= 1
+    i = at
+    while i + n < nlines do
+        lslot[i] = lslot[i + n]
+        lasm[i] = lasm[i + n]
+        i += 1
+    end
+    nlines -= n
+end
+
+function delete_line(word at)
+    delete_lines(at, 1)
 end
 
 function line_len(word l) -> byte
@@ -281,6 +304,7 @@ end
 -- ---------------------------------------------------------------- editor state
 
 string fname = ""
+string main_name = ""       -- the program compiled (fname may be an include)
 bool modified = false
 word cy = 0                 -- cursor line
 byte cx = 0                 -- cursor column
@@ -292,6 +316,45 @@ bool redraw_all = true
 bool redraw_line = false
 bool blink = true
 word blink_t = 0
+
+-- the selection: from the anchor (sel_l, sel_c) to the cursor
+bool sel_on = false
+bool marking = false        -- EXT M: the cursor keys extend the selection
+word sel_l = 0
+byte sel_c = 0
+word s_l1 = 0               -- the selection in order (s_c2 not included)
+byte s_c1 = 0
+word s_l2 = 0
+byte s_c2 = 0
+
+function sel_order()
+    if sel_l < cy or (sel_l == cy and sel_c < cx) then
+        s_l1 = sel_l
+        s_c1 = sel_c
+        s_l2 = cy
+        s_c2 = cx
+    else
+        s_l1 = cy
+        s_c1 = cx
+        s_l2 = sel_l
+        s_c2 = sel_c
+    end
+end
+
+-- is column c of line l selected (after sel_order)?
+function in_sel(word l, word c) -> bool
+    if l < s_l1 or l > s_l2 then return false end
+    if l == s_l1 and c < s_c1 then return false end
+    if l == s_l2 and c >= s_c2 then return false end
+    return true
+end
+
+function sel_clear()
+    if sel_on then
+        sel_on = false
+        redraw_all = true
+    end
+end
 
 function set_msg(string m, byte c)
     message = m
@@ -467,9 +530,28 @@ function row_num(byte c, byte w, word v, byte colour)
     end
 end
 
+-- the scroll bar's thumb: rows th_a .. th_a + th_n of the text area
+byte th_a = 0
+byte th_n = 30
+function thumb()
+    if nlines <= TEXT_ROWS then
+        th_a = 0
+        th_n = TEXT_ROWS
+        return
+    end
+    word n = 900 / nlines
+    if n < 1 then n = 1 end
+    th_n = byte(n)
+    word most = nlines - TEXT_ROWS
+    word t = top
+    if t > most then t = most end
+    th_a = byte(t * (TEXT_ROWS - th_n) / most)
+end
+
 function draw_text_row(byte r)
     word l = top + (r - TEXT_TOP)
     row_clear(C_TEXT)
+    if sel_on then sel_order() end
     if l < nlines then
         row_num(0, 4, l + 1, C_GUT)
         rowa[4] = C_GUT * 2
@@ -477,20 +559,27 @@ function draw_text_row(byte r)
         colour_line(lasm[l] ~= 0)
         word c = left_
         byte x = GUTTER
-        while x < 80 and c < blen do
-            rowc[x] = lbuf[c]
-            rowa[x] = cbuf[c] * 2
+        while x < 79 and c <= blen do
+            if c < blen then
+                rowc[x] = lbuf[c]
+                rowa[x] = cbuf[c] * 2
+            end
+            -- (the cell after the text: the line break)
+            if sel_on and in_sel(l, c) then rowa[x] = C_SEL * 2 end
             x += 1
             c += 1
         end
         if l == cy and blink and not menu_open and prompt_kind == 0 then
             word sx = word(cx) - left_ + GUTTER
-            if sx >= GUTTER and sx < 80 then rowa[sx] = C_CURSOR * 2 end
+            if sx >= GUTTER and sx < 79 then rowa[sx] = C_CURSOR * 2 end
         end
     else
         rowc[0] = '~'
         rowa[0] = C_GUT * 2
     end
+    thumb()
+    byte i = r - TEXT_TOP
+    if i >= th_a and i < th_a + th_n then rowa[79] = C_THUMB * 2 else rowa[79] = C_TRACK * 2 end
     put_row(r)
 end
 
@@ -503,7 +592,7 @@ function draw_menu_bar()
     byte m = 0
     while m < NMENUS do
         byte colour = C_MENU
-        if menu_open and m == menu_cur then colour = C_MENUHI end
+        if menu_open and not popup and m == menu_cur then colour = C_MENUHI end
         rowc[menu_x[m] - 1] = ' '
         rowa[menu_x[m] - 1] = colour * 2
         row_text(menu_x[m], menu_names[m], colour)
@@ -516,9 +605,10 @@ function draw_menu_bar()
     string t = fname
     if t == "" then t = "(new)" end
     if modified then t = t .. " *" end
+    if main_name ~= "" and main_name ~= fname then t = t .. "  (main: " .. main_name .. ")" end
     byte c = 80 - len(t) - 1
     row_text(c, t, C_MENU)
-    row_text(60, "LZ80N", C_MENUKEY)
+    row_text(30, "LZ80N IDE", C_MENUKEY)
     put_row(0)
 end
 
@@ -536,90 +626,135 @@ function draw_status()
         row_num(14, 3, word(cx) + 1, C_STATUS)
         if caps_lock then row_text(19, "CAPS", C_STATUS) end
         if extend then row_text(24, "EXT", C_STATUS) end
+        if marking then row_text(28, "MARK", C_STATUS) end
         if message ~= "" then
             byte mc = msg_colour
-            row_text(29, message, mc)
+            row_text(34, message, mc)
         end
     end
     put_row(STATUS_ROW)
 end
 
--- the open menu (a box below its name)
+-- the open menu: a box below its name, or the pop-up menu of the right
+-- button at the pointer
 string menu_items[] = {
     "New           EXT N", "Open...       EXT O", "Save          EXT S", "Save as...",
-    "Cut line      EXT X", "Copy line     EXT C", "Paste line    EXT V", "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
+    "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
+    "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys"
+    "Keys", "About"
 }
-byte menu_first[5] = {0, 4, 11, 13, 14}
+byte menu_first[5] = {0, 4, 13, 15, 17}
+byte popup_items[6] = {4, 5, 6, 7, 10, 13}
+const NPOPUP = 6
+const BOXW = 22
 bool menu_open = false
+bool popup = false
 byte menu_cur = 0
 byte menu_item = 0
+byte box_x = 0
+byte box_y = 1
+
+function box_n() -> byte
+    if popup then return NPOPUP end
+    return menu_first[menu_cur + 1] - menu_first[menu_cur]
+end
+
+function box_item(byte i) -> byte
+    if popup then return popup_items[i] end
+    return menu_first[menu_cur] + i
+end
+
+function open_menu(byte m)
+    menu_open = true
+    popup = false
+    menu_cur = m
+    menu_item = 0
+    box_x = menu_x[m] - 1
+    box_y = TEXT_TOP
+    redraw_all = true
+end
+
+function open_popup(word c, word r)
+    menu_open = true
+    popup = true
+    menu_item = 0
+    if c > 80 - BOXW then c = 80 - BOXW end
+    if r + NPOPUP + 1 > TEXT_TOP + TEXT_ROWS then r = TEXT_TOP + TEXT_ROWS - NPOPUP - 1 end
+    if r < TEXT_TOP then r = TEXT_TOP end
+    box_x = byte(c)
+    box_y = byte(r)
+    redraw_all = true
+end
 
 function draw_menu_box()
-    byte first = menu_first[menu_cur]
-    byte n = menu_first[menu_cur + 1] - first
-    byte x = menu_x[menu_cur] - 1
+    byte n = box_n()
     byte i = 0
     while i <= n do
-        byte r = TEXT_TOP + i
+        byte r = box_y + i
         draw_text_row(r)
-        if i < n then
-            byte colour = C_BOX
-            if i == menu_item then colour = C_MENUHI end
-            byte k = 0
-            while k < 22 do
-                rowc[x + k] = ' '
-                rowa[x + k] = colour * 2
-                k += 1
-            end
-            row_text(x + 1, menu_items[first + i], colour)
-        else
-            -- the bottom edge
-            byte k = 0
-            while k < 22 do
-                rowa[x + k] = C_BOX * 2
-                rowc[x + k] = ' '
-                k += 1
-            end
+        byte colour = C_BOX
+        if i < n and i == menu_item then colour = C_MENUHI end
+        byte k = 0
+        while k < BOXW do
+            rowc[box_x + k] = ' '
+            rowa[box_x + k] = colour * 2
+            k += 1
         end
+        -- (the last row: the bottom edge)
+        if i < n then row_text(box_x + 1, menu_items[box_item(i)], colour) end
         put_row(r)
         i += 1
     end
 end
 
--- the help box
+-- the help and about boxes
 bool help_open = false
+bool about = false
 string help_text[] = {
-    "LZ80N editor - keys",
+    "LZ80N IDE - keys",
     "",
     "CAPS+5 6 7 8     cursor left down up right",
     "CAPS+3 / CAPS+4  page up / page down",
-    "CAPS+0           delete (backspace)",
-    "CAPS+9           delete forward",
+    "CAPS+0 / CAPS+9  delete back / forward",
     "CAPS+1 (EDIT)    menus (cursor keys, ENTER)",
-    "CAPS+SPACE       cancel (BREAK)",
-    "CAPS+2           caps lock",
+    "CAPS+SPACE       cancel (BREAK)    CAPS+2  caps lock",
     "SYM+Q W E        [ ] ^",
     "SYM+A S D F G    ~ | \\ { }",
     "",
     "EXTEND (CAPS+SYM), then:",
     "  S save  O open  N new  B compile  R compile & run",
-    "  F find  G go to line",
-    "  C copy  X cut  V paste  K delete line",
+    "  F find  G go to line  K delete line",
+    "  M mark (then the cursor keys select)  A select all",
+    "  C copy  X cut  V paste (a line without a selection)",
     "  left / right: start / end of the line",
     "  up / down: start / end of the text",
     "",
-    "The mouse: click to move the cursor, click the menus;",
-    "the wheel scrolls.",
+    "Mouse: click to move the cursor, drag to select, double",
+    "click a word, click a line number for the line; the right",
+    "button: a menu; the wheel and the scroll bar scroll.",
     "",
     "Any key closes this."
 }
 const NHELP = 23
+string about_text[] = {
+    "LZ80N IDE",
+    "",
+    "The editor and the self-hosted compiler of LZ80N,",
+    "a Lua-like language for the ZX Spectrum Next.",
+    "",
+    "Build -> Compile runs lexer.nex, codegen.nex and",
+    "asm.nex and comes back here; the program is out.nex.",
+    "",
+    "github.com/zstarczali/LZ80N"
+}
+const NABOUT = 9
 
 function draw_help()
+    byte n = NHELP
+    if about then n = NABOUT end
     byte i = 0
-    while i < NHELP + 2 do
+    while i < n + 2 do
         byte r = TEXT_TOP + 1 + i
         draw_text_row(r)
         byte k = 0
@@ -628,7 +763,9 @@ function draw_help()
             rowa[10 + k] = C_BOX * 2
             k += 1
         end
-        if i > 0 and i <= NHELP then row_text(12, help_text[i - 1], C_BOX) end
+        if i > 0 and i <= n then
+            if about then row_text(12, about_text[i - 1], C_BOX) else row_text(12, help_text[i - 1], C_BOX) end
+        end
         put_row(r)
         i += 1
     end
@@ -872,6 +1009,16 @@ function pointer_text() -> bool
     return true
 end
 
+bool drag = false           -- selecting with the left button
+bool sdrag = false          -- moving the scroll bar's thumb
+byte sdrag_off = 0
+word drag_l = 0xFFFF        -- where the drag was last
+word drag_c = 0
+word frame_n = 0
+word click_t = 0            -- the last click (a double click)
+word click_l = 0xFFFF
+byte click_c = 0
+
 function mouse_poll()
     byte mx = port[0xFBDF]
     byte my = port[0xFFDF]
@@ -894,6 +1041,7 @@ function mouse_poll()
         px = word(nx)
         py = word(ny)
         sprite[0].position(px, py)
+        hover()
     end
     -- the wheel: 4-bit counter
     byte wh = mb >> 4
@@ -904,11 +1052,126 @@ function mouse_poll()
         if dw < -8 then dw += 16 end
         scroll_by(sword(dw) * 3)
     end
-    -- the left button (bit 1, 0 = pressed): a click
+    -- the buttons (0 = pressed): bit 1 left, bit 0 right
     bool down = mb & 2 == 0
     bool was = mb_last & 2 == 0
+    bool rdown = mb & 1 == 0
+    bool rwas = mb_last & 1 == 0
     mb_last = mb
-    if mouse_seen and down and not was then click() end
+    if not mouse_seen then return end
+    if down and not was then
+        click()
+    elseif down then
+        mouse_held()
+    elseif was then
+        drag = false
+        sdrag = false
+    end
+    if rdown and not rwas then right_click() end
+end
+
+-- the pointer over a menu: its item, or another menu of the bar
+function hover()
+    if not menu_open then return end
+    word r = py / 8
+    word c = px / 4
+    if r >= box_y and r < box_y + box_n() and c >= box_x and c < box_x + BOXW then
+        byte it = byte(r - box_y)
+        if it ~= menu_item then
+            menu_item = it
+            redraw_all = true
+        end
+        return
+    end
+    if r == 0 and not popup then
+        byte m = bar_menu(c)
+        if m ~= 255 and m ~= menu_cur then open_menu(m) end
+    end
+end
+
+-- the menu of the bar at column c (255: none)
+function bar_menu(word c) -> byte
+    byte m = 0
+    while m < NMENUS do
+        if c + 1 >= menu_x[m] and c < menu_x[m] + len(menu_names[m]) + 1 then return m end
+        m += 1
+    end
+    return 255
+end
+
+-- the left button held: selecting, or the scroll bar
+function mouse_held()
+    if sdrag then
+        thumb()
+        word span = TEXT_ROWS - th_n
+        if span == 0 then return end
+        sword r = sword(py / 8) - TEXT_TOP - sdrag_off
+        if r < 0 then r = 0 end
+        word most = nlines - TEXT_ROWS
+        word t = word(r) * most / span
+        if t > most then t = most end
+        if t ~= top then
+            top = t
+            if cy < top then move_to(top, cx) end
+            if cy >= top + TEXT_ROWS then move_to(top + TEXT_ROWS - 1, cx) end
+            redraw_all = true
+        end
+        return
+    end
+    if not drag then return end
+    word r = py / 8
+    -- above or below the text: scroll
+    if r < TEXT_TOP then
+        if top > 0 then top -= 1 end
+        r = TEXT_TOP
+        drag_l = 0xFFFF
+    elseif r >= TEXT_TOP + TEXT_ROWS then
+        if top + TEXT_ROWS < nlines then top += 1 end
+        r = TEXT_TOP + TEXT_ROWS - 1
+        drag_l = 0xFFFF
+    end
+    word c = px / 4
+    if c < GUTTER then c = GUTTER end
+    if c > 78 then c = 78 end
+    word l = top + (r - TEXT_TOP)
+    if l >= nlines then l = nlines - 1 end
+    word col = c - GUTTER + left_
+    if l == drag_l and col == drag_c then return end
+    drag_l = l
+    drag_c = col
+    move_to(l, byte(col))
+    sel_on = sel_l ~= cy or sel_c ~= cx
+    redraw_all = true
+end
+
+-- the word around the cursor
+function select_word()
+    load_cur(cy)
+    byte a = cx
+    while a > 0 and (is_alpha(cur[a - 1]) or is_digit(cur[a - 1])) do a -= 1 end
+    byte b = cx
+    while b < cur_len and (is_alpha(cur[b]) or is_digit(cur[b])) do b += 1 end
+    sel_l = cy
+    sel_c = a
+    cx = b
+    sel_on = a < b
+    redraw_all = true
+end
+
+function right_click()
+    if help_open then
+        help_open = false
+        redraw_all = true
+        return
+    end
+    if prompt_kind ~= 0 then return end
+    drag = false
+    if not sel_on and pointer_text() then
+        word l = hit_line
+        if l >= nlines then l = nlines - 1 end
+        move_to(l, hit_col)
+    end
+    open_popup(px / 4, py / 8 + 1)
 end
 
 function scroll_by(sword d)
@@ -931,42 +1194,81 @@ function click()
         redraw_all = true
         return
     end
-    if r == 0 then
-        -- the menu bar
-        byte m = 0
-        while m < NMENUS do
-            if c + 1 >= menu_x[m] and c < menu_x[m] + len(menu_names[m]) + 1 then
-                if menu_open and menu_cur == m then
-                    menu_open = false
-                else
-                    menu_open = true
-                    menu_cur = m
-                    menu_item = 0
-                end
-                redraw_all = true
-                return
-            end
-            m += 1
+    if prompt_kind ~= 0 then
+        -- outside the status line: cancel
+        if r ~= STATUS_ROW then
+            prompt_kind = 0
+            set_msg("", C_STATUS)
+            redraw_all = true
         end
         return
     end
+    byte was_menu = 255
     if menu_open then
-        byte first = menu_first[menu_cur]
-        byte n = menu_first[menu_cur + 1] - first
-        byte x = menu_x[menu_cur] - 1
+        if r >= box_y and r < box_y + box_n() and c >= box_x and c < box_x + BOXW then
+            byte it = box_item(byte(r - box_y))
+            menu_open = false
+            redraw_all = true
+            run_item(it)
+            return
+        end
+        if not popup then was_menu = menu_cur end
         menu_open = false
         redraw_all = true
-        if r >= TEXT_TOP and r < TEXT_TOP + n and c >= x and c < x + 22 then
-            run_item(first + byte(r - TEXT_TOP))
+        if r ~= 0 then return end
+    end
+    if r == 0 then
+        -- the menu bar (a second click on the open menu closes it)
+        byte m = bar_menu(c)
+        if m ~= 255 and m ~= was_menu then open_menu(m) end
+        return
+    end
+    if r < TEXT_TOP or r >= TEXT_TOP + TEXT_ROWS then return end
+    marking = false
+    if c == 79 then
+        -- the scroll bar: page up / down, or drag the thumb
+        thumb()
+        byte i = byte(r - TEXT_TOP)
+        if i < th_a then
+            scroll_by(-TEXT_ROWS)
+        elseif i >= th_a + th_n then
+            scroll_by(TEXT_ROWS)
+        else
+            sdrag = true
+            sdrag_off = i - th_a
         end
         return
     end
-    if prompt_kind ~= 0 then return end
-    if pointer_text() then
-        word l = hit_line
-        if l >= nlines then l = nlines - 1 end
-        move_to(l, hit_col)
+    word l = top + (r - TEXT_TOP)
+    if l >= nlines then l = nlines - 1 end
+    if c < GUTTER then
+        -- a line number: the whole line
+        sel_clear()
+        move_to(l, 0)
+        sel_l = l
+        sel_c = 0
+        if l + 1 < nlines then move_to(l + 1, 0) else move_to(l, 255) end
+        sel_on = true
+        redraw_all = true
+        return
     end
+    byte col = byte(c - GUTTER + left_)
+    sel_clear()
+    if frame_n - click_t < 20 and l == click_l and col == click_c then
+        click_l = 0xFFFF
+        move_to(l, col)
+        select_word()
+        return
+    end
+    click_t = frame_n
+    click_l = l
+    click_c = col
+    move_to(l, col)
+    sel_l = cy
+    sel_c = cx
+    drag = true
+    drag_l = l
+    drag_c = col
 end
 
 -- ---------------------------------------------------------------- editing
@@ -1127,25 +1429,112 @@ function delete_forward()
     redraw_all = true
 end
 
--- the line clipboard
-byte clip[256]
-byte clip_len = 0
-bool clip_full = false
 
-function copy_line()
+-- the clipboard: text with LF line breaks; clip_line: whole lines (pasted
+-- above the cursor's line)
+far byte clip[32768]
+word clip_len = 0
+bool clip_line = false
+
+function clip_put(byte b) -> bool
+    if clip_len >= 32768 then return false end
+    clip[clip_len] = b
+    clip_len += 1
+    return true
+end
+
+-- the selection to the clipboard
+function copy_sel() -> bool
+    sel_order()
+    store_cur()
+    clip_len = 0
+    clip_line = false
+    word l = s_l1
+    while l <= s_l2 do
+        get_line(l)
+        word a = 0
+        if l == s_l1 then a = s_c1 end
+        word b = blen
+        if l == s_l2 then b = s_c2 end
+        bool ok = true
+        while a < b and ok do
+            ok = clip_put(lbuf[a])
+            a += 1
+        end
+        if ok and l < s_l2 then ok = clip_put(10) end
+        if not ok then
+            clip_len = 0
+            set_msg("the selection is too big for the clipboard", C_ERR)
+            return false
+        end
+        l += 1
+    end
+    return true
+end
+
+function copy_cmd()
+    marking = false
+    if sel_on then
+        if copy_sel() then set_msg("copied", C_STATUS) end
+        redraw_all = true
+        return
+    end
     load_cur(cy)
+    clip_len = 0
     byte i = 0
     while i < cur_len do
         clip[i] = cur[i]
         i += 1
     end
     clip_len = cur_len
-    clip_full = true
+    clip[clip_len] = 10
+    clip_len += 1
+    clip_line = true
     set_msg("line copied", C_STATUS)
     redraw_line = true
 end
 
+-- delete the selection; the cursor to its start
+function delete_sel()
+    marking = false
+    if not sel_on then return end
+    sel_order()
+    store_cur()
+    get_line(s_l2)
+    byte suf[256]
+    word n = 0
+    word i = s_c2
+    while i < blen do
+        suf[n] = lbuf[i]
+        n += 1
+        i += 1
+    end
+    if word(s_c1) + n > 255 then
+        set_msg("the joined line would be too long", C_ERR)
+        return
+    end
+    load_cur(s_l1)
+    cur_len = s_c1
+    i = 0
+    while i < n do
+        cur[cur_len] = suf[i]
+        cur_len += 1
+        i += 1
+    end
+    store_cur()
+    if s_l2 > s_l1 then delete_lines(s_l1 + 1, s_l2 - s_l1) end
+    cy = s_l1
+    cx = s_c1
+    sel_on = false
+    update_asm(cy)
+    changed()
+    redraw_all = true
+    scroll_to_cursor()
+end
+
 function delete_this_line()
+    sel_clear()
+    marking = false
     load_cur(cy)
     if nlines == 1 then
         cur_len = 0
@@ -1163,34 +1552,103 @@ function delete_this_line()
     redraw_all = true
 end
 
-function cut_line()
-    copy_line()
+function cut_cmd()
+    if sel_on then
+        if copy_sel() then
+            delete_sel()
+            set_msg("cut", C_STATUS)
+        end
+        return
+    end
+    copy_cmd()
     delete_this_line()
     set_msg("line cut", C_STATUS)
 end
 
-function paste_line()
-    if not clip_full then return end
+-- the clipboard at the cursor (instead of the selection)
+function paste_cmd()
+    if clip_len == 0 then return end
+    if sel_on then delete_sel() end
+    if sel_on then return end           -- (could not delete it)
+    marking = false
+    if clip_line then cx = 0 end
+    word nl_ = 0
+    word i = 0
+    while i < clip_len do
+        if clip[i] == 10 then nl_ += 1 end
+        i += 1
+    end
     load_cur(cy)
     store_cur()
-    if not insert_line(cy) then
+    if not insert_lines(cy + 1, nl_) then
         set_msg("the text is full", C_ERR)
         return
     end
-    word s = lslot[cy]
-    sset(s, 0, clip_len)
-    byte i = 0
+    word start = cy
+    -- the rest of the line goes after the pasted text
+    byte suf[256]
+    byte sn = 0
+    byte k = cx
+    while k < cur_len do
+        suf[sn] = cur[k]
+        sn += 1
+        k += 1
+    end
+    cur_len = cx
+    bool cut_ = false
+    i = 0
     while i < clip_len do
-        sset(s, i + 1, clip[i])
+        byte b = clip[i]
+        if b == 10 then
+            store_cur()
+            cy += 1
+            cur_line = cy
+            cur_len = 0
+        elseif cur_len < 255 then
+            cur[cur_len] = b
+            cur_len += 1
+        else
+            cut_ = true
+        end
         i += 1
     end
-    cur_line = 0xFFFF
-    load_cur(cy + 1)
-    cy += 1
-    update_asm(cy - 1)
+    cx = cur_len
+    k = 0
+    while k < sn do
+        if cur_len < 255 then
+            cur[cur_len] = suf[k]
+            cur_len += 1
+        else
+            cut_ = true
+        end
+        k += 1
+    end
+    store_cur()
+    if cut_ then set_msg("lines longer than 255 characters were cut", C_ERR) end
+    update_asm(start)
     changed()
     redraw_all = true
     scroll_to_cursor()
+end
+
+function select_all()
+    marking = false
+    sel_l = 0
+    sel_c = 0
+    move_to(nlines - 1, 255)
+    sel_on = true
+    redraw_all = true
+end
+
+function mark_cmd()
+    marking = not marking
+    if marking then
+        sel_on = false
+        sel_l = cy
+        sel_c = cx
+        set_msg("mark: the cursor keys select", C_STATUS)
+    end
+    redraw_all = true
 end
 
 -- ---------------------------------------------------------------- files
@@ -1307,6 +1765,7 @@ function new_text()
     load_cur(0)
     modified = false
     fname = ""
+    main_name = ""
     redraw_all = true
 end
 
@@ -1354,11 +1813,13 @@ function prompt_done(byte kind, string t)
         if t == "" then return end
         if load_file(t) then
             fname = t
+            main_name = ""
             set_msg("loaded " .. t, C_STATUS)
         end
     elseif kind == 2 then
         if t == "" then return end
         if save_file(t) then
+            if main_name == fname then main_name = t end
             fname = t
             modified = false
             set_msg("saved " .. t, C_STATUS)
@@ -1445,8 +1906,15 @@ function cmd_compile(bool run)
     end
     if not save_file(fname) then return end
     modified = false
-    if fname ~= "in.lz80n" then
-        if not save_file("in.lz80n") then return end
+    -- the program: the main file (an included file being edited is saved,
+    -- the main file is compiled)
+    if main_name == "" or not file_exists(main_name) then main_name = fname end
+    if main_name == fname then
+        if fname ~= "in.lz80n" then
+            if not save_file("in.lz80n") then return end
+        end
+    elseif not copy_file(main_name, "in.lz80n") then
+        return
     end
     for k = 0, 3 do
         string e = "codegen.err"
@@ -1456,7 +1924,7 @@ function cmd_compile(bool run)
         if file_exists(e) then file_delete(e) end
     end
     touch("chain.on")
-    touch("editor.on")
+    touch("ide.on")
     if run then touch("run.on") elseif file_exists("run.on") then file_delete("run.on") end
     save_session(true)
     set_msg("compiling...", C_STATUS)
@@ -1468,6 +1936,30 @@ function cmd_compile(bool run)
         redraw_all = true
     end
     quit_now = true
+end
+
+function copy_file(string from, string to) -> bool
+    byte h = file_open(from, FILE_READ)
+    if h == FILE_ERROR then
+        set_msg("cannot read " .. from, C_ERR)
+        return false
+    end
+    fh = file_open(to, FILE_WRITE)
+    if fh == FILE_ERROR then
+        file_close(h)
+        set_msg("cannot write " .. to, C_ERR)
+        return false
+    end
+    fpos = 0
+    word c = file_getc(h)
+    while c ~= FILE_EOF do
+        fput(byte(c))
+        c = file_getc(h)
+    end
+    if fpos > 0 then file_write(fh, addr(fbuf), fpos) end
+    file_close(fh)
+    file_close(h)
+    return true
 end
 
 function touch(string name)
@@ -1486,41 +1978,42 @@ function run_item(byte it)
     elseif it == 3 then
         prompt(2, "Save as:", fname)
     elseif it == 4 then
-        cut_line()
+        cut_cmd()
     elseif it == 5 then
-        copy_line()
+        copy_cmd()
     elseif it == 6 then
-        paste_line()
+        paste_cmd()
     elseif it == 7 then
-        delete_this_line()
+        select_all()
     elseif it == 8 then
-        prompt(3, "Find:", find_text)
+        mark_cmd()
     elseif it == 9 then
-        find_next()
+        delete_this_line()
     elseif it == 10 then
-        prompt(4, "Go to line:", "")
+        prompt(3, "Find:", find_text)
     elseif it == 11 then
-        cmd_compile(false)
+        find_next()
     elseif it == 12 then
-        cmd_compile(true)
+        prompt(4, "Go to line:", "")
     elseif it == 13 then
+        cmd_compile(false)
+    elseif it == 14 then
+        cmd_compile(true)
+    elseif it == 15 or it == 16 then
         help_open = true
+        about = it == 16
         redraw_all = true
     end
 end
 
 function menu_key(word k)
-    byte first = menu_first[menu_cur]
-    byte n = menu_first[menu_cur + 1] - first
+    byte n = box_n()
     if k == K_BREAK or k == K_MENU then
         menu_open = false
-    elseif k == K_LEFT then
-        if menu_cur == 0 then menu_cur = NMENUS - 1 else menu_cur -= 1 end
-        menu_item = 0
-    elseif k == K_RIGHT then
-        menu_cur += 1
-        if menu_cur == NMENUS then menu_cur = 0 end
-        menu_item = 0
+    elseif k == K_LEFT and not popup then
+        if menu_cur == 0 then open_menu(NMENUS - 1) else open_menu(menu_cur - 1) end
+    elseif k == K_RIGHT and not popup then
+        if menu_cur + 1 == NMENUS then open_menu(0) else open_menu(menu_cur + 1) end
     elseif k == K_UP then
         if menu_item == 0 then menu_item = n - 1 else menu_item -= 1 end
     elseif k == K_DOWN then
@@ -1529,7 +2022,7 @@ function menu_key(word k)
     elseif k == K_ENTER then
         menu_open = false
         redraw_all = true
-        run_item(first + menu_item)
+        run_item(box_item(menu_item))
     end
     redraw_all = true
 end
@@ -1546,15 +2039,19 @@ function ext_command(word c)
     elseif c == 'r' then
         cmd_compile(true)
     elseif c == 'f' then
-        run_item(8)
-    elseif c == 'g' then
         run_item(10)
+    elseif c == 'g' then
+        run_item(12)
     elseif c == 'c' then
-        copy_line()
+        copy_cmd()
     elseif c == 'x' then
-        cut_line()
+        cut_cmd()
     elseif c == 'v' then
-        paste_line()
+        paste_cmd()
+    elseif c == 'a' then
+        select_all()
+    elseif c == 'm' then
+        mark_cmd()
     elseif c == 'k' then
         delete_this_line()
     elseif c == K_LEFT then
@@ -1588,14 +2085,13 @@ function handle_key(word k)
         set_msg("", C_STATUS)
         redraw_line = true
     end
+    -- the cursor keys: they drop the selection, or extend it (mark)
+    bool mv = (k >= K_UP and k <= K_PGDN) or (k >= K_EXT + K_UP and k <= K_EXT + K_RIGHT)
+    if mv and not marking then sel_clear() end
     if k >= K_EXT then
         ext_command(k - K_EXT)
-        return
-    end
-    if k == K_MENU then
-        menu_open = true
-        menu_item = 0
-        redraw_all = true
+    elseif k == K_MENU then
+        open_menu(0)
     elseif k == K_LEFT then
         if cx > 0 then
             move_to(cy, cx - 1)
@@ -1617,19 +2113,34 @@ function handle_key(word k)
         if cy > TEXT_ROWS then move_to(cy - TEXT_ROWS, cx) else move_to(0, cx) end
     elseif k == K_PGDN then
         if cy + TEXT_ROWS < nlines then move_to(cy + TEXT_ROWS, cx) else move_to(nlines - 1, cx) end
-    elseif k == K_BS then
-        backspace()
-    elseif k == K_DELF then
-        delete_forward()
+    elseif k == K_BS or k == K_DELF then
+        if sel_on then
+            delete_sel()
+        else
+            marking = false
+            if k == K_BS then backspace() else delete_forward() end
+        end
     elseif k == K_ENTER then
-        new_line()
+        if sel_on then delete_sel() end
+        marking = false
+        if not sel_on then new_line() end
     elseif k == K_BREAK then
+        marking = false
+        sel_clear()
         set_msg("", C_STATUS)
-        redraw_line = true
+        redraw_all = true
     elseif k >= 32 and k < 127 then
-        insert_char(byte(k))
-        -- typing `asm` / `end` changes the blocks below
-        update_asm(cy)
+        if sel_on then delete_sel() end
+        marking = false
+        if not sel_on then
+            insert_char(byte(k))
+            -- typing `asm` / `end` changes the blocks below
+            update_asm(cy)
+        end
+    end
+    if mv and marking then
+        sel_on = sel_l ~= cy or sel_c ~= cx
+        redraw_all = true
     end
 end
 
@@ -1652,7 +2163,7 @@ end
 
 function save_session(bool compiling)
     store_cur()
-    byte h = file_open("editor.ses", FILE_WRITE)
+    byte h = file_open("ide.ses", FILE_WRITE)
     if h == FILE_ERROR then return end
     fh = h
     fpos = 0
@@ -1661,6 +2172,7 @@ function save_session(bool compiling)
     for_text(str(cx))
     for_text(str(top))
     if compiling then for_text("1") else for_text("0") end
+    for_text(main_name)
     if fpos > 0 then file_write(fh, addr(fbuf), fpos) end
     file_close(fh)
 end
@@ -1710,8 +2222,21 @@ function check_result()
     read_ln()
     file_close(sh)
     if e == "codegen.err" then
-        -- `error LINE:COL message`
-        word l = num_at(sline, 0)
+        -- `error LINE:COL message`, or `error FILE:LINE:COL message` in an
+        -- included file: that file is opened (the main file stays)
+        string ef = ""
+        byte p = 6
+        if len(sline) > 6 and (asc(sline, 6) < '0' or asc(sline, 6) > '9') then
+            while p < len(sline) and asc(sline, p) ~= ':' do
+                ef = ef .. chr(asc(sline, p))
+                p += 1
+            end
+        end
+        if ef == "" or ef == "in.lz80n" then ef = main_name end
+        if ef ~= "" and ef ~= fname and file_exists(ef) then
+            if load_file(ef) then fname = ef end
+        end
+        word l = num_at(sline, p)
         word c = num_at(sline, byte(num_end))
         if l >= 1 and l <= nlines then
             move_to(l - 1, 0)
@@ -1726,8 +2251,8 @@ function check_result()
 end
 
 function load_session()
-    if not file_exists("editor.ses") then return end
-    sh = file_open("editor.ses", FILE_READ)
+    if not file_exists("ide.ses") then return end
+    sh = file_open("ide.ses", FILE_READ)
     if sh == FILE_ERROR then return end
     string name = ""
     word l = 0
@@ -1739,6 +2264,7 @@ function load_session()
     if read_ln() then c = num_at(sline, 0) end
     if read_ln() then t = num_at(sline, 0) end
     if read_ln() then compiled = sline == "1" end
+    if read_ln() then main_name = sline end
     file_close(sh)
     if name == "" or not file_exists(name) then return end
     if not load_file(name) then return end
@@ -1759,8 +2285,8 @@ end
 bool quit_now = false
 
 function load_script()
-    if not file_exists("editor.key") then return end
-    byte h = file_open("editor.key", FILE_READ)
+    if not file_exists("ide.key") then return end
+    byte h = file_open("ide.key", FILE_READ)
     if h == FILE_ERROR then return end
     word c = file_getc(h)
     while c ~= FILE_EOF and script_len < 60000 do
@@ -1776,14 +2302,15 @@ screen_init()
 mouse_init()
 new_text()
 load_session()
-if file_exists("editor.on") then file_delete("editor.on") end
+if file_exists("ide.on") then file_delete("ide.on") end
 load_script()
 redraw()
 while not quit_now do
     if not scripted then vsync() end
+    frame_n += 1
     mouse_poll()
     word k = get_key()
-    if k == 0xFFFF then break end           -- the end of editor.key
+    if k == 0xFFFF then break end           -- the end of ide.key
     if k ~= 0 then handle_key(k) end
     blink_t += 1
     if blink_t >= 25 and not scripted then
