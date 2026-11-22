@@ -1761,8 +1761,7 @@ fájlban hibánál azt a fájlt nyitja meg). A **Compile & run** sikeres
 fordítás után el is indítja a programot.
 
 A **File -> Open** egy mappa almappáit és programfájljait mutatja. A
-**Help -> Language manual** az angol, a **Kezikonyv (magyar)** ezt a
-kézikönyvet mutatja (ékezetek nélkül, mert a Next betűkészletében nincsenek);
+**Help -> Language manual** a kézikönyv angol változatát mutatja;
 balra / jobbra a fejezetek között lép, a tartalomjegyzék egy során az ENTER
 megnyitja a fejezetet, az F szöveget keres.
 

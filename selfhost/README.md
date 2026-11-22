@@ -210,8 +210,8 @@ up to 32 KB.
   for a name. It reads folders with the file module's new `file_opendir`
   and `file_readdir` (esxDOS F_OPENDIR / F_READDIR).
 * Help -> Language manual: the LZ80N manual (`lib/help.txt`, written by the
-  export from `docs/manual-en.md`; `lib/help-hu.txt`, the Hungarian one, in
-  ASCII letters) in the text area: left / right go to the chapters, ENTER
+  export from `docs/manual-en.md`, laid out for 80 columns in ASCII
+  letters) in the text area: left / right go to the chapters, ENTER
   on a line of the contents opens its chapter, F finds a text, N again.
   EXT H opens it at the word under the cursor.
 * A splash screen at the start: a box with the logo and the version

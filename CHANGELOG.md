@@ -10,7 +10,7 @@
   same language as `lz80nc`, compiles itself (the bootstrap reaches a fixed
   point), and its stages are tested against the Rust compiler.
 * `lz80nc --export-selfhost DIR` writes it for the SD card: the `.nex`
-  files; `lib/` with the runtime and module texts, the manuals (laid out
+  files; `lib/` with the runtime and module texts, the manual (laid out
   for the 80-column screen) and `version.txt`; `src/` with its sources. The
   release's Next package adds `examples/`. A program's includes and assets
   are relative to its own folder.
@@ -18,8 +18,7 @@
   mode with menus, syntax highlighting, a scroll bar, the Kempston mouse
   (click, drag to select, double click, a right-button menu, the wheel),
   selections, a clipboard, find and go to line, a file browser, the
-  language manual in English and Hungarian (EXTEND H: at the word under the
-  cursor), and Build -> Compile / Compile & run: the compiler's messages
+  language manual (EXTEND H: at the word under the cursor), and Build -> Compile / Compile & run: the compiler's messages
   appear like a command line session (in the 80-column mode) and in the
   IDE; an error puts the
   cursor on its line, in included files too. The Next keyboard's extra keys

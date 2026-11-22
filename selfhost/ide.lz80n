@@ -753,11 +753,11 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "", "Build output  EXT L", "Language manual EXT H", "Kezikonyv (magyar)"
+    "Keys", "About", "", "Build output  EXT L", "Language manual EXT H"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
-byte menu_order[20] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 20, 16}
-byte menu_first[5] = {0, 4, 13, 16, 20}
+byte menu_order[19] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 16}
+byte menu_first[5] = {0, 4, 13, 16, 19}
 byte popup_items[6] = {4, 5, 6, 7, 10, 13}
 const NPOPUP = 6
 const BOXW = 22
@@ -1054,27 +1054,27 @@ end
 -- the tilemap's text rows moved by n rows (up: the text goes up)
 word sh_src = 0
 word sh_dst = 0
-word sh_cnt = 0
 function shift_rows(byte n, bool up)
-    sh_cnt = word(TEXT_ROWS - n) * 160
-    if up then
-        sh_dst = TILEMAP + TEXT_TOP * 160
-        sh_src = sh_dst + word(n) * 160
+    -- row by row, columns 0..78: the scroll bar (column 79) stays as it is
+    -- (draw_thumb sets it afterwards), so it does not jump for a moment
+    byte cnt = TEXT_ROWS - n
+    byte i = 0
+    while i < cnt do
+        byte d = TEXT_TOP + TEXT_ROWS - 1 - i
+        byte s_ = d - n
+        if up then
+            d = TEXT_TOP + i
+            s_ = d + n
+        end
+        sh_dst = TILEMAP + word(d) * 160
+        sh_src = TILEMAP + word(s_) * 160
         asm
             ld hl,(g_sh_src)
             ld de,(g_sh_dst)
-            ld bc,(g_sh_cnt)
+            ld bc,158
             ldir
         end
-    else
-        sh_dst = TILEMAP + (TEXT_TOP + TEXT_ROWS) * 160 - 1
-        sh_src = sh_dst - word(n) * 160
-        asm
-            ld hl,(g_sh_src)
-            ld de,(g_sh_dst)
-            ld bc,(g_sh_cnt)
-            lddr
-        end
+        i += 1
     end
 end
 
@@ -2385,9 +2385,7 @@ function run_item(byte it)
         show_output()
     elseif it == 19 then
         hv_show("lib/help.txt", hv_cur)
-    elseif it == 20 then
-        if hv_file ~= "lib/help-hu.txt" then hv_cur = 0 end
-        hv_show("lib/help-hu.txt", hv_cur)
+
     end
 end
 
@@ -2974,7 +2972,7 @@ function browser_wheel(sbyte d)
 end
 
 -- ---------------------------------------------------------------- the manual
--- Help -> Language manual: help.txt (help-hu.txt: Hungarian), the LZ80N
+-- Help -> Language manual: help.txt, the LZ80N
 -- manual, in the text area: the cursor keys move, left / right go to the
 -- previous / next chapter, ENTER on a line of the contents opens that
 -- chapter, F finds a text (N: again), EXT H in the editor looks up the

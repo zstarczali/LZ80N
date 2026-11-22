@@ -1739,8 +1739,8 @@ line (in an included file it opens that file). **Compile & run** starts the
 program when it compiled.
 
 **File -> Open** shows the folders and the program files of a folder.
-**Help -> Language manual** shows this manual (Hungarian:
-**Kezikonyv (magyar)**); left / right go to the chapters, ENTER on a line of
+**Help -> Language manual** shows this manual; left / right go to the
+chapters, ENTER on a line of
 the contents opens its chapter, F finds a text.
 
 ### 25.2 The stages
