@@ -300,6 +300,21 @@ byte digits[12]
 byte ndig
 function dec32(word hi, word lo)
     ndig = 0
+    if hi == 0 then
+        -- (16-bit: the common case, much faster than the 32-bit division)
+        word w = lo
+        if w == 0 then
+            digits[0] = '0'
+            ndig = 1
+            return
+        end
+        while w > 0 do
+            digits[ndig] = byte(w % 10) + '0'
+            ndig += 1
+            w = w / 10
+        end
+        return
+    end
     long v = long(hi) << 16 | long(lo)
     -- v may be "negative" (>= 2^31): divide once by 10 unsigned first
     bool big = v < 0

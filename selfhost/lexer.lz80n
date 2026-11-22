@@ -90,13 +90,38 @@ function next_in() -> byte
     return byte(g)
 end
 
+-- size - pos, at most 60000 (word arithmetic while it is above 2)
+word rest = 0
+function sync_rest()
+    long r = size - pos
+    if r < 0 then r = 0 end
+    if r > 60000 then r = 60000 end
+    rest = word(r)
+end
+
 function at_end() -> bool
+    if rest > 2 then return false end
     return pos >= size
 end
 
 -- consume c0
 function bump() -> byte
     byte c = c0
+    if rest > 2 then
+        -- (the common case: far from the end)
+        pos += 1
+        rest -= 1
+        if c == 10 then
+            lno += 1
+            cno = 1
+        else
+            cno += 1
+        end
+        c0 = c1
+        c1 = next_in()
+        if rest <= 2 then sync_rest() end
+        return c
+    end
     if pos < size then pos += 1 end
     if c == 10 then
         lno += 1
@@ -107,6 +132,7 @@ function bump() -> byte
     c0 = c1
     c1 = 0
     if pos + 1 < size then c1 = next_in() end
+    sync_rest()
     return c
 end
 
@@ -635,6 +661,7 @@ function lex_file(string name) -> bool
     end
     size = file_size(inh)
     pos = 0
+    sync_rest()
     c0 = 0
     c1 = 0
     lno = 1
@@ -706,6 +733,7 @@ function include_file(word l, word c)
     inh = h
     size = sz
     pos = p
+    sync_rest()
     c0 = a
     c1 = b
     lno = ln
@@ -771,9 +799,17 @@ function find_modules()
     if h == FILE_ERROR then return end
     byte prog[28]               -- characters of each pattern matched so far
     for k = 0, NPATTERNS - 1 do prog[k] = 0 end
+    -- the characters that start a pattern: other characters are skipped
+    -- quickly while no pattern is half matched
+    byte starts[128]
+    for k = 0, 127 do starts[k] = 0 end
+    for k = 0, NPATTERNS - 1 do starts[asc(patterns[k], 0) & 127] = 1 end
+    byte busy = 0               -- patterns with prog > 0
     word g = file_getc(h)
     while g ~= FILE_EOF do
         byte ch = byte(g)
+        if busy ~= 0 or starts[ch & 127] ~= 0 then
+        busy = 0
         for k = 0, NPATTERNS - 1 do
             byte m = prog[k]
             if asc(patterns[k], m) == ch then
@@ -788,6 +824,8 @@ function find_modules()
                 m = 0
             end
             prog[k] = m
+            if m ~= 0 then busy += 1 end
+        end
         end
         g = file_getc(h)
     end

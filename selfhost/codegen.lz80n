@@ -81,15 +81,38 @@ function ob(byte b)
 end
 
 -- does the line start (after its 4 spaces) with s?
+byte lis_r = 0
 function lis(string s) -> bool
-    byte n = len(s)
-    if lcn < n + 4 then return false end
-    byte i = 0
-    while i < n do
-        if lcur[4 + i] ~= asc(s, i) then return false end
-        i += 1
+    -- (in assembly: it runs for every line of the output)
+    asm
+        ld hl,(p_lis_s)
+        ld b,(hl)
+        inc hl
+        ld a,(g_lcn)
+        sub 4
+        jr c,.no
+        cp b
+        jr c,.no
+        ld de,g_lcur+4
+        ld a,b
+        or a
+        jr z,.yes
+.l:
+        ld a,(de)
+        cp (hl)
+        jr nz,.no
+        inc hl
+        inc de
+        djnz .l
+.yes:
+        ld a,1
+        jr .end
+.no:
+        xor a
+.end:
+        ld (g_lis_r),a
     end
-    return true
+    return lis_r ~= 0
 end
 
 -- is character i of the line one of a b c d e h l (a register)?
@@ -101,12 +124,27 @@ end
 
 -- does the line contain c?
 function lhas(byte c) -> bool
-    byte i = 0
-    while i < lcn do
-        if lcur[i] == c then return true end
-        i += 1
+    asm
+        ld a,(g_lcn)
+        or a
+        jr z,.no
+        ld b,a
+        ld hl,g_lcur
+        ld a,(p_lhas_c)
+.l:
+        cp (hl)
+        jr z,.yes
+        inc hl
+        djnz .l
+.no:
+        xor a
+        jr .end
+.yes:
+        ld a,1
+.end:
+        ld (g_lis_r),a
     end
-    return false
+    return lis_r ~= 0
 end
 
 -- estimated bytes of the instruction in lcur (0 for labels and comments)
@@ -115,49 +153,51 @@ function line_cost() -> byte
     byte i = 0
     while i < lcn and (lcur[i] == ' ' or lcur[i] == 9) do i += 1 end
     if i >= lcn or lcur[i] == ';' then return 0 end
-    if lis("ld ") then
+    -- (the first letter first: lis copies its string)
+    byte c0 = lcur[4]
+    if (c0 == 'l' and lis("ld ")) then
         if lhas('x') or lhas('y') then return 4 end         -- ix / iy
-        if lis("ld (hl)") or lis("ld a,(hl)") or lis("ld a,(de)") or lis("ld a,(bc)") or lis("ld (de)") or lis("ld (bc)") then return 1 end
-        if lis("ld e,(hl)") or lis("ld d,(hl)") or lis("ld h,(hl)") or lis("ld l,(hl)") then return 1 end
-        if lis("ld de,(") or lis("ld bc,(") or lis("ld sp,(") then return 4 end
+        if (c0 == 'l' and lis("ld (hl)")) or (c0 == 'l' and lis("ld a,(hl)")) or (c0 == 'l' and lis("ld a,(de)")) or (c0 == 'l' and lis("ld a,(bc)")) or (c0 == 'l' and lis("ld (de)")) or (c0 == 'l' and lis("ld (bc)")) then return 1 end
+        if (c0 == 'l' and lis("ld e,(hl)")) or (c0 == 'l' and lis("ld d,(hl)")) or (c0 == 'l' and lis("ld h,(hl)")) or (c0 == 'l' and lis("ld l,(hl)")) then return 1 end
+        if (c0 == 'l' and lis("ld de,(")) or (c0 == 'l' and lis("ld bc,(")) or (c0 == 'l' and lis("ld sp,(")) then return 4 end
         if lhas('(') then
-            if lis("ld (") and (lcur[lcn - 2] == 'd' or lcur[lcn - 2] == 'b' or lcur[lcn - 2] == 's') then return 4 end
+            if (c0 == 'l' and lis("ld (")) and (lcur[lcn - 2] == 'd' or lcur[lcn - 2] == 'b' or lcur[lcn - 2] == 's') then return 4 end
             return 3
         end
-        if lis("ld hl,") or lis("ld de,") or lis("ld bc,") or lis("ld sp,") then
-            if lis("ld sp,hl") then return 1 end
+        if (c0 == 'l' and lis("ld hl,")) or (c0 == 'l' and lis("ld de,")) or (c0 == 'l' and lis("ld bc,")) or (c0 == 'l' and lis("ld sp,")) then
+            if (c0 == 'l' and lis("ld sp,hl")) then return 1 end
             return 3
         end
         -- ld r,r' or ld r,n
         if lcn == 10 and lreg(7) and lreg(9) then return 1 end
-        if lis("ld a,i") or lis("ld i,a") then return 2 end
+        if (c0 == 'l' and lis("ld a,i")) or (c0 == 'l' and lis("ld i,a")) then return 2 end
         return 2
     end
-    if lis("call ") or lis("jp ") then
-        if lis("jp (") then return 1 end
+    if (c0 == 'c' and lis("call ")) or (c0 == 'j' and lis("jp ")) then
+        if (c0 == 'j' and lis("jp (")) then return 1 end
         return 3
     end
-    if lis("jr ") or lis("djnz ") then return 2 end
-    if lis("add hl,") or lis("add a,") then
-        if lis("add a,") and not lreg(10) then return 2 end
+    if (c0 == 'j' and lis("jr ")) or (c0 == 'd' and lis("djnz ")) then return 2 end
+    if (c0 == 'a' and lis("add hl,")) or (c0 == 'a' and lis("add a,")) then
+        if (c0 == 'a' and lis("add a,")) and not lreg(10) then return 2 end
         return 1
     end
-    if lis("sbc hl") or lis("adc hl") or lis("ldir") or lis("lddr") or lis("ldi") or lis("neg") or lis("reti") or lis("im ") or lis("mul") then return 2 end
-    if lis("sra") or lis("srl") or lis("sla") or lis("rr ") or lis("rl ") or lis("rlc ") or lis("rrc ") or lis("bit ") or lis("set ") or lis("res ") then return 2 end
-    if lis("nextreg") then return 4 end
-    if lis("and ") or lis("or ") or lis("xor ") or lis("cp ") or lis("sub ") or lis("sbc a,") then
+    if (c0 == 's' and lis("sbc hl")) or (c0 == 'a' and lis("adc hl")) or (c0 == 'l' and lis("ldir")) or (c0 == 'l' and lis("lddr")) or (c0 == 'l' and lis("ldi")) or (c0 == 'n' and lis("neg")) or (c0 == 'r' and lis("reti")) or (c0 == 'i' and lis("im ")) or (c0 == 'm' and lis("mul")) then return 2 end
+    if (c0 == 's' and lis("sra")) or (c0 == 's' and lis("srl")) or (c0 == 's' and lis("sla")) or (c0 == 'r' and lis("rr ")) or (c0 == 'r' and lis("rl ")) or (c0 == 'r' and lis("rlc ")) or (c0 == 'r' and lis("rrc ")) or (c0 == 'b' and lis("bit ")) or (c0 == 's' and lis("set ")) or (c0 == 'r' and lis("res ")) then return 2 end
+    if (c0 == 'n' and lis("nextreg")) then return 4 end
+    if (c0 == 'a' and lis("and ")) or (c0 == 'o' and lis("or ")) or (c0 == 'x' and lis("xor ")) or (c0 == 'c' and lis("cp ")) or (c0 == 's' and lis("sub ")) or (c0 == 's' and lis("sbc a,")) then
         -- a register (or (hl)) operand is one byte
         byte j = lcn - 1
         if lreg(j) and (lcur[j - 1] == ' ' or lcur[j - 1] == ',') then return 1 end
         if lcur[j] == ')' then return 1 end
         return 2
     end
-    if lis("out (") or lis("in a,(") then
-        if lhas('c') and lis("out (c)") then return 2 end
-        if lis("in a,(c)") then return 2 end
+    if (c0 == 'o' and lis("out (")) or (c0 == 'i' and lis("in a,(")) then
+        if lhas('c') and (c0 == 'o' and lis("out (c)")) then return 2 end
+        if (c0 == 'i' and lis("in a,(c)")) then return 2 end
         return 2
     end
-    if lis("db ") or lis("dw ") or lis("dd ") then
+    if (c0 == 'd' and lis("db ")) or (c0 == 'd' and lis("dw ")) or (c0 == 'd' and lis("dd ")) then
         -- the line may be longer than lcur: a rough count
         byte n = 1
         byte k = 0
@@ -166,15 +206,15 @@ function line_cost() -> byte
             k += 1
         end
         if lcn == 40 then n = n * 2 + 8 end
-        if lis("dw ") then return n * 2 end
-        if lis("dd ") then return n * 4 end
+        if (c0 == 'd' and lis("dw ")) then return n * 2 end
+        if (c0 == 'd' and lis("dd ")) then return n * 4 end
         return n
     end
-    if lis("ds ") then return 64 end
-    if lis("rst") or lis("push") or lis("pop") or lis("ex ") or lis("exx") or lis("inc") or
-            lis("dec") or lis("ret") or lis("rla") or lis("rra") or lis("rlca") or lis("rrca") or
-            lis("cpl") or lis("scf") or lis("ccf") or lis("di") or lis("ei") or lis("halt") or
-            lis("nop") then return 1 end
+    if (c0 == 'd' and lis("ds ")) then return 64 end
+    if (c0 == 'r' and lis("rst")) or (c0 == 'p' and lis("push")) or (c0 == 'p' and lis("pop")) or (c0 == 'e' and lis("ex ")) or (c0 == 'e' and lis("exx")) or (c0 == 'i' and lis("inc")) or
+            (c0 == 'd' and lis("dec")) or (c0 == 'r' and lis("ret")) or (c0 == 'r' and lis("rla")) or (c0 == 'r' and lis("rra")) or (c0 == 'r' and lis("rlca")) or (c0 == 'r' and lis("rrca")) or
+            (c0 == 'c' and lis("cpl")) or (c0 == 's' and lis("scf")) or (c0 == 'c' and lis("ccf")) or (c0 == 'd' and lis("di")) or (c0 == 'e' and lis("ei")) or (c0 == 'h' and lis("halt")) or
+            (c0 == 'n' and lis("nop")) then return 1 end
     return 4
 end
 
@@ -225,12 +265,15 @@ function ocopy(string name)
         end
         return
     end
-    word c = file_getc(h)
-    while c ~= FILE_EOF do
-        ob(byte(c))
-        c = file_getc(h)
+    -- in blocks, past ob (the sizes were counted when it was written)
+    flush()
+    while true do
+        word got = file_read(h, addr(obuf), 256)
+        if got == 0 then break end
+        file_write(cur_h, addr(obuf), got)
     end
     file_close(h)
+    lcn = 0
 end
 
 -- ---------------------------------------------------------------- errors
@@ -5155,13 +5198,17 @@ function ocopy_range(string name, long at, long n)
         return
     end
     file_seek(h, at)
+    flush()
     while n > 0 do
-        word c = file_getc(h)
-        if c == FILE_EOF then break end
-        ob(byte(c))
-        n -= 1
+        word want = 256
+        if n < 256 then want = word(n) end
+        word got = file_read(h, addr(obuf), want)
+        if got == 0 then break end
+        file_write(cur_h, addr(obuf), got)
+        n -= got
     end
     file_close(h)
+    lcn = 0
 end
 
 -- room for est bytes in a code page: cur_page (a new one when needed)
@@ -5412,6 +5459,11 @@ function generate()
     oi("DEVICE ZXSPECTRUMNEXT")
     oi("ORG $8000")
     onl()
+    -- the runtime and the font, assembled by the export (rt_core.bin at
+    -- $8000) and their labels (rt_core.sym: EQUs): the assembler does not
+    -- go through them on every compile
+    oi("incbin \"lib/rt_core.bin\"")
+    ocopy("lib/rt_core.sym")
     ocopy("lib/rt_start.asm")
     irq_lines()
     if nlines > 0 then
@@ -5485,7 +5537,6 @@ function generate()
     end
     if failed then return end
     if cur_page ~= 0 then ocopy("lib/rt_banked.asm") end
-    ocopy("lib/rt_lib.asm")         -- starts with __main_end
     if uses_long then ocopy("lib/rt_long.asm") end
     bool any_img = false
     byte ai = 0
@@ -5556,7 +5607,6 @@ function generate()
     if slot1 then os("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n") end
     if shadow then os("    ex af,af'\n    pop af\n    ex af,af'\n    exx\n    pop hl\n    pop de\n    pop bc\n    exx\n") end
     os("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n")
-    ocopy("lib/rt_font.asm")
     if far_arr_pages > 0 then
         os("; clear the far pages at startup\nrt_far_zero:\n    ld hl,rt_far_zero_tab\n.p:\n    ld a,(hl)\n    or a\n    ret z\n")
         os("    push hl\n    ld (rt_farpage),a\n    nextreg $51,a\n    xor a\n    ld de,$2000\n    ld bc,8192\n")

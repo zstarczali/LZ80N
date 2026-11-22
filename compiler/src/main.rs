@@ -173,7 +173,7 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
         let row: Vec<String> = glyph.iter().map(|b| format!("${b:02X}")).collect();
         font.push_str(&format!("    db {}\n", row.join(",")));
     }
-    vec![
+    let mut files: Vec<(String, Vec<u8>)> = vec![
         ("lib/rt_start.asm".into(), startup.as_bytes().to_vec()),
         ("lib/rt_lib.asm".into(), runtime::RUNTIME.as_bytes().to_vec()),
         ("lib/rt_font.asm".into(), font.into_bytes()),
@@ -198,7 +198,24 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
             c.into_bytes()
         }),
         ("expand.on".into(), b"1".to_vec()),
-    ]
+    ];
+    // the runtime and the font, assembled at $8000, and their labels: the
+    // self-hosted code generator puts them in with INCBIN and EQUs
+    let core_src = format!(
+        "    OPT --zxnext\n    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\n{}\n{}\nrt_core_end:\n",
+        runtime::RUNTIME,
+        String::from_utf8_lossy(&files.iter().find(|f| f.0 == "lib/rt_font.asm").unwrap().1)
+    );
+    let (bin, syms) = asm::assemble_block(&core_src, Path::new("."), "rt_core_end").expect("the runtime assembles");
+    let mut names: Vec<_> = syms.iter().filter(|(n, _)| !n.contains('.') && *n != "rt_core_end").collect();
+    names.sort();
+    let mut sym = String::from("; the labels of rt_core.bin (the runtime and the font at $8000)\n");
+    for (n, v) in names {
+        sym.push_str(&format!("{n} equ ${v:04X}\n"));
+    }
+    files.push(("lib/rt_core.bin".into(), bin));
+    files.push(("lib/rt_core.sym".into(), sym.into_bytes()));
+    files
 }
 
 /// A program built for the SD card: (file name, NEX, symbols).

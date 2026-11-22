@@ -4257,7 +4257,25 @@ fn selfhost_asm_errors() {
 
 /// The runtime files the self-hosted code generator copies from the SD card.
 fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
-    crate::selfhost_support_files()
+    let files = crate::selfhost_support_files();
+    sh_fallback(&files);
+    files
+}
+
+/// The support files in a folder that the test assembler's INCBIN falls
+/// back to (out.asm takes lib/rt_core.bin).
+fn sh_fallback(files: &[(String, Vec<u8>)]) {
+    let mut fb = crate::asm::TEST_FALLBACK.lock().unwrap();
+    if fb.is_some() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("lz80n_sh_support_{}", std::process::id()));
+    for (n, d) in files {
+        let p = dir.join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, d).unwrap();
+    }
+    *fb = Some(dir);
 }
 
 struct SelfHost {
@@ -4268,6 +4286,7 @@ struct SelfHost {
 
 impl SelfHost {
     fn new() -> SelfHost {
+        sh_fallback(&crate::selfhost_support_files());
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
         let cg_src = std::fs::read_to_string(root.join("selfhost/codegen.lz80n")).unwrap();
@@ -5978,7 +5997,7 @@ fn selfhost_ide_mouse() {
     // buttons (bit 1 left, bit 0 right; 1 = up)
     let mut px = 160i32;
     let mut py = 128i32;
-    let mut frame = |cpu: &mut crate::emu::Cpu, n: u32| {
+    let frame = |cpu: &mut crate::emu::Cpu, n: u32| {
         let f = cpu.frame_count;
         while cpu.frame_count < f + n {
             cpu.tick().unwrap();
@@ -6213,4 +6232,98 @@ fn selfhost_ide_manual() {
     k2.push(10);
     let cpu = run(&k2);
     assert_eq!(ide_row(&cpu, 1), "   1");
+}
+
+/// Where a self-hosted stage spends its time: PC samples by function.
+/// `STAGE=asm|codegen|lexer cargo test --release profile_stage -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn profile_stage() {
+    let stage = std::env::var("STAGE").unwrap_or("asm".into());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let dir = root.join("selfhost");
+    let src = std::fs::read_to_string(dir.join(format!("{stage}.lz80n"))).unwrap();
+    let asm = crate::compile_main(&src, Some(&dir.join(format!("{stage}.lz80n"))), "t.nex", true, &dir, false).unwrap();
+    let out = crate::asm::assemble(&asm, &dir).unwrap();
+    let syms = out.symbols16();
+    // the page of each label (code pages are mapped at $4000 by MMU 2)
+    let mut page = 0u8;
+    let mut labels: Vec<(u8, u16, String)> = vec![];
+    for line in asm.lines() {
+        let t = line.trim();
+        if let Some(p) = t.strip_prefix("MMU 2 e, ") {
+            page = p.trim().parse().unwrap_or(0);
+        }
+        if !line.starts_with(' ') && !line.starts_with('.') && !line.starts_with(';') && line.ends_with(':') {
+            let name = &line[..line.len() - 1];
+            if name.starts_with("__L") { continue; }
+            if let Some(&a) = syms.get(name) {
+                let pg = if (0x4000..0x6000).contains(&a) { page } else { 0 };
+                labels.push((pg, a, name.to_string()));
+            }
+        }
+    }
+    labels.sort();
+    // the input: the program's stage files
+    let prog = std::fs::read_to_string(root.join(std::env::var("PROG").unwrap_or("examples/hello.lz80n".into()))).unwrap();
+    let sh = SelfHost::new();
+    let (_, mut files) = sh.compile_sd(&[("in.lz80n", prog.as_bytes())]).unwrap();
+    if stage == "asm" {
+        files.retain(|k, _| k == "out.asm");
+    } else {
+        let lexed = {
+            let mut f = std::collections::HashMap::new();
+            f.insert("in.lz80n".to_string(), prog.into_bytes());
+            for (n, d) in selfhost_runtime_files() {
+                f.insert(n, d);
+            }
+            if stage == "lexer" { f } else { run_stage(&sh.lex.0, &sh.lex.1, f) }
+        };
+        files = lexed;
+    }
+    for (n, d) in selfhost_runtime_files() {
+        files.entry(n).or_insert(d);
+    }
+    let mut cpu = load_nex(&out.nex.unwrap().1).unwrap();
+    let mut fs = crate::emu::EsxFs::default();
+    fs.files = files;
+    cpu.esx = Some(fs);
+    let end = syms["__main_end"];
+    let mut hist: HashMap<String, u64> = HashMap::new();
+    let mut callers: HashMap<String, u64> = HashMap::new();
+    let mut last_t = cpu.t_states;
+    while cpu.pc != end {
+        let pc = cpu.pc;
+        cpu.tick().unwrap();
+        let dt = cpu.t_states - last_t;
+        last_t = cpu.t_states;
+        let pg = if (0x4000..0x6000).contains(&pc) { cpu.slot2 } else { 0 };
+        // the callers of the busiest runtime routines
+        if let Ok(w) = std::env::var("CALLERS") {
+            if let Some(&a) = syms.get(&w) {
+                if pc == a {
+                    let ret = cpu.mem[cpu.sp as usize] as u16 | (cpu.mem[cpu.sp as usize + 1] as u16) << 8;
+                    let rpg = if (0x4000..0x6000).contains(&ret) { cpu.slot2 } else { 0 };
+                    let j = labels.partition_point(|l| (l.0, l.1) <= (rpg, ret));
+                    let name = if j > 0 { format!("caller {}", labels[j - 1].2) } else { "caller ?".into() };
+                    *callers.entry(name).or_default() += 1;
+                }
+            }
+        }
+        let i = labels.partition_point(|l| (l.0, l.1) <= (pg, pc));
+        let name = if i > 0 { labels[i - 1].2.clone() } else { format!("?{pc:04X}") };
+        *hist.entry(name).or_default() += dt;
+    }
+    let total: u64 = hist.values().sum();
+    let mut v: Vec<_> = hist.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    eprintln!("{stage}: {:.2} s at 28 MHz", total as f64 / 28e6);
+    for (n, t) in v.iter().take(40) {
+        eprintln!("{:6.2}%  {:8.3} s  {n}", *t as f64 * 100.0 / total as f64, *t as f64 / 28e6);
+    }
+    let mut c: Vec<_> = callers.into_iter().collect();
+    c.sort_by(|a, b| b.1.cmp(&a.1));
+    for (n, k) in c.iter().take(15) {
+        eprintln!("{k:8} calls  {n}");
+    }
 }

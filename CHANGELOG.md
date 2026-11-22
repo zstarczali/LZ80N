@@ -24,6 +24,11 @@
   IDE; an error puts the
   cursor on its line, in included files too. The Next keyboard's extra keys
   (NextRegs `$B0` / `$B1`) work as well.
+* Compiling on the Next: the runtime is assembled once by the export
+  (`lib/rt_core.bin` and its labels) instead of with every program; the
+  assembler reads blocks and skips the work its first pass does not need;
+  a small program compiles about 6 times faster than at first (about 2
+  seconds of work at 28 MHz), one with the Layer 2 module about 1.5 times.
 * The release packages contain it in `next/lz80n`; it is also a separate
   archive, `lz80n-1.4.0-zxnext-sdcard.zip`.
 

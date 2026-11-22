@@ -184,6 +184,17 @@ up to 32 KB.
   `run.on` does not exist. The IDE reloads the file, shows the result
   in the status line, and puts the cursor on the line and column of a
   code generator error.
+* Speed: the runtime and the font are assembled once by the export
+  (`lib/rt_core.bin`, with their labels as EQUs in `lib/rt_core.sym`) and
+  taken by INCBIN, so a small program's `out.asm` is about 600 lines instead
+  of 2200. The assembler reads the source in blocks (the line scan in
+  assembly), skips INCBIN data and the 8K page clearing in its first pass,
+  and avoids 32-bit arithmetic for every byte; the code generator copies
+  its temporary files in blocks; the lexer keeps a 16-bit count of the
+  characters left. `hello.lz80n`: lexer 0.2 s, code generator 0.5 s,
+  assembler 1.3 s at 28 MHz (it was 0.2 + 2.4 + 9.1 s); `life.lz80n` (with
+  the Layer 2 module) 3.1 + 5.6 + 13.3 s (4.5 + 12.2 + 17.2 s).
+  `profile_stage` (ignored) shows where a stage spends its time.
 * The build log: every stage writes its lines (with the time it took) to
   the screen (the 80-column text mode, the IDE's font) and to `build.log`, and shows the lines of the stages before
   it first, so the screen reads like one command line session. After a

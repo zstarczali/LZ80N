@@ -1782,5 +1782,6 @@ COPY "myprog.lz80n" TO "in.lz80n"
 A hibák a `codegen.err`, `asm.err` vagy `assets.err` fájlba kerülnek; a
 `build.log` a lépések üzeneteit tartalmazza, amelyek 80 oszlopos szöveges
 módban a képernyőn is megjelennek. Egy kis program fordítása
-28 MHz-en kb. 10-15 másodperc. A nyelv ugyanaz, mint a PC-s `lz80nc`-vel
+28 MHz-en néhány másodperc (plusz a lépések betöltése az SD kártyáról); egy
+Layer 2 modult használó programé kb. 20 másodperc. A nyelv ugyanaz, mint a PC-s `lz80nc`-vel
 (a részletek: `selfhost/README.md`).

@@ -1757,6 +1757,7 @@ COPY "myprog.lz80n" TO "in.lz80n"
 
 Errors go to `codegen.err`, `asm.err` or `assets.err`; `build.log` has the
 messages of the stages, which also appear on the screen in the 80-column
-text mode. A small program takes about 10-15 seconds at 28 MHz.
+text mode. A small program takes a few seconds at 28 MHz (plus loading the
+stages from the SD card); one that uses the Layer 2 module about 20 seconds.
 The language is the same as with `lz80nc` on a PC (`selfhost/README.md`
 lists the details).
