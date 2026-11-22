@@ -180,6 +180,7 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
         ("rt_samples.asm".into(), runtime::SAMPLES.as_bytes().to_vec()),
         ("rt_notes.asm".into(), codegen::notes_asm().into_bytes()),
         ("rt_trig.asm".into(), codegen::trig_asm().into_bytes()),
+        ("rt_music.asm".into(), runtime::MUSIC.as_bytes().to_vec()),
         ("lib_file.lz80n".into(), prelude::FILE.as_bytes().to_vec()),
         ("lib_layer2.lz80n".into(), prelude::LAYER2.as_bytes().to_vec()),
         ("lib_palette.lz80n".into(), prelude::PALETTE.as_bytes().to_vec()),
@@ -235,8 +236,8 @@ Copy this folder to the SD card, then in NextBASIC:\r\n\
   .cd /lz80n                (the folder you copied)\r\n\
   put your program into in.lz80n (e.g. COPY \"prog.lz80n\" TO \"in.lz80n\")\r\n\
   .nexload lexer.nex\r\n\r\n\
-lexer.nex -> tokens.bin, then starts codegen.nex -> out.asm, then (when the\r\n\
-program has PNG or WAV assets) assets.nex -> a_*.bin, then asm.nex -> out.nex. Create a file named run.on to start out.nex at the end. Errors:\r\n\
+lexer.nex -> tokens.bin, then (when the program has assets) assets.nex ->\r\n\
+a_*.bin, then codegen.nex -> out.asm, then asm.nex -> out.nex. Create a file named run.on to start out.nex at the end. Errors:\r\n\
 on the screen, and in codegen.err / asm.err. Delete chain.on to run the\r\n\
 stages one by one. Supported language: see selfhost/README.md.\r\n",
     )?;

@@ -46,14 +46,19 @@ and the token file round trip; to be tuned once code generation exists.
 
 ## assets.lz80n
 
-Converts the PNG and WAV files listed in `assets.lst` (by `codegen.nex`) for
-the assembler, like `compiler/src/assets.rs`: PNG sheets to 16x16 patterns
+Runs between the lexer and the code generator when the program declares
+assets (the lexer writes `assets.on`): finds the `asset` declarations in
+`tokens.bin` and converts the files for the assembler, like
+`compiler/src/assets.rs` and `pt3.rs`: PNG sheets to 16x16 patterns
 (cell by cell), PNG pictures to RRRGGGBB rows (and `a_NAME.msk`: has it
 transparent pixels?), WAV to unsigned 8-bit mono, resampled to 15.6 kHz
 outside 4..31.25 kHz. Its own PNG decoder: zlib inflate (stored, fixed and
 dynamic Huffman blocks, a 32K window in a `far` array) streamed into the row
 unfilter (all five filters), every colour type and bit depth, `PLTE` and
-`tRNS`; not interlaced files. Errors: `assets.err`.
+`tRNS`; not interlaced files. PT3 / Vortex Tracker II modules are played
+through once into the AY register stream of every frame (`a_NAME.bin`, and
+`a_NAME.inf`: its length and loop offset, read by the code generator).
+Errors: `assets.err`.
 
 ## asm.lz80n
 
@@ -108,10 +113,11 @@ values, constructors `Type(...)` with or without `init`, methods and `self`,
 `extends`, `super.m()`, `Type.m(obj)`, struct arrays, struct and string
 parameters by reference, functions and methods returning structs or strings
 through `r_NAME` buffers), assets (`asset name = "file.png"` patterns, `.spr` and other files as they
-are, `image("file.png")` pictures in 8K pages, `.wav` samples; the header
-of each file is read here, `asset_info.lz80n`, the conversion is done by
-`assets.nex`), `sprite_load draw_image image_width image_height
-sample_play sample_loop sample_stop sample_playing ay_write note_period
+are, `image("file.png")` pictures in 8K pages, `.wav` samples, `.pt3` music; the
+header of each file is read here, `asset_info.lz80n`, the conversion is
+done by `assets.nex`), `sprite_load draw_image image_width image_height
+sample_play sample_loop sample_stop sample_playing music_play music_once
+music_stop music_playing ay_write note_period
 dma_copy dma_fill cpu_speed`, `include` (relative to the including file),
 the standard modules `sound` (its driver runs in the interrupt), `sprites` (the
 `Sprite` class and `sprite[]`), `file`, `Layer 2`, `palette` and `copper`
@@ -136,10 +142,12 @@ through the handler lines and line 192), and main programs too large for
 the resident area (their statements move into code pages, in chunks
 called in order; a single statement must fit one page).
 
-Not yet: music assets (`.pt3`) and `music_*`, the check that no function
-is shared by the main program and an interrupt handler, and diagnostics of
-type errors (programs are expected to be correct: check them with lz80nc
-first).
+A function called both from the main program and from an interrupt
+handler (or the sound driver) is an error, as with lz80nc.
+
+Not yet: diagnostics of type errors (programs are expected to be correct:
+check them with lz80nc first) and a few rare forms (a single statement of
+the main program larger than an 8K page).
 
 ## Tests
 
@@ -162,9 +170,11 @@ first).
   suite is also compiled by the self-hosted compiler when it supports it
   (61 of 62 now: not the stress test of one 8K+ statement);
 * `selfhost_codegen_examples` (ignored, a report): which examples the
-  self-hosted compiler compiles: now 23 of the 24 (all but music);
+  self-hosted compiler compiles: all 24;
 * `selfhost_codegen_arrays_strings`: arrays of more dimensions, string
   constants and the string / number built-ins;
+* `selfhost_codegen_music`: the PT3 stream byte for byte as `pt3.rs`, and
+  the AY registers of programs playing it;
 * `selfhost_codegen_fixed`, `selfhost_codegen_interrupts`,
   `selfhost_codegen_large_main`: fixed point and trigonometry, interrupt
   handlers (the raster state too), a main program in code pages;
@@ -207,9 +217,9 @@ COPY "myprog.lz80n" TO "in.lz80n"
 
 `lexer.nex` writes `tokens.bin` and starts `codegen.nex` (esxDOS
 `M_EXECCMD`, `nexload`), which writes `out.asm` and starts `asm.nex`, which
-writes `out.nex`. When the program has PNG or WAV assets, `codegen.nex`
-writes `assets.lst` and starts `assets.nex` first, which converts them
-(`a_NAME.bin`) and starts `asm.nex`. Asset paths are relative to the folder
+writes `out.nex`. When the program declares assets, the lexer starts
+`assets.nex` first, which converts them (`a_NAME.bin`) and starts
+`codegen.nex`. Asset paths are relative to the folder
 (subfolders work: `assets/ship.png`). With a file named `run.on` in the folder `out.nex` is started
 too. Errors appear on the screen (and in `codegen.err` / `asm.err`). Without
 `chain.on` every stage stops after its work. `file_exec` / `file_exists` are

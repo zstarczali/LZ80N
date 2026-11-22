@@ -172,7 +172,11 @@ function text_add(byte c)
     end
 end
 
+const T_ASSET = 27
+bool has_assets = false     -- an `asset` declaration: assets.nex runs next
+
 function out_head(byte kind, word l, word c)
+    if kind == T_ASSET then has_assets = true end
     out_byte(kind)
     out_word(l)
     out_word(c)
@@ -772,7 +776,19 @@ if not failed then out_head(T_EOF, lno, cno) end
 flush()
 file_close(outh)
 print("lexer:", ntokens, "tokens")
--- the next stage (lexer -> codegen -> asm)
+-- assets.on: the program declares assets (assets.nex converts them before
+-- the code generator reads them)
+if has_assets and not failed then
+    byte ah = file_open("assets.on", FILE_WRITE)
+    if ah ~= FILE_ERROR then file_close(ah) end
+elseif file_exists("assets.on") then
+    file_delete("assets.on")
+end
+-- the next stage (lexer -> [assets ->] codegen -> asm)
 if expand and file_exists("chain.on") then
-    if not file_exec("nexload codegen.nex") then print("cannot start codegen.nex, error", file_status) end
+    if has_assets and not failed then
+        if not file_exec("nexload assets.nex") then print("cannot start assets.nex, error", file_status) end
+    elseif not file_exec("nexload codegen.nex") then
+        print("cannot start codegen.nex, error", file_status)
+    end
 end
