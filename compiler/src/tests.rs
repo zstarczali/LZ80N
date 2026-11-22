@@ -4257,25 +4257,24 @@ fn selfhost_asm_errors() {
 
 /// The runtime files the self-hosted code generator copies from the SD card.
 fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
-    let files = crate::selfhost_support_files();
-    sh_fallback(&files);
-    files
+    crate::selfhost_support_files()
 }
 
 /// The support files in a folder that the test assembler's INCBIN falls
-/// back to (out.asm takes lib/rt_core.bin).
-fn sh_fallback(files: &[(String, Vec<u8>)]) {
-    let mut fb = crate::asm::TEST_FALLBACK.lock().unwrap();
-    if fb.is_some() {
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("lz80n_sh_support_{}", std::process::id()));
-    for (n, d) in files {
-        let p = dir.join(n);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, d).unwrap();
-    }
-    *fb = Some(dir);
+/// back to when a file is not next to the source (out.asm of the self-hosted
+/// compiler takes lib/rt_core.bin).
+pub(crate) fn sh_support_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("lz80n_sh_support_{}", std::process::id()));
+        for (n, d) in crate::selfhost_support_files() {
+            let p = dir.join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, d).unwrap();
+        }
+        dir
+    })
+    .clone()
 }
 
 struct SelfHost {
@@ -4286,7 +4285,6 @@ struct SelfHost {
 
 impl SelfHost {
     fn new() -> SelfHost {
-        sh_fallback(&crate::selfhost_support_files());
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let lexer_src = std::fs::read_to_string(root.join("selfhost/lexer.lz80n")).unwrap();
         let cg_src = std::fs::read_to_string(root.join("selfhost/codegen.lz80n")).unwrap();

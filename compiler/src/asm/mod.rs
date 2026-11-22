@@ -88,11 +88,6 @@ pub fn assemble(src: &str, base_dir: &Path) -> Result<Assembled, Vec<AsmError>> 
     Ok(Assembled { nex, symbols: syms })
 }
 
-/// Tests: a folder INCBIN looks in when the file is not next to the source
-/// (the self-hosted compiler's `lib/rt_core.bin`).
-#[cfg(test)]
-pub static TEST_FALLBACK: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-
 /// Assemble a block of code at `ORG $8000` (bank 2, as mapped at the start)
 /// up to the symbol `end`: its bytes and its symbols. The self-hosted
 /// compiler takes the runtime this way, ready-made.
@@ -564,9 +559,7 @@ impl<'a> Pass<'a> {
         let mut path: PathBuf = self.base_dir.join(name);
         #[cfg(test)]
         if !path.exists() {
-            if let Some(dir) = TEST_FALLBACK.lock().unwrap().as_ref() {
-                path = dir.join(name);
-            }
+            path = crate::tests::sh_support_dir().join(name);
         }
         let data = match std::fs::read(&path) {
             Ok(d) => d,

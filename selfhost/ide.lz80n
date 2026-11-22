@@ -753,7 +753,7 @@ string menu_items[] = {
     "Cut           EXT X", "Copy          EXT C", "Paste         EXT V", "Select all    EXT A", "Mark          EXT M",
     "Delete line   EXT K", "Find...       EXT F", "Find next", "Go to line... EXT G",
     "Compile       EXT B", "Compile & run EXT R",
-    "Keys", "About", "", "Build output  EXT L", "Language manual EXT H"
+    "Keys", "About", "", "Build output  EXT L", "Language manual"
 }
 -- the items of the menus in order (File, Edit, Build, Help): command numbers
 byte menu_order[19] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 15, 19, 16}
