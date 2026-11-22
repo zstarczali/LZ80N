@@ -723,8 +723,11 @@ function draw_status()
         rowa[c + len(prompt_text)] = C_CURSOR * 2
     else
         if hv_open then
-            row_text(1, "Manual: arrows, left/right chapter, ENTER, F find, N next, BREAK close", C_STATUS)
-            if message ~= "" then row_text(1, message, msg_colour) end
+            if message ~= "" then
+                row_text(1, message, msg_colour)
+            else
+                row_text(1, "Manual: arrows, left/right chapter, ENTER, F find, N next, BREAK close", C_STATUS)
+            end
             put_row(STATUS_ROW)
             return
         end
@@ -2381,10 +2384,10 @@ function run_item(byte it)
     elseif it == 18 then
         show_output()
     elseif it == 19 then
-        hv_show("help.txt", hv_cur)
+        hv_show("lib/help.txt", hv_cur)
     elseif it == 20 then
-        if hv_file ~= "help-hu.txt" then hv_cur = 0 end
-        hv_show("help-hu.txt", hv_cur)
+        if hv_file ~= "lib/help-hu.txt" then hv_cur = 0 end
+        hv_show("lib/help-hu.txt", hv_cur)
     end
 end
 
@@ -2977,19 +2980,31 @@ end
 -- chapter, F finds a text (N: again), EXT H in the editor looks up the
 -- word under the cursor. BREAK closes it.
 
-far byte ht[65280]          -- the text
-far word hl_off[4000]       -- the wrapped lines: offset, length, kind
+far byte ht0[65280]         -- the text (two arrays: a manual is over 64K)
+far byte ht1[65280]
+far word hl_off[4000]       -- the lines: offset, array, length, kind
+far byte hl_arr[4000]
 far byte hl_len[4000]
-far byte hl_kind[4000]      -- 0 text, 1 heading, 2 code, 3 table
+far byte hl_kind[4000]      -- 0 text, 1 chapter, 2 section, 3 code, 4 table
+                            -- head, 5 table row, 6 rule (help.txt marks)
 word hl_n = 0
-word ht_len = 0
 word hv_top = 0
 word hv_cur = 0
 bool hv_open = false
 string hv_file = ""
 string hv_find = ""
 
--- read a manual and wrap its lines at the text width
+function ht_get(byte a, word o) -> byte
+    if a == 0 then return ht0[o] end
+    return ht1[o]
+end
+
+-- byte i of line l
+function hl_byte(word l, byte i) -> byte
+    return ht_get(hl_arr[l], hl_off[l] + i)
+end
+
+-- read a manual (help.txt: lines already laid out by the export)
 function hv_load(string name) -> bool
     if hv_file == name then return true end
     byte h = file_open(name, FILE_READ)
@@ -2998,53 +3013,50 @@ function hv_load(string name) -> bool
         redraw_line = true
         return false
     end
-    ht_len = 0
+    set_msg("reading the manual...", C_STATUS)
+    draw_status()
+    hl_n = 0
+    byte arr = 0
+    word pos = 0
     word c = file_getc(h)
-    while c ~= FILE_EOF and ht_len < 65280 do
-        ht[ht_len] = byte(c)
-        ht_len += 1
-        c = file_getc(h)
+    while c ~= FILE_EOF and hl_n < 4000 do
+        -- one line into lbuf
+        byte n = 0
+        while c ~= FILE_EOF and c ~= 10 do
+            if n < 250 then
+                lbuf[n] = byte(c)
+                n += 1
+            end
+            c = file_getc(h)
+        end
+        if c == 10 then c = file_getc(h) end
+        byte kind = 0
+        byte from = 0
+        if n > 0 and lbuf[0] >= 0x11 and lbuf[0] <= 0x16 then
+            kind = lbuf[0] - 0x10
+            from = 1
+        end
+        -- into the arrays (a line does not cross from one to the other)
+        if word(65280) - pos < n then
+            if arr == 1 then break end
+            arr = 1
+            pos = 0
+        end
+        hl_off[hl_n] = pos
+        hl_arr[hl_n] = arr
+        hl_len[hl_n] = n - from
+        hl_kind[hl_n] = kind
+        byte i = from
+        while i < n do
+            if arr == 0 then ht0[pos] = lbuf[i] else ht1[pos] = lbuf[i] end
+            pos += 1
+            i += 1
+        end
+        hl_n += 1
     end
     file_close(h)
-    -- the lines, wrapped at word boundaries at 77 columns
-    hl_n = 0
-    bool code = false
-    word p = 0
-    while p < ht_len and hl_n < 4000 do
-        word e = p
-        while e < ht_len and ht[e] ~= 10 do e += 1 end
-        byte kind = 0
-        if ht[p] == '`' and e - p >= 3 and ht[p + 1] == '`' then
-            code = not code
-            kind = 2
-        elseif code then
-            kind = 2
-        elseif ht[p] == '#' then
-            kind = 1
-        elseif ht[p] == '|' then
-            kind = 3
-        end
-        word q = p
-        bool first = true
-        while (q < e or first) and hl_n < 4000 do
-            first = false
-            word n = e - q
-            if n > 77 then
-                n = 77
-                -- back to a space, unless there is none
-                word b = n
-                while b > 20 and ht[q + b] ~= ' ' do b -= 1 end
-                if b > 20 then n = b + 1 end
-            end
-            hl_off[hl_n] = q
-            hl_len[hl_n] = byte(n)
-            hl_kind[hl_n] = kind
-            hl_n += 1
-            q += n
-        end
-        p = e + 1
-    end
     hv_file = name
+    set_msg("", C_STATUS)
     return true
 end
 
@@ -3055,6 +3067,7 @@ function hv_show(string name, word at_)
     hv_cur = at_
     hv_top = at_
     if hv_top > 3 then hv_top -= 3 else hv_top = 0 end
+    set_msg("", C_STATUS)
     redraw_all = true
 end
 
@@ -3063,28 +3076,52 @@ function hv_close()
     redraw_all = true
 end
 
+-- a line of the manual: the colour of its kind, inline code (between the
+-- marks 1 and 2) in the code colour
 function hv_row(byte r)
     word l = hv_top + (r - TEXT_TOP)
     row_clear(C_TEXT)
     if l < hl_n then
-        byte colour = C_TEXT
         byte k = hl_kind[l]
-        if k == 1 then colour = C_KEY end
-        if k == 2 then colour = C_NUM end
-        if k == 3 then colour = C_TYPE end
-        word o = hl_off[l]
+        byte colour = C_TEXT
+        if k == 1 then
+            colour = C_MENU
+            byte x = 0
+            while x < 79 do
+                rowa[x] = C_MENU * 2
+                x += 1
+            end
+        elseif k == 2 then
+            colour = C_KEY
+        elseif k == 3 then
+            colour = C_NUM
+        elseif k == 4 then
+            colour = C_TYPE
+        elseif k == 6 then
+            colour = C_GUT
+        end
+        byte now = colour
         byte n = hl_len[l]
         byte i = 0
-        while i < n do
-            rowc[1 + i] = ht[o + i]
-            rowa[1 + i] = colour * 2
+        byte x = 1
+        while i < n and x < 79 do
+            byte c = hl_byte(l, i)
+            if c == 1 then
+                now = C_NUM
+            elseif c == 2 then
+                now = colour
+            else
+                rowc[x] = c
+                rowa[x] = now * 2
+                x += 1
+            end
             i += 1
         end
         if l == hv_cur then
-            byte x = 0
-            while x < 79 do
-                rowa[x] = C_SEL * 2
-                x += 1
+            byte x2 = 0
+            while x2 < 79 do
+                rowa[x2] = C_SEL * 2
+                x2 += 1
             end
         end
     end
@@ -3119,10 +3156,9 @@ end
 -- does line l start with the text t?
 function hv_starts(word l, string t) -> bool
     if hl_len[l] < len(t) then return false end
-    word o = hl_off[l]
     byte i = 0
     while i < len(t) do
-        if ht[o + i] ~= asc(t, i) then return false end
+        if hl_byte(l, i) ~= asc(t, i) then return false end
         i += 1
     end
     return true
@@ -3139,7 +3175,7 @@ function hv_chapter(bool next)
             if l == 0 then return end
             l -= 1
         end
-        if hv_starts(l, "## ") then
+        if hl_kind[l] == 1 then
             hv_top = l
             hv_go(l)
             draw_hv()
@@ -3153,12 +3189,11 @@ function hv_has(word l, string t) -> bool
     byte n = len(t)
     byte ln = hl_len[l]
     if n == 0 or ln < n then return false end
-    word o = hl_off[l]
     byte i = 0
     while i + n <= ln do
         byte j = 0
         while j < n do
-            byte a = ht[o + i + j]
+            byte a = hl_byte(l, i + j)
             byte b = asc(t, j)
             if a >= 'A' and a <= 'Z' then a += 32 end
             if b >= 'A' and b <= 'Z' then b += 32 end
@@ -3200,20 +3235,20 @@ end
 
 -- ENTER: a line of the contents ("12. ...") opens its chapter
 function hv_enter()
-    word o = hl_off[hv_cur]
-    byte n = hl_len[hv_cur]
+    word lc = hv_cur
+    byte n = hl_len[lc]
     byte i = 0
-    while i < n and ht[o + i] >= '0' and ht[o + i] <= '9' do i += 1 end
-    if i == 0 or i >= n or ht[o + i] ~= '.' then return end
-    string head = "## "
+    while i < n and hl_byte(lc, i) >= '0' and hl_byte(lc, i) <= '9' do i += 1 end
+    if i == 0 or i >= n or hl_byte(lc, i) ~= '.' then return end
+    string head = ""
     byte k = 0
     while k <= i do
-        head = head .. chr(ht[o + k])
+        head = head .. chr(hl_byte(lc, k))
         k += 1
     end
     word l = 0
     while l < hl_n do
-        if hv_starts(l, head) then
+        if hl_kind[l] == 1 and hv_starts(l, head) then
             hv_top = l
             hv_cur = l
             draw_hv()
@@ -3224,6 +3259,10 @@ function hv_enter()
 end
 
 function hv_key(word k)
+    if message ~= "" then
+        set_msg("", C_STATUS)
+        redraw_line = true
+    end
     if k == K_BREAK or k == K_MENU then
         hv_close()
     elseif k == K_UP then
@@ -3260,9 +3299,9 @@ function context_help()
     while a > 0 and (is_alpha(cur[a - 1]) or is_digit(cur[a - 1])) do a -= 1 end
     byte b = cx
     while b < cur_len and (is_alpha(cur[b]) or is_digit(cur[b])) do b += 1 end
-    if not hv_load("help.txt") then return end
+    if not hv_load("lib/help.txt") then return end
     if a == b then
-        hv_show("help.txt", 0)
+        hv_show("lib/help.txt", 0)
         return
     end
     string w = ""
@@ -3271,13 +3310,14 @@ function context_help()
         w = w .. chr(cur[i])
         i += 1
     end
-    -- after the contents: a heading, then `word(`, then `word`, then the word
+    -- after the contents: code starting with `word(`, then the code `word`,
+    -- then code starting with it, then the word (1 and 2 mark code)
     word start = 0
-    while start < hl_n and not hv_starts(start, "## 1.") do start += 1 end
+    while start < hl_n and not (hl_kind[start] == 1 and hv_starts(start, "1.")) do start += 1 end
     if start == hl_n then start = 0 end
-    word l = hv_search("`" .. w .. "(", start)
-    if l == hl_n then l = hv_search("`" .. w .. "`", start) end
-    if l == hl_n then l = hv_search("`" .. w, start) end
+    word l = hv_search(chr(1) .. w .. "(", start)
+    if l == hl_n then l = hv_search(chr(1) .. w .. chr(2), start) end
+    if l == hl_n then l = hv_search(chr(1) .. w, start) end
     if l == hl_n then l = hv_search(w, start) end
     if l == hl_n then
         set_msg("not in the manual: " .. w, C_ERR)
@@ -3285,7 +3325,7 @@ function context_help()
         return
     end
     hv_find = w
-    hv_show("help.txt", l)
+    hv_show("lib/help.txt", l)
 end
 
 -- ---------------------------------------------------------------- splash
@@ -3344,8 +3384,8 @@ end
 
 -- the version of the compiler (version.txt next to the .nex files)
 function version_text() -> string
-    if not file_exists("version.txt") then return "" end
-    sh = file_open("version.txt", FILE_READ)
+    if not file_exists("lib/version.txt") then return "" end
+    sh = file_open("lib/version.txt", FILE_READ)
     if sh == FILE_ERROR then return "" end
     read_ln()
     file_close(sh)

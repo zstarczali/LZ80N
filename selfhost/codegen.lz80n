@@ -5412,7 +5412,7 @@ function generate()
     oi("DEVICE ZXSPECTRUMNEXT")
     oi("ORG $8000")
     onl()
-    ocopy("rt_start.asm")
+    ocopy("lib/rt_start.asm")
     irq_lines()
     if nlines > 0 then
         os("    ; raster interrupts: ULA interrupt off, line interrupt at ")
@@ -5484,20 +5484,20 @@ function generate()
         f += 1
     end
     if failed then return end
-    if cur_page ~= 0 then ocopy("rt_banked.asm") end
-    ocopy("rt_lib.asm")         -- starts with __main_end
-    if uses_long then ocopy("rt_long.asm") end
+    if cur_page ~= 0 then ocopy("lib/rt_banked.asm") end
+    ocopy("lib/rt_lib.asm")         -- starts with __main_end
+    if uses_long then ocopy("lib/rt_long.asm") end
     bool any_img = false
     byte ai = 0
     while ai < nassets do
         if tabb[B_AS_KIND + ai] == AK_IMG then any_img = true end
         ai += 1
     end
-    if any_img then ocopy("rt_images.asm") end
-    if uses_samples then ocopy("rt_samples.asm") end
-    if uses_notes then ocopy("rt_notes.asm") end
-    if uses_music then ocopy("rt_music.asm") end
-    if uses_trig then ocopy("rt_trig.asm") end
+    if any_img then ocopy("lib/rt_images.asm") end
+    if uses_samples then ocopy("lib/rt_samples.asm") end
+    if uses_notes then ocopy("lib/rt_notes.asm") end
+    if uses_music then ocopy("lib/rt_music.asm") end
+    if uses_trig then ocopy("lib/rt_trig.asm") end
     -- the background driver of the sound module
     word drv = 0
     word df = 1
@@ -5556,7 +5556,7 @@ function generate()
     if slot1 then os("    pop af\n    ld (rt_farpage),a\n    nextreg $51,a\n") end
     if shadow then os("    ex af,af'\n    pop af\n    ex af,af'\n    exx\n    pop hl\n    pop de\n    pop bc\n    exx\n") end
     os("    pop hl\n    pop de\n    pop bc\n    pop af\n    ei\n    reti\n")
-    ocopy("rt_font.asm")
+    ocopy("lib/rt_font.asm")
     if far_arr_pages > 0 then
         os("; clear the far pages at startup\nrt_far_zero:\n    ld hl,rt_far_zero_tab\n.p:\n    ld a,(hl)\n    or a\n    ret z\n")
         os("    push hl\n    ld (rt_farpage),a\n    nextreg $51,a\n    xor a\n    ld de,$2000\n    ld bc,8192\n")
@@ -5664,7 +5664,7 @@ end
 -- ---------------------------------------------------------------- main
 
 log_start(false)
-print("codegen: generating code...")
+log_note("codegen: generating code...")
 if load_tokens() then
     if not failed then
         ti = 1

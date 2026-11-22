@@ -2342,7 +2342,7 @@ end
 
 -- in.asm, or out.asm (written by codegen.nex)
 log_start(false)
-print("asm: assembling...")
+log_note("asm: assembling...")
 string in_name = "in.asm"
 if not file_exists(in_name) then in_name = "out.asm" end
 mn_init()

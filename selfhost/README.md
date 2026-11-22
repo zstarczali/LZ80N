@@ -185,7 +185,7 @@ up to 32 KB.
   in the status line, and puts the cursor on the line and column of a
   code generator error.
 * The build log: every stage writes its lines (with the time it took) to
-  the screen and to `build.log`, and shows the lines of the stages before
+  the screen (the 80-column text mode, the IDE's font) and to `build.log`, and shows the lines of the stages before
   it first, so the screen reads like one command line session. After a
   compile the IDE shows the log in a box (Build -> Build output, EXT L,
   shows it again).
@@ -198,13 +198,13 @@ up to 32 KB.
   one, a letter jumps to the names starting with it, `<type a name>` asks
   for a name. It reads folders with the file module's new `file_opendir`
   and `file_readdir` (esxDOS F_OPENDIR / F_READDIR).
-* Help -> Language manual: the LZ80N manual (`help.txt`, written by the
-  export from `docs/manual-en.md`; `help-hu.txt`, the Hungarian one, in
+* Help -> Language manual: the LZ80N manual (`lib/help.txt`, written by the
+  export from `docs/manual-en.md`; `lib/help-hu.txt`, the Hungarian one, in
   ASCII letters) in the text area: left / right go to the chapters, ENTER
   on a line of the contents opens its chapter, F finds a text, N again.
   EXT H opens it at the word under the cursor.
 * A splash screen at the start: a box with the logo and the version
-  (`version.txt`, which the export writes); Help -> About shows it again.
+  (`lib/version.txt`, which the export writes); Help -> About shows it again.
 * Menus, the help and the build output are drawn over the text row by row
   (each screen row written once), and the cursor does not blink under
   them: no flicker. Moving in a menu only recolours two rows; opening and
@@ -283,9 +283,10 @@ lz80nc --export-selfhost DIR
 ```
 
 writes everything into DIR: `lexer.nex`, `codegen.nex`, `assets.nex`,
-`asm.nex`, `ide.nex` (built from
-these sources), the runtime and module files, the sources themselves, and
-`chain.on`. Copy DIR to the SD card (a 2 MB Next), then in NextBASIC:
+`asm.nex`, `ide.nex` (built from these sources), `lib/` (the runtime and
+module files, the manuals, `version.txt`), `src/` (the sources themselves),
+and `chain.on`. `scripts/zxnext-package.sh` makes the release's package from
+it: without `src/`, with `examples/`. Copy DIR to the SD card (a 2 MB Next), then in NextBASIC:
 
 ```
 .cd /lz80n                     (the folder you copied)

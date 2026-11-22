@@ -4727,9 +4727,8 @@ fn selfhost_export_and_chain() {
     let _ = std::fs::remove_dir_all(&dir);
     let built = crate::export_selfhost(&dir).unwrap();
     let mut base = crate::emu::EsxFs::default();
-    for e in std::fs::read_dir(&dir).unwrap() {
-        let p = e.unwrap().path();
-        base.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
+    for (name, data) in sd_files(&dir) {
+        base.files.insert(name, data);
     }
     // each stage starts the next one (M_EXECCMD "nexload ...")
     let chain = |mut fs: crate::emu::EsxFs| {
@@ -5675,9 +5674,8 @@ fn selfhost_ide() {
     let _ = std::fs::remove_dir_all(&dir);
     let built = crate::export_selfhost(&dir).unwrap();
     let mut base = crate::emu::EsxFs::default();
-    for e in std::fs::read_dir(&dir).unwrap() {
-        let p = e.unwrap().path();
-        base.files.insert(p.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(&p).unwrap());
+    for (name, data) in sd_files(&dir) {
+        base.files.insert(name, data);
     }
     // one program: until its end or until it starts the next one
     let run = |name: &str, fs: crate::emu::EsxFs| -> (crate::emu::EsxFs, crate::emu::Cpu, Option<String>) {
@@ -5713,10 +5711,10 @@ fn selfhost_ide() {
     let (left, up) = (3u8, 1u8);
     // the editor types, saves (Save as prompt), compiles, then the chain
     // comes back to it
-    let edit_and_compile = |script: Vec<u8>, extra: &[(&str, &str)]| {
+    let edit_and_compile = |script: Vec<u8>, extra: &[(&str, &[u8])]| {
         let mut fs = base.clone();
         for (n, d) in extra {
-            fs.files.insert(n.to_string(), d.as_bytes().to_vec());
+            fs.files.insert(n.to_string(), d.to_vec());
         }
         fs.files.insert("ide.key".into(), script);
         let (mut fs, cpu, next) = run("ide.nex", fs);
@@ -5797,7 +5795,7 @@ fn selfhost_ide() {
     script.extend([ext(b's')]);
     script.extend(b"main.lz80n\r");
     script.push(ext(b'b'));
-    let (_, fs, cpu) = edit_and_compile(script, &[("inc.lz80n", "print(2)\nprint(nope)\n")]);
+    let (_, fs, cpu) = edit_and_compile(script, &[("inc.lz80n", b"print(2)\nprint(nope)\n")]);
     let status = row(&cpu, 31);
     assert!(status.contains("error inc.lz80n:2:7"), "status: {status}");
     assert!(status.contains("Ln     2"), "status: {status}");
@@ -5805,6 +5803,26 @@ fn selfhost_ide() {
     assert_eq!(row(&cpu, 2), "   2 print(nope)");
     let ses = String::from_utf8_lossy(&fs.files["ide.ses"]).to_string();
     assert!(ses.starts_with("inc.lz80n\n") && ses.ends_with("main.lz80n\n"), "ide.ses: {ses:?}");
+
+    // a program in a folder (examples/): opened with the file browser; its
+    // include and its picture are relative to that folder
+    let png = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/assets/badge.png")).unwrap();
+    let prog = b"include \"lib/two.lz80n\"\nasset pic = image(\"assets/p.png\")\nprint(two(), image_width(pic))\n";
+    let extra: [(&str, &[u8]); 3] = [
+        ("examples/m.lz80n", prog),
+        ("examples/lib/two.lz80n", b"function two() -> byte\n    return 2\nend\n"),
+        ("examples/assets/p.png", &png),
+    ];
+    // File -> Open: examples/ (the first folder), m.lz80n (the letter m), compile
+    let script = vec![0x80 | b'o', 13, b'm', 13, 0x80 | b'b'];
+    let (stages, fs, cpu) = edit_and_compile(script, &extra);
+    assert_eq!(stages, ["lexer.nex", "assets.nex", "codegen.nex", "asm.nex"]);
+    assert!(row(&cpu, 31).contains("compiled: out.nex"), "status: {}", row(&cpu, 31));
+    assert!(row(&cpu, 0).contains("examples/m.lz80n"), "{}", row(&cpu, 0));
+    // the picture was converted from examples/assets/p.png
+    assert!(fs.files.contains_key("a_pic.bin"), "no a_pic.bin");
+    let log = String::from_utf8_lossy(&fs.files["build.log"]).to_string();
+    assert!(log.starts_with("LZ80N: compiling examples/m.lz80n"), "{log}");
 }
 
 /// The editor reads the keyboard matrix: letters, SYMBOL SHIFT symbols,
@@ -5878,6 +5896,24 @@ fn selfhost_ide_keyboard() {
     assert_eq!(row.trim_end(), "   1 hji=kTj");
     let row2: String = (0..80).map(|c| cpu.mem[0x6000 + 2 * 160 + c * 2] as char).collect();
     assert_eq!(row2.trim_end(), "   2 lajk");
+}
+
+/// The files of an exported folder, with their paths (`lib/rt_lib.asm`).
+fn sd_files(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = vec![];
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else {
+                let name = p.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
+                out.push((name, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    out
 }
 
 /// The IDE alone (ide.nex built by lz80nc), on a virtual SD card.
@@ -6031,7 +6067,7 @@ fn selfhost_ide_mouse() {
 /// version.txt), closed by a key.
 #[test]
 fn selfhost_ide_splash() {
-    let (mut cpu, end) = ide_cpu(&[("version.txt", b"9.8.7\n")]);
+    let (mut cpu, end) = ide_cpu(&[("lib/version.txt", b"9.8.7\n")]);
     let f = cpu.frame_count;
     while cpu.frame_count < f + 30 {
         cpu.tick().unwrap();
@@ -6144,7 +6180,7 @@ fn selfhost_ide_browser() {
 fn selfhost_ide_manual() {
     let help = crate::help_text(include_str!("../../docs/manual-en.md"));
     let run = |keys: &[u8]| {
-        let (mut cpu, end) = ide_cpu(&[("help.txt", help.as_bytes()), ("ide.key", keys)]);
+        let (mut cpu, end) = ide_cpu(&[("lib/help.txt", help.as_bytes()), ("ide.key", keys)]);
         while cpu.pc != end {
             cpu.tick().unwrap();
         }
@@ -6158,17 +6194,22 @@ fn selfhost_ide_manual() {
     let cur = (1..31).find(|&r| ide_attr(&cpu, r, 0) == 36).expect("no cursor line");
     assert!(rows[cur - 1].contains("upper("), "{}", rows[cur - 1]);
     assert!(ide_row(&cpu, 31).contains("Manual"), "{}", ide_row(&cpu, 31));
+    std::fs::write("/tmp/scr.bin", &cpu.mem[0x6000..0x7C00]).unwrap();
+    std::fs::write("/tmp/pal.bin", cpu.palettes[3]).unwrap();
     // Help -> Language manual, find the contents line "9. Strings", ENTER
     let mut k = vec![7u8, 4, 4, 4, 2, 13, b'f'];
     k.extend(b"9. Strings\r");
     k.push(13);
     let cpu = run(&k);
-    assert!(ide_row(&cpu, 1).starts_with(" ## 9. Strings"), "{}", ide_row(&cpu, 1));
+    assert!(ide_row(&cpu, 1).starts_with(" 9. Strings"), "{}", ide_row(&cpu, 1));
+    assert_eq!(ide_attr(&cpu, 1, 40), 36, "the cursor line");
+    assert!(!(1..31).any(|r| ide_row(&cpu, r).contains("**") || ide_row(&cpu, r).contains('`')), "Markdown marks on the screen");
     // right: the next chapter; BREAK: back to the text
     let mut k2 = k.clone();
     k2.extend([4u8]);
     let cpu = run(&k2);
-    assert!(ide_row(&cpu, 1).starts_with(" ## 10."), "{}", ide_row(&cpu, 1));
+    assert!(ide_row(&cpu, 1).starts_with(" 10."), "{}", ide_row(&cpu, 1));
+    assert_eq!(ide_attr(&cpu, 1, 60), 36);
     k2.push(10);
     let cpu = run(&k2);
     assert_eq!(ide_row(&cpu, 1), "   1");

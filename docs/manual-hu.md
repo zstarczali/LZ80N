@@ -1726,6 +1726,12 @@ majd NextBASIC-ben:
 .nexload ide.nex
 ```
 
+A mappában van az öt `.nex` program; a `lib/` mappában a futtatókörnyezet, a
+modulok és a kézikönyvek; az `examples/` mappában a példaprogramok a
+képeikkel, hangjaikkal és include fájljaikkal (kezdésnek nyisd meg az
+`examples/hello.lz80n`-t). Egy program include-jai és erőforrásai a saját
+mappájához képest értendők.
+
 ### 25.1 Az LZ80N IDE
 
 Az `ide.nex` teljes képernyős szerkesztő 80 oszlopos szöveges módban:
@@ -1774,6 +1780,7 @@ COPY "myprog.lz80n" TO "in.lz80n"
 ```
 
 A hibák a `codegen.err`, `asm.err` vagy `assets.err` fájlba kerülnek; a
-`build.log` a lépések üzeneteit tartalmazza. Egy kis program fordítása
+`build.log` a lépések üzeneteit tartalmazza, amelyek 80 oszlopos szöveges
+módban a képernyőn is megjelennek. Egy kis program fordítása
 28 MHz-en kb. 10-15 másodperc. A nyelv ugyanaz, mint a PC-s `lz80nc`-vel
 (a részletek: `selfhost/README.md`).

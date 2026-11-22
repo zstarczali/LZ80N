@@ -5,10 +5,13 @@
 -- like one command line session; the IDE shows the log after a compile.
 -- The lexer (the first stage) starts a new log.
 --
+-- The screen is the 80x32 text mode with the IDE's small font.
+--
 -- A line is built in log_buf (log_s, log_n, log_c, log_time), then log_end
 -- writes it (no string temporaries: the code generator counts them).
 
 word log_t0 = 0
+byte log_row = 0            -- the next screen row
 byte log_buf[256]
 byte log_len = 0
 
@@ -52,15 +55,82 @@ function log_time()
     log_s(" s)")
 end
 
--- the line on the screen
-function log_show()
+-- the 80x32 text mode, the small font, a clear screen
+function log_screen()
+    nextreg[0x6B] = 0xC9
+    nextreg[0x6F] = 0x34
+    asm
+        ld hl,rt_font
+        ld de,$7400+32*8
+        ld bc,96*8
+        ldir
+        ld hl,$6000
+        ld bc,80*32
+.c:
+        ld (hl),' '
+        inc hl
+        ld (hl),14
+        inc hl
+        dec bc
+        ld a,b
+        or c
+        jr nz,.c
+    end
+    log_row = 0
+end
+
+-- is "error" or "cannot" in the line?
+function log_bad() -> bool
     byte i = 0
-    while i < log_len do
-        write(chr(log_buf[i]))
+    while i + 5 <= log_len do
+        if log_buf[i] == 'e' and log_buf[i + 1] == 'r' and log_buf[i + 2] == 'r' and log_buf[i + 3] == 'o' and log_buf[i + 4] == 'r' then return true end
+        if i + 6 <= log_len and log_buf[i] == 'c' and log_buf[i + 1] == 'a' and log_buf[i + 2] == 'n' and log_buf[i + 3] == 'n' and log_buf[i + 4] == 'o' and log_buf[i + 5] == 't' then return true end
         i += 1
     end
-    print("")
+    return false
+end
+
+-- the line on the screen (80 columns a row; the screen scrolls): the first
+-- line in cyan, errors in red, the others white
+function log_show()
+    byte at_ = 14
+    if log_len >= 5 and log_buf[0] == 'L' and log_buf[1] == 'Z' then at_ = 10 end
+    if log_bad() then at_ = 4 end
+    byte i = 0
+    bool first = true
+    while first or i < log_len do
+        first = false
+        if log_row >= 32 then
+            asm
+                ld hl,$6000+160
+                ld de,$6000
+                ld bc,31*160
+                ldir
+            end
+            log_row = 31
+        end
+        word a = 0x6000 + word(log_row) * 160
+        byte x = 0
+        while x < 80 do
+            if i < log_len then
+                memory[a] = log_buf[i]
+                i += 1
+            else
+                memory[a] = ' '
+            end
+            memory[a + 1] = at_
+            a += 2
+            x += 1
+        end
+        log_row += 1
+    end
     log_len = 0
+end
+
+-- a line on the screen only
+function log_note(string s)
+    log_s(s)
+    log_show()
 end
 
 -- the line on the screen and at the end of build.log
@@ -83,6 +153,7 @@ end
 function log_start(bool fresh)
     log_t0 = frames()
     log_len = 0
+    log_screen()
     if fresh then
         if file_exists("build.log") then file_delete("build.log") end
         return

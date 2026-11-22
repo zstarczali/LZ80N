@@ -1705,6 +1705,11 @@ then in NextBASIC:
 .nexload ide.nex
 ```
 
+The folder holds the five `.nex` programs; `lib/` the runtime, the modules
+and the manuals; `examples/` the example programs with their pictures,
+sounds and include files (open `examples/hello.lz80n` to start). A
+program's includes and assets are relative to its own folder.
+
 ### 25.1 The LZ80N IDE
 
 `ide.nex` is a full-screen editor in the 80-column text mode: menus (File,
@@ -1751,6 +1756,7 @@ COPY "myprog.lz80n" TO "in.lz80n"
 ```
 
 Errors go to `codegen.err`, `asm.err` or `assets.err`; `build.log` has the
-messages of the stages. A small program takes about 10-15 seconds at 28 MHz.
+messages of the stages, which also appear on the screen in the 80-column
+text mode. A small program takes about 10-15 seconds at 28 MHz.
 The language is the same as with `lz80nc` on a PC (`selfhost/README.md`
 lists the details).
