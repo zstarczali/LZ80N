@@ -27,6 +27,41 @@ fn sjasmplus() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// SjASMPlus refuses more than 128 bytes in one db / dw / dd.
+#[test]
+fn long_data_lines() {
+    let text = "r".repeat(200);
+    let nums: Vec<String> = (0..150).map(|i| (i * 400).to_string()).collect();
+    let longs: Vec<String> = (0..70).map(|i| (i * 100_000).to_string()).collect();
+    let src = format!(
+        "const T = \"{text}\"\nword w[] = {{{}}}\nlong q[] = {{{}}}\nprint(w[0], w[32], w[149], q[69])\nprint(T)\nplay(0, T)",
+        nums.join(", "),
+        longs.join(", ")
+    );
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let asm = crate::compile_opts(&src, "t.nex", true, &dir, false).unwrap_or_else(|e| panic!("{}", e[0]));
+    for line in asm.lines().filter(|l| !l.trim_start().starts_with(';')) {
+        for (d, size) in [("db ", 1), ("dw ", 2), ("dd ", 4)] {
+            let values = line.trim_start().strip_prefix(d).or_else(|| line.split_once(&format!(": {d}")).map(|x| x.1));
+            if let Some(v) = values {
+                assert!(v.split(',').count() * size <= 128, "{line}");
+            }
+        }
+    }
+    let (out, _) = run_with("long_data", &src, |_| {}).unwrap();
+    let first: Vec<&str> = out.split_whitespace().take(4).collect();
+    assert_eq!(first, ["0", "12800", "59600", "6900000"]);
+    assert_eq!(out.matches('r').count(), 200);
+    // SjASMPlus agrees with the built-in assembler
+    let Some(sj) = sjasmplus() else { return };
+    let mine = crate::asm::assemble(&asm, &dir).unwrap_or_else(|e| panic!("{}", e[0])).nex.unwrap().1;
+    let tmp = std::env::temp_dir().join("lz80nc_long_data");
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("t.asm"), &asm).unwrap();
+    assert!(Command::new(&sj).current_dir(&tmp).args(["--nologo", "t.asm"]).status().unwrap().success());
+    assert!(mine == std::fs::read(tmp.join("t.nex")).unwrap());
+}
+
 /// Compile and assemble; checks the assembler accepts the generated code.
 fn assembles(name: &str, src: &str) {
     build(name, src);

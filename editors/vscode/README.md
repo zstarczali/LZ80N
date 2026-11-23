@@ -43,8 +43,8 @@ Lua-inspired compiled language for the ZX Spectrum Next.
    Inside the LZ80N repository the extension finds
    `compiler/target/release/lz80nc.exe` automatically; elsewhere set
    `lz80n.compilerPath` or put `lz80nc` on `PATH`.
-2. The compiler needs SjASMPlus (see the main README). Set
-   `lz80n.sjasmplusPath` if the compiler does not find it.
+2. The compiler has a built-in assembler, so nothing else is needed. Set
+   `lz80n.sjasmplusPath` only to assemble with SjASMPlus instead.
 3. For *Build and Run* set `lz80n.emulatorPath` to `CSpect.exe` (you are
    asked for it the first time).
 
@@ -53,7 +53,7 @@ Lua-inspired compiled language for the ZX Spectrum Next.
 | Setting | Default | Meaning |
 |---------|---------|---------|
 | `lz80n.compilerPath` | *(auto)* | `lz80nc` executable |
-| `lz80n.sjasmplusPath` | *(auto)* | passed as `--sjasmplus` |
+| `lz80n.sjasmplusPath` | *(built-in assembler)* | passed as `--sjasmplus` |
 | `lz80n.compilerArgs` | `[]` | extra build arguments, e.g. `-O0`, `--bank-all` |
 | `lz80n.emulatorPath` | | emulator executable |
 | `lz80n.emulatorArgs` | `["-zxnext", "-w3", "${file}"]` | `${file}` = the `.nex` path |

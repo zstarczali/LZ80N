@@ -258,6 +258,41 @@ pub(crate) fn trig_asm() -> String {
     out
 }
 
+/// SjASMPlus takes at most 128 bytes in one `db` / `dw` / `dd`: break longer
+/// lines of plain values (strings, array initialisers) into several.
+fn split_data_lines(asm: &str) -> String {
+    const VALUES: usize = 32;
+    let mut out = String::with_capacity(asm.len() + 256);
+    for line in asm.split_inclusive('\n') {
+        let text = line.trim_end();
+        let directive = ["db ", "dw ", "dd "]
+            .iter()
+            .filter_map(|d| {
+                let i = text.find(d)?;
+                // only a label (`name:`) may stand before it
+                let before = text[..i].trim();
+                (before.is_empty() || before.ends_with(':') && !before.contains([' ', ';'])).then_some(i)
+            })
+            .min();
+        if let Some(i) = directive {
+            let values = &text[i + 3..];
+            let plain = values.bytes().all(|c| c.is_ascii_alphanumeric() || b",$-+_. ".contains(&c));
+            let list: Vec<&str> = values.split(',').collect();
+            if plain && list.len() > VALUES {
+                for (k, part) in list.chunks(VALUES).enumerate() {
+                    out.push_str(if k == 0 { &text[..i] } else { "    " });
+                    out.push_str(&text[i..i + 3]);
+                    out.push_str(&part.join(","));
+                    out.push('\n');
+                }
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// The note routine and its table of AY tone periods.
 pub(crate) fn notes_asm() -> String {
     let mut out = String::from(runtime::NOTES);
@@ -5652,7 +5687,7 @@ impl Gen {
             self.image_pages() + &code_pages,
             opts.nex_name
         );
-        out
+        split_data_lines(&out)
     }
 }
 

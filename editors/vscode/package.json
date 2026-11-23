@@ -227,7 +227,7 @@
         "lz80n.sjasmplusPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Path of `sjasmplus`, passed as `--sjasmplus`. Empty: the compiler finds it itself (`tools/sjasmplus`, `SJASMPLUS` variable or `PATH`)."
+          "markdownDescription": "Path of `sjasmplus`, passed as `--sjasmplus`. Empty: the built-in assembler is used. `auto`: the compiler finds `sjasmplus` itself (`SJASMPLUS` variable, next to `lz80nc`, `tools/sjasmplus` or `PATH`)."
         },
         "lz80n.compilerArgs": {
           "type": "array",
