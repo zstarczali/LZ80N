@@ -220,7 +220,8 @@ up to 32 KB.
     smallest function that is enough on its own is banked last), and calls
     between functions of the same code page skip `rt_bcall`.
 
-  `hello.lz80n`: lexer 0.10 s, code generator 0.49 s, assembler 0.64 s at
+  In the test emulator (no wait states, files at no cost; CSpect shows about
+  1.5 times as much) `hello.lz80n`: lexer 0.10 s, code generator 0.49 s, assembler 0.64 s at
   28 MHz (it was 0.40 + 0.71 + 1.74 s); `life.lz80n` (with the Layer 2
   module) 0.31 + 2.59 + 3.12 s (3.11 + 3.99 + 6.06 s). The assembler alone,
   on the full assembly of the examples (`selfhost_asm_all_examples`): 40-50%

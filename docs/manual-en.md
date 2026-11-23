@@ -1781,9 +1781,9 @@ COPY "myprog.lz80n" TO "in.lz80n"
 
 Errors go to `codegen.err`, `asm.err` or `assets.err`; `build.log` has the
 messages of the stages, which also appear on the screen in a window that
-looks like the IDE. A small program takes about 1.2 seconds of work at
+looks like the IDE. A small program takes about 2 seconds of work at
 28 MHz (plus loading the stages from the SD card); one that uses the Layer 2
-module about 6 seconds. Only the functions the program can call are
+module about 9 seconds. Only the functions the program can call are
 compiled (a module has many it does not use), the runtime comes
 ready-made (`lib/rt_core.bin`), the standard modules come lexed
 (`lib/*.tok`), and the assembler makes one pass.

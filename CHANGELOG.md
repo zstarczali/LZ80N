@@ -4,9 +4,9 @@
 
 **Faster compiling on the Next**
 
-* A small program (`hello`) compiles in about 1.2 seconds of work at 28 MHz
-  instead of 2.9, one with the Layer 2 module (`life`) in about 6 seconds
-  instead of 13 (without loading the stages from the SD card).
+* A small program (`hello`) compiles in 1.8 seconds instead of 4.1, one with
+  the Layer 2 module (`life`) in about 9 seconds instead of 20 (in CSpect at
+  28 MHz, without loading the stages).
 * The export lexes the standard modules (`lib/*.tok`), so the Next only
   copies their tokens. The stages read and write in blocks.
 * The assembler makes one pass: the lines with forward references are
