@@ -3570,48 +3570,8 @@ print(total, s2, big[2999])
     assert_eq!(out, format!("3000 {}\n3000 {} {}\n", sum as u16, sum as u16, data[2999]));
 }
 
-/// The Rust lexer's tokens in the record format of selfhost/lexer.lz80n.
 fn token_records(src: &str) -> Vec<u8> {
-    use crate::lexer::Tok::*;
-    let mut out = vec![];
-    let head = |out: &mut Vec<u8>, kind: u8, line: u32, col: u32| {
-        out.push(kind);
-        out.extend((line as u16).to_le_bytes());
-        out.extend((col as u16).to_le_bytes());
-    };
-    let text = |out: &mut Vec<u8>, s: &[u8]| {
-        out.extend((s.len() as u16).to_le_bytes());
-        out.extend(s);
-    };
-    let (toks, err) = crate::lexer::lex_partial(src);
-    for t in &toks {
-        let kind: u8 = match &t.tok {
-            Ident(_) => 0, Int(_) => 1, DotDot => 2, Fixed(_) => 3, Str(_) => 4, AsmBody(_) => 5,
-            And => 6, Or => 7, Not => 8, If => 9, Then => 10, Elseif => 11, Else => 12, End => 13,
-            While => 14, Do => 15, For => 16, Function => 17, Return => 18, Break => 19, Const => 20,
-            Var => 21, True => 22, False => 23, Asm => 24, Struct => 25, Class => 26, Asset => 27,
-            Interrupt => 28, Far => 29, Include => 30,
-            Plus => 31, Minus => 32, Star => 33, Slash => 34, Percent => 35, Amp => 36, Pipe => 37,
-            Tilde => 38, Shl => 39, Shr => 40, EqEq => 41, NotEq => 42, Lt => 43, Le => 44, Gt => 45,
-            Ge => 46, Assign => 47, PlusEq => 48, MinusEq => 49, StarEq => 50, AmpEq => 51,
-            PipeEq => 52, SlashEq => 53, PercentEq => 54, ShlEq => 55, ShrEq => 56,
-            LParen => 57, RParen => 58, LBracket => 59, RBracket => 60, LBrace => 61, RBrace => 62,
-            Comma => 63, Dot => 64, Arrow => 65, Eof => 66,
-        };
-        head(&mut out, kind, t.pos.line, t.pos.col);
-        match &t.tok {
-            Ident(s) | AsmBody(s) => text(&mut out, s.as_bytes()),
-            Str(s) => text(&mut out, &s.chars().map(|c| c as u32 as u8).collect::<Vec<_>>()),
-            Int(v) | Fixed(v) => out.extend((*v as u32).to_le_bytes()),
-            _ => {}
-        }
-    }
-    if let Some(e) = err {
-        head(&mut out, 255, e.pos.line, e.pos.col);
-        let m = e.msg.as_bytes();
-        text(&mut out, &m[..m.len().min(64)]);
-    }
-    out
+    crate::token_records(src)
 }
 
 /// Run selfhost/lexer.lz80n in the emulator on `src`; its tokens.bin.
@@ -4257,7 +4217,9 @@ fn selfhost_asm_errors() {
 
 /// The runtime files the self-hosted code generator copies from the SD card.
 fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
-    crate::selfhost_support_files()
+    let mut f = crate::selfhost_support_files();
+    if std::env::var("NOTOK").is_ok() { f.retain(|x| !x.0.ends_with(".tok")); }
+    f
 }
 
 /// The support files in a folder that the test assembler's INCBIN falls
@@ -6391,4 +6353,63 @@ fn dump_selfhost_asm() {
     let sh = SelfHost::new();
     let (asm, _) = sh.compile_sd(&[("in.lz80n", prog.as_bytes())]).unwrap();
     std::fs::write(std::env::temp_dir().join("sh_out.asm"), asm).unwrap();
+}
+
+/// The assembler's one pass: lines with forward references are assembled
+/// again at the end; a forward reference that may change a size (or an
+/// error) runs the classic passes. Same NEX as the Rust assembler.
+#[test]
+fn selfhost_asm_forward_refs() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let src = std::fs::read_to_string(root.join("selfhost/asm.lz80n")).unwrap();
+    let (nex, syms) = build_sh(&src);
+    let tail = "    SAVENEX OPEN \"t.nex\", start, $FDFD, 2\n    SAVENEX AUTO\n    SAVENEX CLOSE\n";
+    for (body, one_pass) in [
+        // forward calls, jumps, local labels, data; a kept line that crosses
+        // an `n` MMU slot; an EQU defined after its use
+        (
+            "    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nstart:\n    call later\n    ld hl,later.x\n    jr .fwd\n    nop\n.fwd: ld a,(ix+off)\n    dw later, .fwd, start.fwd\n    db high later, low later\n    jp later\nlater:\n    nop\n.x: ret\n    MMU 1 n, 40\n    ORG $3FFD\n    db 1\n    dw fin, fin\n    db 7\nfin: nop\n    ld bc,fin.y\n.y: nop\noff equ 5\n",
+            true,
+        ),
+        // db lines of plain bytes (one block), one across an `n` MMU slot,
+        // and the forms that take the slow way
+        (
+            "    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nstart:\n    db $1, 255 , 0,$Ab,7\t, $ff\n    db 0\n    dz 1,2\n    defb $10,20\n    db 1fh, 'a', \"b\", -1, 2+3, $123 & $FF\n    MMU 1 n, 41\n    ORG $3FFC\n    db $10,$20,$30,$40,$50,$60\n    db 1\n",
+            true,
+        ),
+        // DS with a size defined later: the classic passes
+        ("    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nstart:\n    call later\n    ds count, $AA\nlater: ret\ncount equ 3\n", false),
+        // EQU and ORG with forward references
+        ("    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nstart:\n    jp later\nsize equ later - start\n    dw size\n    ORG $8100\nlater: ret\n", false),
+    ] {
+        let body = format!("{body}{tail}");
+        let want = crate::asm::assemble(&body, &root).unwrap_or_else(|e| panic!("rust: {}\n{body}", e[0])).nex.unwrap().1;
+        let mut cpu = load_nex(&nex).unwrap();
+        cpu.esx = Some(crate::emu::EsxFs::with_files(&[("in.asm", body.as_bytes())]));
+        let end = syms["__main_end"];
+        while cpu.pc != end {
+            cpu.tick().unwrap();
+        }
+        let files = cpu.esx.unwrap().files;
+        if let Some(e) = files.get("asm.err") {
+            panic!("self-hosted: {}\n{body}", String::from_utf8_lossy(e));
+        }
+        let log = String::from_utf8_lossy(&files["build.log"]).to_string();
+        assert_eq!(log.contains("asm: 1 pass, "), one_pass, "{log}\n{body}");
+        let got = &files["t.nex"];
+        assert_eq!(got.len(), want.len(), "{body}");
+        if let Some(i) = (0..want.len()).find(|&i| got[i] != want[i]) {
+            panic!("differs at offset {i}: self {:02X?} rust {:02X?}\n{body}", &got[i.saturating_sub(4)..i + 8], &want[i.saturating_sub(4)..i + 8]);
+        }
+    }
+    // a source with CRLF line ends (in.asm written on a PC)
+    let crlf = "    DEVICE ZXSPECTRUMNEXT\n    ORG $8000\nstart:\n    call later ; a comment\n    db \"a;b\", 1\nlater: ret\n".to_string() + tail;
+    let want = crate::asm::assemble(&crlf, &root).unwrap().nex.unwrap().1;
+    let got = selfhost_assemble(&nex, &syms, &crlf.replace('\n', "\r\n")).0.unwrap();
+    assert!(got == want, "CRLF source");
+    // errors after a kept line: as the classic passes report them
+    let (r, _) = selfhost_assemble(&nex, &syms, "    ORG $8000\n    call later\n    ld a,300\nlater: ret\n");
+    assert_eq!(r.err().as_deref().map(str::trim_end), Some("3: value does not fit in a byte: `300`"));
+    let (r, _) = selfhost_assemble(&nex, &syms, "    ORG $8000\n    call later\n    jp nosuch\nlater: ret\n");
+    assert_eq!(r.err().as_deref().map(str::trim_end), Some("3: undefined symbol `nosuch`"));
 }

@@ -26,12 +26,17 @@
   files too. The Next keyboard's extra keys
   (NextRegs `$B0` / `$B1`) work as well.
 * Compiling on the Next: the runtime is assembled once by the export
-  (`lib/rt_core.bin` and its labels) instead of with every program; the
-  assembler reads blocks and skips the work its first pass does not need;
-  the code generator compiles only the functions the program can call;
-  a small program compiles about 6 times faster than at first (about 2
-  seconds of work at 28 MHz), one with the Layer 2 module about 2.5 times
-  (about 13 seconds).
+  (`lib/rt_core.bin` and its labels) instead of with every program, and
+  the standard modules are lexed by it (`lib/*.tok`); the assembler makes
+  one pass (the lines with forward references are assembled again at the
+  end) and takes data lines in blocks; the stages read and write in
+  blocks; the code generator compiles only the functions the program can
+  call. A small program compiles about 8 times faster than at first (about
+  1.5 seconds of work at 28 MHz), one with the Layer 2 module about 5 times
+  (about 6 seconds).
+* Banked code: small functions stay resident (the last function moved to a
+  code page is the smallest one that is enough), and calls between
+  functions of the same code page go straight, without `rt_bcall`.
 * The release packages contain it in `next/lz80n`; it is also a separate
   archive, `lz80n-1.4.0-zxnext-sdcard.zip`.
 

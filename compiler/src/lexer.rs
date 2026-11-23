@@ -40,8 +40,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
 }
 
 /// The tokens up to the first error, and the error (tests of the
-/// self-hosted lexer compare both).
-#[cfg(test)]
+/// self-hosted lexer compare both; the export lexes the standard modules).
 pub fn lex_partial(src: &str) -> (Vec<Token>, Option<Diag>) {
     let mut out = Vec::new();
     let r = Lexer { s: src.as_bytes(), i: 0, line: 1, col: 1 }.run(&mut out);

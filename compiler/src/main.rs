@@ -213,9 +213,73 @@ pub fn selfhost_support_files() -> Vec<(String, Vec<u8>)> {
     for (n, v) in names {
         sym.push_str(&format!("{n} equ ${v:04X}\n"));
     }
+    // the standard modules, lexed: the self-hosted lexer copies their
+    // records instead of lexing them (a word: the number of tokens, then the
+    // records of selfhost/lexer.lz80n without the T_EOF; lines of file 0)
+    let mut toks = vec![];
+    for (name, data) in &files {
+        if let Some(stem) = name.strip_suffix(".lz80n") {
+            let mut rec = token_records(&String::from_utf8_lossy(data));
+            // (without the T_EOF record)
+            assert_eq!(rec[rec.len() - 5], 66, "{name} lexes");
+            rec.truncate(rec.len() - 5);
+            // (counted as the lexer counts them: `asm`, its body and `end` are one)
+            let lexed = crate::lexer::lex_partial(&String::from_utf8_lossy(data)).0;
+            let bodies = lexed.iter().filter(|t| matches!(t.tok, crate::lexer::Tok::AsmBody(_))).count();
+            let n = lexed.len() - 1 - 2 * bodies;
+            let mut out = (n as u16).to_le_bytes().to_vec();
+            out.extend(rec);
+            toks.push((format!("{stem}.tok"), out));
+        }
+    }
+    files.extend(toks);
     files.push(("lib/rt_core.bin".into(), bin));
     files.push(("lib/rt_core.sym".into(), sym.into_bytes()));
     files
+}
+
+/// The Rust lexer's tokens in the record format of selfhost/lexer.lz80n.
+pub fn token_records(src: &str) -> Vec<u8> {
+    use crate::lexer::Tok::*;
+    let mut out = vec![];
+    let head = |out: &mut Vec<u8>, kind: u8, line: u32, col: u32| {
+        out.push(kind);
+        out.extend((line as u16).to_le_bytes());
+        out.extend((col as u16).to_le_bytes());
+    };
+    let text = |out: &mut Vec<u8>, s: &[u8]| {
+        out.extend((s.len() as u16).to_le_bytes());
+        out.extend(s);
+    };
+    let (toks, err) = crate::lexer::lex_partial(src);
+    for t in &toks {
+        let kind: u8 = match &t.tok {
+            Ident(_) => 0, Int(_) => 1, DotDot => 2, Fixed(_) => 3, Str(_) => 4, AsmBody(_) => 5,
+            And => 6, Or => 7, Not => 8, If => 9, Then => 10, Elseif => 11, Else => 12, End => 13,
+            While => 14, Do => 15, For => 16, Function => 17, Return => 18, Break => 19, Const => 20,
+            Var => 21, True => 22, False => 23, Asm => 24, Struct => 25, Class => 26, Asset => 27,
+            Interrupt => 28, Far => 29, Include => 30,
+            Plus => 31, Minus => 32, Star => 33, Slash => 34, Percent => 35, Amp => 36, Pipe => 37,
+            Tilde => 38, Shl => 39, Shr => 40, EqEq => 41, NotEq => 42, Lt => 43, Le => 44, Gt => 45,
+            Ge => 46, Assign => 47, PlusEq => 48, MinusEq => 49, StarEq => 50, AmpEq => 51,
+            PipeEq => 52, SlashEq => 53, PercentEq => 54, ShlEq => 55, ShrEq => 56,
+            LParen => 57, RParen => 58, LBracket => 59, RBracket => 60, LBrace => 61, RBrace => 62,
+            Comma => 63, Dot => 64, Arrow => 65, Eof => 66,
+        };
+        head(&mut out, kind, t.pos.line, t.pos.col);
+        match &t.tok {
+            Ident(s) | AsmBody(s) => text(&mut out, s.as_bytes()),
+            Str(s) => text(&mut out, &s.chars().map(|c| c as u32 as u8).collect::<Vec<_>>()),
+            Int(v) | Fixed(v) => out.extend((*v as u32).to_le_bytes()),
+            _ => {}
+        }
+    }
+    if let Some(e) = err {
+        head(&mut out, 255, e.pos.line, e.pos.col);
+        let m = e.msg.as_bytes();
+        text(&mut out, &m[..m.len().min(64)]);
+    }
+    out
 }
 
 /// A program built for the SD card: (file name, NEX, symbols).

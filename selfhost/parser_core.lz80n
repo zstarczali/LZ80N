@@ -79,6 +79,7 @@ const T_DOT = 64
 const T_ARROW = 65
 const T_EOF = 66
 const T_ERROR = 255
+const T_FILE = 254      -- (lexer.lz80n) the lines of the records after it are of file `line >> 13`
 
 -- debug names of the token kinds (as Rust's `{:?}`, lower case)
 -- the names of the token kinds (for messages), separated by spaces
@@ -234,13 +235,112 @@ word pool_len = 0
 byte inh
 bool eof_in = false
 
+-- tokens.bin is read in 512-byte blocks
+byte ibuf[512]
+word ib_pos = 0
+word ib_len = 0
+
+function in_fill()
+    ib_len = file_read(inh, addr(ibuf), 512)
+    ib_pos = 0
+    if ib_len == 0 then eof_in = true end
+end
+
 function in_byte() -> byte
-    word g = file_getc(inh)
-    if g == FILE_EOF then
-        eof_in = true
-        return 0
+    if ib_pos >= ib_len then
+        in_fill()
+        if eof_in then return 0 end
     end
-    return byte(g)
+    byte c = ibuf[ib_pos]
+    ib_pos += 1
+    return c
+end
+
+-- n bytes of the input into tpool[at..] (the ones below 60000); their hash
+-- (h = h * 31 + c) in pc_hash. In steps: the bytes of the input block that
+-- fall in one 8K page of tpool are copied in assembly.
+word pc_hash = 0
+word pc_src = 0
+word pc_dst = 0
+word pc_n = 0
+byte pc_st = 0
+byte pc_hh = 0              -- 1: hash the bytes (identifiers), 0: only copy them
+function pool_copy(word dst, word n)
+    pc_hash = 0
+    while n > 0 do
+        if ib_pos >= ib_len then
+            in_fill()
+            if eof_in then return end
+        end
+        word k = ib_len - ib_pos
+        if k > n then k = n end
+        pc_st = 0
+        if dst < 60000 then
+            word room = 8192 - (dst & 8191)
+            if k > room then k = room end
+            if k > 60000 - dst then k = 60000 - dst end
+            tpool[dst] = 0           -- (maps the page of `dst` at $2000)
+            pc_dst = 0x2000 + (dst & 8191)
+            pc_st = 1
+        end
+        pc_src = addr(ibuf) + ib_pos
+        pc_n = k
+        asm
+            push ix
+            ld hl,(g_pc_src)
+            ld ix,(g_pc_dst)
+            ld bc,(g_pc_n)
+            ld a,(g_pc_hh)
+            or a
+            jr nz,.l
+            ld a,(g_pc_st)
+            or a
+            jr z,.e
+            ld a,b
+            or c
+            jr z,.e
+            ld de,(g_pc_dst)
+            ldir
+            jr .e
+.l:
+            ld a,b
+            or c
+            jr z,.e
+            ld a,(hl)
+            inc hl
+            push hl
+            push bc
+            ld c,a
+            ld a,(g_pc_st)
+            or a
+            jr z,.ns
+            ld (ix+0),c
+            inc ix
+.ns:
+            ld hl,(g_pc_hash)
+            ld d,h
+            ld e,l
+            add hl,hl
+            add hl,hl
+            add hl,hl
+            add hl,hl
+            add hl,hl
+            or a
+            sbc hl,de
+            ld b,0
+            add hl,bc
+            ld (g_pc_hash),hl
+            pop bc
+            pop hl
+            dec bc
+            jr .l
+.e:
+            pop ix
+        end
+        ib_pos += k
+        dst += k
+        n -= k
+    end
 end
 
 function in_word() -> word
@@ -1121,58 +1221,58 @@ function load_tokens() -> bool
         print("cannot open tokens.bin, error", file_status)
         return false
     end
+    ib_pos = 0
+    ib_len = 0
+    word fadd = 0               -- (T_FILE) the file of a copied module's lines
     while not eof_in do
         byte k = in_byte()
         if eof_in then break end
-        if ntok >= MAX_TOKENS then
+        word ln = in_word()
+        word cl = in_word()
+        if k == T_FILE then
+            fadd = ln
+        elseif ntok >= MAX_TOKENS then
             fail_at(0, 0)
             msg("not supported by the self-hosted compiler yet: programs of more than 48000 tokens")
             break
-        end
+        else
+        ln += fadd
         word t = ntok
         ntok += 1
         tk[t] = k
-        word ln = in_word()
         tl_lo[t] = byte(ln)
         tl_hi[t] = byte(ln >> 8)
-        word cl = in_word()
         if cl > 255 then cl = 255 end
         tc_[t] = byte(cl)
-        set_toff(t, 0)
-        tn_lo[t] = 0
-        tn_hi[t] = 0
+        word off = 0
+        word n = 0
         if k == T_INT or k == T_FIXED then
             -- the value: 4 bytes in the pool
             if pool_len + 4 > 60000 then
                 if fail_at(ln, cl) then msg("program too large: more than 60000 bytes of names and texts") end
                 break
             end
-            set_toff(t, pool_len)
-            word vl = in_word()
-            word vh = in_word()
-            tpool[pool_len] = byte(vl)
-            tpool[pool_len + 1] = byte(vl >> 8)
-            tpool[pool_len + 2] = byte(vh)
-            tpool[pool_len + 3] = byte(vh >> 8)
+            off = pool_len
+            pc_hh = 0
+            pool_copy(pool_len, 4)
             pool_len += 4
         elseif k == T_IDENT or k == T_STR or k == T_ASM_BODY or k == T_ERROR then
-            word n = in_word()
-            set_toff(t, pool_len)
-            tn_lo[t] = byte(n)
-            tn_hi[t] = byte(n >> 8)
-            word i = 0
-            word h = 0
-            while i < n do
-                byte c = in_byte()
-                h = (h << 5) - h + c
-                if pool_len + i < 60000 then tpool[pool_len + i] = c end
-                i += 1
-            end
+            n = in_word()
+            off = pool_len
+            pc_hh = 0
+            if k == T_IDENT then pc_hh = 1 end
+            pool_copy(pool_len, n)
+        end
+        to_lo[t] = byte(off)
+        to_hi[t] = byte(off >> 8)
+        tn_lo[t] = byte(n)
+        tn_hi[t] = byte(n >> 8)
+        if k == T_IDENT or k == T_STR or k == T_ASM_BODY or k == T_ERROR then
             if pool_len + n > 60000 then
                 if fail_at(tlno(t), tcol(t)) then msg("program too large: more than 60000 bytes of names and texts") end
                 break
             end
-            if k == T_IDENT then intern(t, h & 4095) end
+            if k == T_IDENT then intern(t, pc_hash & 4095) end
             if toff_(t) == pool_len then pool_len += n end
         end
         if k == T_ERROR then
@@ -1182,6 +1282,7 @@ function load_tokens() -> bool
             break
         end
         if k == T_EOF then break end
+        end
     end
     file_close(inh)
     return true

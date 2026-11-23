@@ -1021,8 +1021,8 @@ impl Cpu {
             0x91 => 20,
             0x92 => 17,
             0x27 => 11,
-            // LDIR / LDDR, OTIR / OTDR: 21 per repeated iteration, 16 for the last
-            0xB0 | 0xB8 => {
+            // LDIR / LDDR, CPIR / CPDR, OTIR / OTDR: 21 per repeated iteration, 16 for the last
+            0xB0 | 0xB8 | 0xB1 | 0xB9 => {
                 let n = if bc_used == 0 { 65536 } else { bc_used as u32 };
                 21 * n - 5
             }
@@ -1030,7 +1030,7 @@ impl Cpu {
                 let n = if b_used == 0 { 256 } else { b_used as u32 };
                 21 * n - 5
             }
-            0xA0 | 0xA8 | 0xA3 | 0xAB => 16,
+            0xA0 | 0xA8 | 0xA1 | 0xA9 | 0xA3 | 0xAB => 16,
             0x45 | 0x4D => 14,
             0x44 => 8,
             0x47 | 0x4F | 0x57 | 0x5F => 9,
@@ -1451,6 +1451,25 @@ impl Cpu {
                     }
                 }
                 self.f = (self.f & (SF | ZF | CF)) | if self.bc() != 0 { PF } else { 0 };
+            }
+            (2, 1) if y >= 4 => {
+                // CPI / CPD / CPIR / CPDR (the repeated ones stop at a match)
+                loop {
+                    let v = self.rd(self.hl());
+                    let r = self.a.wrapping_sub(v);
+                    let step: u16 = if y & 1 == 0 { 1 } else { 0xFFFF };
+                    self.set_hl(self.hl().wrapping_add(step));
+                    self.set_bc(self.bc().wrapping_sub(1));
+                    self.f = (self.f & CF)
+                        | NF
+                        | (r & SF)
+                        | if r == 0 { ZF } else { 0 }
+                        | ((self.a ^ v ^ r) & HF)
+                        | if self.bc() != 0 { PF } else { 0 };
+                    if y < 6 || self.bc() == 0 || r == 0 {
+                        break;
+                    }
+                }
             }
             (2, 3) if y >= 4 => {
                 // OUTI / OUTD / OTIR / OTDR

@@ -5481,10 +5481,12 @@ impl Gen {
             .filter(|(sz, _)| *sz <= PAGE_CAP)
             .collect();
         cands.sort_by(|a, b| b.0.cmp(&a.0));
-        for (sz, key) in cands {
-            if size <= RESIDENT_LIMIT {
-                break;
-            }
+        // the largest ones first; at the end the smallest one that is enough
+        // alone, so small (often called) functions stay resident
+        while size > RESIDENT_LIMIT && !cands.is_empty() {
+            let excess = size - RESIDENT_LIMIT;
+            let pick = cands.iter().rposition(|(sz, _)| sz.saturating_sub(STUB_SIZE) >= excess).unwrap_or(0);
+            let (sz, key) = cands.remove(pick);
             banked.insert(key);
             size = size.saturating_sub(sz) + STUB_SIZE;
         }
@@ -5534,9 +5536,12 @@ impl Gen {
         for (k, (_, members)) in pages.iter().enumerate() {
             let page = first + k;
             let _ = writeln!(pages_text, "; code page {page}\n    MMU 2 e, {page}\n    ORG $4000");
+            // calls between functions of the same page need no rt_bcall
+            let here: HashSet<&str> = members.iter().map(|&i| self.fn_chunks[i].1.as_str()).collect();
             for &i in members {
                 let (_, label, _) = &self.fn_chunks[i];
                 let code = self.chunk_code(i, opts).replacen(&format!("\n{label}:\n"), &format!("\n{label}_bank:\n"), 1);
+                let code = same_page_calls(&code, &here);
                 pages_text.push_str(&code);
                 let _ = writeln!(stubs, "{label}:\n    ld hl,{label}_bank\n    ld a,{page}\n    jp rt_bcall");
             }
@@ -5684,6 +5689,25 @@ const PAGE_CAP: usize = 7800;
 const STUB_SIZE: usize = 8;
 
 /// Estimated size of the resident part of an output (up to `__program_end`).
+/// `call f` -> `call f_bank` for the functions `here` (they are in the code
+/// page of the caller).
+fn same_page_calls(code: &str, here: &HashSet<&str>) -> String {
+    let mut out = String::with_capacity(code.len() + 64);
+    for line in code.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if let Some(target) = body.trim_start().strip_prefix("call ") {
+            if here.contains(target.trim()) {
+                out.push_str(body.trim_end());
+                out.push_str("_bank");
+                out.push_str(&line[body.len()..]);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 pub(crate) fn resident_size(out: &str) -> usize {
     asm_size(out.split("\n__program_end:").next().unwrap_or(out))
 }

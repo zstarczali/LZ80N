@@ -218,12 +218,93 @@ function line_cost() -> byte
     return 4
 end
 
+-- ob for each character of s: the characters up to a newline (or a full
+-- obuf) are copied into obuf and lcur in assembly
+word os_src = 0
+byte os_n = 0
+byte os_stop = 0            -- 1: a newline was copied, 2: obuf is full
 function os(string s)
-    byte n = len(s)
-    byte i = 0
-    while i < n do
-        ob(asc(s, i))
-        i += 1
+    asm
+        ld hl,(p_os_s)
+        ld a,(hl)
+        inc hl
+        ld (g_os_src),hl
+        ld (g_os_n),a
+    end
+    os_run()
+end
+
+-- the os_n characters at os_src into the output (they may be in a far
+-- page at $2000: nothing here maps another page there)
+function os_run()
+    while os_n > 0 do
+        asm
+            ld a,(g_os_n)
+            ld b,a
+            ld a,(g_lcn)
+            ld c,a
+            ld hl,(g_olen)
+            ld de,g_obuf
+            add hl,de
+            ex de,hl            ; de = obuf + olen
+            ld hl,(g_os_src)
+.l:
+            ld a,b
+            or a
+            jr z,.done
+            ld a,(hl)
+            inc hl
+            dec b
+            ld (de),a
+            inc de
+            cp 10
+            jr z,.nl
+            push hl
+            ld l,a
+            ld a,c
+            cp 40
+            jr nc,.nolc
+            push de
+            ld e,c
+            ld d,0
+            ld a,l
+            ld hl,g_lcur
+            add hl,de
+            ld (hl),a
+            pop de
+            inc c
+.nolc:
+            ld hl,g_obuf+256
+            or a
+            sbc hl,de
+            pop hl
+            jr nz,.l
+            ld a,2
+            jr .stop
+.nl:
+            ld a,1
+            jr .stop
+.done:
+            xor a
+.stop:
+            ld (g_os_stop),a
+            ld (g_os_src),hl
+            ld a,b
+            ld (g_os_n),a
+            ld a,c
+            ld (g_lcn),a
+            ex de,hl
+            ld de,g_obuf
+            or a
+            sbc hl,de
+            ld (g_olen),hl
+        end
+        if os_stop == 1 then
+            lines_out += 1
+            cost_out += line_cost()
+            lcn = 0
+        end
+        if olen == 256 then flush() end
     end
 end
 
@@ -239,11 +320,21 @@ function oi(string s)
 end
 
 function otok(word t)
-    word i = 0
-    word o = toff_(t)
-    while i < tlen_(t) do
-        ob(tpool[o + i])
-        i += 1
+    otext(toff_(t), tlen_(t))
+end
+
+-- tpool[o..o+n) into the output, straight from its 8K pages
+function otext(word o, word n)
+    while n > 0 do
+        byte d = tpool[o]           -- (maps the page of o at $2000)
+        word k = 8192 - (o & 8191)
+        if k > n then k = n end
+        if k > 255 then k = 255 end
+        os_src = 0x2000 + (o & 8191)
+        os_n = byte(k)
+        os_run()
+        o += k
+        n -= k
     end
 end
 
@@ -4296,19 +4387,74 @@ function is_idc(byte c) -> bool
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_'
 end
 
--- the function named by tpool[a..b) (0: none)
-function func_by_text(word a, word b) -> word
-    word r = 1
-    while r <= nsy do
-        if sk[r] == SK_FUNC and sstruct[r] == 0 and sname[r] ~= 0 and tlen_(sname[r]) == b - a then
-            word o = toff_(sname[r])
-            word i = 0
-            while i < b - a and tpool[o + i] == tpool[a + i] do i += 1 end
-            if i == b - a then return r end
+-- the offset of the interned name equal to tpool[a..b) (parser_core's
+-- intern), 65535 if there is none
+function interned_at(word a, word b) -> word
+    word n = b - a
+    word h = 0
+    word i = a
+    while i < b do
+        h = (h << 5) - h + tpool[i]
+        i += 1
+    end
+    word e = ihead[h & 4095]
+    while e ~= 0 do
+        if ilen[e] == n then
+            word o = ioff[e]
+            word j = 0
+            while j < n and tpool[o + j] == tpool[a + j] do j += 1 end
+            if j == n then return o end
         end
-        r += 1
+        e = inext[e]
+    end
+    return 65535
+end
+
+-- the function named by tpool[a..b) (0: none): names are interned, so the
+-- symbols with that name are on one chain of shead
+function func_by_text(word a, word b) -> word
+    word o = interned_at(a, b)
+    if o == 65535 then return 0 end
+    word s = shead[o & 1023]
+    while s ~= 0 do
+        if sk[s] == SK_FUNC and sstruct[s] == 0 and sname[s] ~= 0 and toff_(sname[s]) == o then return s end
+        s = snext[s]
     end
     return 0
+end
+
+-- the first i in [i, e) with tpool[i] `f` or `r`, e if there is none (the
+-- bytes of each 8K page are scanned in assembly)
+word ar_p = 0
+word ar_n = 0
+function ar_next(word i, word e) -> word
+    while i < e do
+        byte d = tpool[i]           -- (maps the page of i at $2000)
+        word k = 8192 - (i & 8191)
+        if k > e - i then k = e - i end
+        ar_p = 0x2000 + (i & 8191)
+        ar_n = k
+        asm
+            ld hl,(g_ar_p)
+            ld bc,(g_ar_n)
+.l:
+            ld a,(hl)
+            cp 'f'
+            jr z,.f
+            cp 'r'
+            jr z,.f
+            inc hl
+            dec bc
+            ld a,b
+            or c
+            jr nz,.l
+.f:
+            ld (g_ar_n),bc
+        end
+        if ar_n ~= 0 then return i + (k - ar_n) end
+        i += k
+    end
+    return e
 end
 
 -- the functions named `f_name` in the inline assembly of node list n
@@ -4319,7 +4465,7 @@ function asm_roots(word n)
         if k == S_ASM then
             word o = toff_(n1[n])
             word e = o + tlen_(n1[n])
-            word i = o
+            word i = ar_next(o, e)
             while i + 2 < e do
                 -- (`rt_note...` needs the note table, as a call of note_period does)
                 if tpool[i] == 'r' and i + 7 < e and tpool[i + 1] == 't' and tpool[i + 2] == '_' and tpool[i + 3] == 'n' and tpool[i + 4] == 'o' and tpool[i + 5] == 't' and tpool[i + 6] == 'e' then uses_notes = true end
@@ -4333,6 +4479,7 @@ function asm_roots(word n)
                 else
                     i += 1
                 end
+                i = ar_next(i, e)
             end
         elseif k == S_IF or k == S_WHILE or k == S_ARM then
             asm_roots(n2[n])
@@ -5100,13 +5247,7 @@ function cg_stmt(word s)
         call_stmt(n1[s])
     elseif k == S_ASM then
         -- the body, verbatim (each line ends with a newline)
-        word t = n1[s]
-        word i = 0
-        word o = toff_(t)
-        while i < tlen_(t) do
-            ob(tpool[o + i])
-            i += 1
-        end
+        otok(n1[s])
     elseif k == S_FAR then
         if cur_fn ~= 0 then
             if fail_node(s) then msg("`far` arrays are declared at the top level") end

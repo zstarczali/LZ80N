@@ -1802,10 +1802,11 @@ COPY "myprog.lz80n" TO "in.lz80n"
 A hibák a `codegen.err`, `asm.err` vagy `assets.err` fájlba kerülnek; a
 `build.log` a lépések üzeneteit tartalmazza, amelyek fordítás közben egy, az
 IDE-hez hasonló képernyőn, egy ablakban is megjelennek. Egy kis program
-fordítása 28 MHz-en kb. 2 másodperc munka (plusz a lépések betöltése az SD
-kártyáról); egy Layer 2 modult használó programé kb. 13 másodperc. Csak azok
+fordítása 28 MHz-en kb. 1,5 másodperc munka (plusz a lépések betöltése az SD
+kártyáról); egy Layer 2 modult használó programé kb. 6 másodperc. Csak azok
 a függvények fordulnak le, amelyeket a program meghívhat (egy modulban sok
-olyan van, amit nem használ), a futtatókörnyezet pedig előre lefordítva
-érkezik (`lib/rt_core.bin`).
+olyan van, amit nem használ), a futtatókörnyezet előre lefordítva
+(`lib/rt_core.bin`), a standard modulok előre lexelve érkeznek (`lib/*.tok`),
+az assembler pedig egy menetben dolgozik.
 
 A nyelv ugyanaz, mint a PC-s `lz80nc`-vel (a részletek: `selfhost/README.md`).
