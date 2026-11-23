@@ -195,10 +195,41 @@ up to 32 KB.
   assembly), skips INCBIN data and the 8K page clearing in its first pass,
   and avoids 32-bit arithmetic for every byte; the code generator copies
   its temporary files in blocks; the lexer keeps a 16-bit count of the
-  characters left. `hello.lz80n`: lexer 0.2 s, code generator 0.5 s,
-  assembler 1.3 s at 28 MHz (it was 0.2 + 2.4 + 9.1 s); `life.lz80n` (with
-  the Layer 2 module) 3.1 + 5.6 + 13.3 s (4.5 + 12.2 + 17.2 s).
-  `profile_stage` (ignored) shows where a stage spends its time.
+  characters left.
+* More speed:
+  - the export lexes the standard modules too (`lib/lib_*.tok`, with the
+    Rust lexer, whose records are the same): the lexer copies their
+    records between two `T_FILE` (254) records, which give the file number
+    of the lines between them, instead of lexing them; it looks for the
+    words that pull in a module in blocks, in assembly, and reads its input
+    in blocks;
+  - the code generator reads `tokens.bin` in blocks (names and texts go
+    into `tpool` in assembly, hashed only when they are identifiers),
+    finds `f_name` in inline assembly in assembly and the function by the
+    interned name, and writes names, texts and strings in assembly;
+  - the assembler makes one pass: a line that uses a label defined further
+    on (and every SAVENEX line) is kept with the state before it (its file
+    offset, `pc`, the last write, the last global label, the MMU slots) and
+    assembled again at the end. When a forward reference could change a
+    size (EQU, ORG, DS, ALIGN, MMU, INCBIN), or a line fails, the classic
+    passes run instead (and report the error as they always did). Lines of
+    plain `db` bytes and INCBIN data go into the image in blocks; character
+    classes are tables; the line scan, the hashes and `rng_is` are in
+    assembly; the NEX is written 256 bytes at a time;
+  - `lz80nc` places banked functions so that small ones stay resident (the
+    smallest function that is enough on its own is banked last), and calls
+    between functions of the same code page skip `rt_bcall`.
+
+  `hello.lz80n`: lexer 0.10 s, code generator 0.49 s, assembler 0.64 s at
+  28 MHz (it was 0.40 + 0.71 + 1.74 s); `life.lz80n` (with the Layer 2
+  module) 0.31 + 2.59 + 3.12 s (3.11 + 3.99 + 6.06 s). The assembler alone,
+  on the full assembly of the examples (`selfhost_asm_all_examples`): 40-50%
+  faster, `images` and `samples` (data) about 3.5-7 times. The big
+  arrays are `far noinit`: what must start as 0 is cleared when it is first
+  used (nodes in blocks of 4096, the assembler's image by the page), and the
+  test emulator fills the pages a NEX does not load with garbage.
+  `profile_stage` (ignored) shows where a stage spends its
+  time.
 * The build log: every stage writes its lines (with the time it took) to
   the screen and to `build.log`, and shows the lines of the stages before
   it first. The screen looks like the IDE (its menu bar, the program's

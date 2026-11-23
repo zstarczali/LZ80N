@@ -457,16 +457,16 @@ end
 string keywords[] = {
     "and", "or", "not", "if", "then", "elseif", "else", "end", "while", "do",
     "for", "function", "return", "break", "const", "var", "true", "false",
-    "asm", "struct", "class", "asset", "interrupt", "far", "include", "extends",
+    "asm", "struct", "class", "asset", "interrupt", "far", "noinit", "include", "extends",
     "self", "super"
 }
-const NKEYWORDS = 28
+const NKEYWORDS = 29
 string types[] = {"bool", "byte", "sbyte", "word", "sword", "long", "fixed", "fixed16", "string"}
 const NTYPES = 9
 
 -- the first letter and the length of each keyword and type (kw_init)
-byte kw_c[37]
-byte kw_l[37]
+byte kw_c[38]
+byte kw_l[38]
 function kw_init()
     byte k = 0
     while k < NKEYWORDS do

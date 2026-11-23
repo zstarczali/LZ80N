@@ -26,13 +26,17 @@ bool in_eof = false
 byte rb[512]
 word rb_pos = 0
 word rb_len = 0
+long rd_off = 0             -- the file offset of rb[0]
+long ln_off = 0             -- the file offset of the line read last
 
 function read_text_ln() -> bool
     llen = 0
     if in_eof then return false end
+    ln_off = rd_off + rb_pos
     bool any = false
     while true do
         if rb_pos >= rb_len then
+            rd_off += rb_len
             rb_len = file_read(inh, addr(rb), 512)
             rb_pos = 0
             if rb_len == 0 then
@@ -51,71 +55,118 @@ end
 -- characters kept); rl_lf: 1 when the line feed was found
 byte rl_lf = 0
 function scan_ln()
+    -- (cpir finds the line feed, ldir copies the line; CRs are taken out
+    -- afterwards when the line has any)
     asm
-        push ix
         ld hl,(g_rb_len)
         ld de,(g_rb_pos)
         or a
         sbc hl,de
         ld b,h
-        ld c,l                  ; bc = bytes left
+        ld c,l                  ; bc = bytes left (not 0)
         ld hl,g_rb
         add hl,de               ; hl = the next byte
         push hl
+        push bc
+        ld a,10
+        cpir
+        ld a,0
+        jr nz,.nf
+        inc a
+.nf:
+        ld (g_rl_lf),a
+        push hl
+        ld de,g_rb
+        or a
+        sbc hl,de
+        ld (g_rb_pos),hl
+        pop hl
+        pop hl                  ; hl = bytes left before
+        or a
+        sbc hl,bc               ; hl = bytes taken
+        ld a,(g_rl_lf)
+        or a
+        jr z,.nolf
+        dec hl                  ; (not the line feed)
+.nolf:
+        ld b,h
+        ld c,l                  ; bc = characters of the line
         ld hl,512
         ld de,(g_llen)
         or a
-        sbc hl,de
-        push hl
-        pop ix                  ; ix = room left in lbuf
+        sbc hl,de               ; hl = room in lbuf
+        or a
+        sbc hl,bc
+        jr nc,.fits
+        add hl,bc
+        ld b,h
+        ld c,l                  ; bc = room
+.fits:
         ld hl,g_lbuf
         add hl,de
-        ex de,hl                ; de = where the next character goes
-        pop hl
-.loop:
+        ex de,hl                ; de = where they go
+        pop hl                  ; hl = the first of them
         ld a,b
         or c
-        jr z,.empty
-        dec bc
-        ld a,ixh
-        or ixl
+        jr z,.done
+        push de
+        push bc
+        ldir
+        pop bc
+        pop hl                  ; hl = the copied characters
+        push hl
+        push bc
+        ld a,13
+        cpir
+        pop bc
+        pop hl
+        jr nz,.done             ; no CR
+        ld d,h
+        ld e,l
+.cr:
         ld a,(hl)
         inc hl
-        jr z,.full
-        cp 10
-        jr z,.lf
         cp 13
-        jr z,.loop
+        jr z,.skip
         ld (de),a
         inc de
-        dec ix
-        jr .loop
-.full:
-        cp 10
-        jr nz,.loop
-.lf:
-        ld a,1
-        jr .done
-.empty:
-        xor a
+.skip:
+        dec bc
+        ld a,b
+        or c
+        jr nz,.cr
 .done:
-        ld (g_rl_lf),a
-        ld bc,g_rb
-        or a
-        sbc hl,bc
-        ld (g_rb_pos),hl
         ex de,hl
-        ld bc,g_lbuf
+        ld de,g_lbuf
         or a
-        sbc hl,bc
+        sbc hl,de
         ld (g_llen),hl
-        pop ix
+    end
+end
+
+-- character classes (tables: no call for each character)
+const CC_START = 1          -- starts an identifier: letters _ . @
+const CC_IDENT = 2          -- in an identifier: those, digits ? !
+const CC_BLANK = 4          -- space, tab
+byte cc[256]
+byte lcase[256]
+function cc_init()
+    word i = 0
+    while i < 256 do
+        byte c = byte(i)
+        byte k = 0
+        if (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '.' or c == '@' then k = CC_START | CC_IDENT end
+        if (c >= '0' and c <= '9') or c == '?' or c == '!' then k = CC_IDENT end
+        if c == ' ' or c == 9 then k = CC_BLANK end
+        cc[i] = k
+        lcase[i] = c
+        if c >= 'A' and c <= 'Z' then lcase[i] = c + 32 end
+        i += 1
     end
 end
 
 function lc(byte c) -> byte
-    if c >= 'A' and c <= 'Z' then return c + 32 end
-    return c
+    return lcase[c]
 end
 
 function is_digit(byte c) -> bool
@@ -127,27 +178,63 @@ function is_hexd(byte c) -> bool
 end
 
 function is_ident_start(byte c) -> bool
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '.' or c == '@'
+    return (cc[c] & CC_START) ~= 0
 end
 
 function is_ident_char(byte c) -> bool
-    return is_ident_start(c) or is_digit(c) or c == '?' or c == '!'
+    return (cc[c] & CC_IDENT) ~= 0
 end
 
 function is_blank(byte c) -> bool
-    return c == ' ' or c == 9
+    return (cc[c] & CC_BLANK) ~= 0
 end
 
--- is lbuf[s..e) the lower-case word w (case-insensitive)?
+-- is lbuf[s..e) the lower-case word w (case-insensitive)? (in assembly:
+-- the operands are checked against register names with it)
+byte rng_r = 0
 function rng_is(word s, word e, string w) -> bool
-    byte n = len(w)
-    if e - s ~= n then return false end
-    byte i = 0
-    while i < n do
-        if lc(lbuf[s + i]) ~= asc(w, i) then return false end
-        i += 1
+    asm
+        ld hl,(p_rng_is_e)
+        ld de,(p_rng_is_s)
+        or a
+        sbc hl,de
+        ld a,h
+        or a
+        jr nz,.no
+        ld c,l
+        ld hl,g_lbuf
+        add hl,de
+        ex de,hl                ; de = lbuf + s
+        ld hl,(p_rng_is_w)
+        ld a,(hl)
+        cp c
+        jr nz,.no
+        or a
+        jr z,.yes
+        ld b,a
+        inc hl
+.l:
+        ld a,(de)
+        cp 65
+        jr c,.k
+        cp 91
+        jr nc,.k
+        or $20
+.k:
+        cp (hl)
+        jr nz,.no
+        inc hl
+        inc de
+        djnz .l
+.yes:
+        ld a,1
+        jr .e
+.no:
+        xor a
+.e:
+        ld (g_rng_r),a
     end
-    return true
+    return rng_r ~= 0
 end
 
 -- does lbuf[s..e) start with w (case-insensitive)?
@@ -156,7 +243,7 @@ function rng_starts(word s, word e, string w) -> bool
     if e - s < n then return false end
     byte i = 0
     while i < n do
-        if lc(lbuf[s + i]) ~= asc(w, i) then return false end
+        if lcase[lbuf[s + i]] ~= asc(w, i) then return false end
         i += 1
     end
     return true
@@ -165,8 +252,8 @@ end
 word ts                     -- trim results
 word te
 function trim(word s, word e)
-    while s < e and (is_blank(lbuf[s])) do s += 1 end
-    while e > s and (is_blank(lbuf[e - 1])) do e -= 1 end
+    while s < e and (((cc[lbuf[s]] & CC_BLANK) ~= 0)) do s += 1 end
+    while e > s and (((cc[lbuf[e - 1]] & CC_BLANK) ~= 0)) do e -= 1 end
     ts = s
     te = e
 end
@@ -178,6 +265,17 @@ word err_line
 byte emsg[200]
 word elen = 0
 bool strict = false
+
+-- One pass: a line that uses a symbol defined further on (and every SAVENEX
+-- line) is kept in rp with the state before it and assembled again when the
+-- pass is over (replay_all). When a forward reference could change a size
+-- (EQU, ORG, DS, MMU, ...), or a line fails, the classic passes run instead.
+bool deferring = false      -- the one pass: keep lines with forward references
+bool replaying = false      -- assembling the kept lines again
+bool line_undef = false     -- the line uses an undefined symbol
+bool need_full = false      -- the one pass is not enough
+bool sn_defer = false       -- (the one pass) the line is a SAVENEX line
+word gsym = 0               -- the symbol of the last global label
 
 function msg(string s)
     byte n = len(s)
@@ -204,6 +302,8 @@ end
 -- start an error (only the first one, only in a final pass)
 function fail() -> bool
     if failed or not strict then return false end
+    -- (a line with a forward reference is assembled again at the end)
+    if deferring and line_undef then return false end
     failed = true
     err_line = lno
     elen = 0
@@ -215,13 +315,13 @@ end
 const HSIZE = 4096
 const MAXSYM = 6000
 far word hhead[4096]
-far word snext[6000]
-far word soff[6000]
-far byte slen[6000]
-far word svl[6000]
-far word svh[6000]
-far word spass[6000]        -- pass in which it was last defined
-far byte spool[65000]
+far noinit word snext[6000]
+far noinit word soff[6000]
+far noinit byte slen[6000]
+far noinit word svl[6000]
+far noinit word svh[6000]
+far noinit word spass[6000]        -- pass in which it was last defined
+far noinit byte spool[65000]
 word nsym = 0
 word spool_len = 0
 word pass = 0
@@ -232,14 +332,45 @@ byte qlen
 byte gbuf[128]              -- the last global label (for `.local`)
 byte glen = 0
 
-function qhash() -> word
-    word h = 0
-    byte i = 0
-    while i < qlen do
-        h = (h << 5) - h + qbuf[i]
-        i += 1
+-- h = h * 31 + c over hb_len bytes at hb_addr -> hb_h (in assembly)
+word hb_addr = 0
+byte hb_len = 0
+word hb_h = 0
+function buf_hash()
+    asm
+        push ix
+        ld ix,(g_hb_addr)
+        ld a,(g_hb_len)
+        ld b,a
+        ld hl,0
+        or a
+        jr z,.e
+.l:
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        or a
+        sbc hl,de
+        ld e,(ix+0)
+        ld d,0
+        add hl,de
+        inc ix
+        djnz .l
+.e:
+        ld (g_hb_h),hl
+        pop ix
     end
-    return h & (HSIZE - 1)
+end
+
+function qhash() -> word
+    hb_addr = addr(qbuf)
+    hb_len = qlen
+    buf_hash()
+    return hb_h & (HSIZE - 1)
 end
 
 -- the symbol named qbuf, 0 if there is none
@@ -323,6 +454,7 @@ function define(word s, word e, long v)
         end
         if sym_value(sym) ~= v then changed = true end
     end
+    if lbuf[s] ~= '.' then gsym = sym end
     spass[sym] = pass
     svl[sym] = word(v)
     svh[sym] = word(v >> 16)
@@ -348,7 +480,7 @@ function ech1() -> byte
 end
 
 function eskip()
-    while ep < eend and is_blank(lbuf[ep]) do ep += 1 end
+    while ep < eend and ((cc[lbuf[ep]] & CC_BLANK) ~= 0) do ep += 1 end
 end
 
 function eerr(string m)
@@ -515,15 +647,15 @@ function eprim() -> long
         return radix(2)
     end
     if is_digit(c) then return number() end
-    if is_ident_start(c) then
+    if ((cc[c] & CC_START) ~= 0) then
         word s = ep
-        while ep < eend and is_ident_char(lbuf[ep]) do ep += 1 end
+        while ep < eend and ((cc[lbuf[ep]] & CC_IDENT) ~= 0) do ep += 1 end
         word e = ep
         bool hi = rng_is(s, e, "high")
         if hi or rng_is(s, e, "low") then
             eskip()
             byte d = ech()
-            if d == '(' or d == '$' or d == '#' or d == '%' or d == 39 or is_digit(d) or is_ident_start(d) then
+            if d == '(' or d == '$' or d == '#' or d == '%' or d == 39 or is_digit(d) or ((cc[d] & CC_START) ~= 0) then
                 long v = eun()
                 if hi then return (v >> 8) & 255 end
                 return v & 255
@@ -532,6 +664,7 @@ function eprim() -> long
         qualify(s, e)
         word sym = sym_find()
         if sym ~= 0 then return sym_value(sym) end
+        line_undef = true
         if not undef then
             undef = true
             miss_s = s
@@ -734,16 +867,17 @@ end
 -- ---------------------------------------------------------------- output image
 
 const SLOT_PAGES = 35
-far byte img0[57344]        -- 7 pages each
-far byte img1[57344]
-far byte img2[57344]
-far byte img3[57344]
-far byte img4[57344]
+far noinit byte img0[57344]        -- 7 pages each
+far noinit byte img1[57344]
+far noinit byte img2[57344]
+far noinit byte img3[57344]
+far noinit byte img4[57344]
 byte pdir[224]              -- 8K page -> image slot (1..35), 0 = not written
 byte pkeep[224]             -- pages written by INCBIN
 byte nslots = 0
 byte slots[8] = {14, 15, 10, 11, 4, 5, 0, 1}
 byte guard[8]               -- MMU option per slot: 'e', 'n', 'w' or 0
+byte sv = 0                 -- changes when slots or guard change
 long pc = 0
 long last_write = -1
 
@@ -795,7 +929,9 @@ function page_slot(byte p) -> byte
     end
     nslots += 1
     pdir[p] = nslots
-    -- (no clearing: far arrays start as zeros, and a slot is used once)
+    -- (the arrays are `noinit`; the write maps the page at $2000)
+    img_put(nslots, 0, 0)
+    dma_fill(0x2000, 8192, 0)
     return nslots
 end
 
@@ -830,8 +966,10 @@ function emit(byte b)
         if guard[sl] == 'e' then
             if fail() then msg("data does not fit in an MMU slot") end
             guard[sl] = 0
+            sv += 1
         elseif guard[sl] == 'n' then
             slots[sl] += 1
+            sv += 1
             pc -= 0x2000
         end
     end
@@ -1014,7 +1152,7 @@ function reg8(byte o, word s, word e) -> bool
     word n = e - s
     if n == 0 or n > 3 then return false end
     if n == 1 then
-        byte c = lc(lbuf[s])
+        byte c = lcase[lbuf[s]]
         if c == 'b' then
             code = 0
         elseif c == 'c' then
@@ -1030,7 +1168,7 @@ function reg8(byte o, word s, word e) -> bool
         elseif c == 'a' then
             code = 7
         end
-    elseif lc(lbuf[s]) ~= 'x' and lc(lbuf[s]) ~= 'y' and lc(lbuf[s + 1]) ~= 'x' and lc(lbuf[s + 1]) ~= 'y' then
+    elseif lcase[lbuf[s]] ~= 'x' and lcase[lbuf[s]] ~= 'y' and lcase[lbuf[s + 1]] ~= 'x' and lcase[lbuf[s + 1]] ~= 'y' then
         -- two or three letters: only the halves of ix / iy are registers
         return false
     elseif rng_is(s, e, "b") then
@@ -1604,13 +1742,10 @@ end
 
 -- id of the mnemonic in opbuf (lower case), 0 if unknown
 function mn_find() -> byte
-    word h = 0
-    byte i = 0
-    while i < oplen do
-        h = (h << 5) - h + opbuf[i]
-        i += 1
-    end
-    byte m = byte(mn_head[h & 63])
+    hb_addr = addr(opbuf)
+    hb_len = oplen
+    buf_hash()
+    byte m = byte(mn_head[hb_h & 63])
     while m ~= 0 do
         if len(mnems[m - 1]) == oplen then
             byte k = 0
@@ -1949,45 +2084,192 @@ function page_used(byte p) -> bool
     return false
 end
 
--- the 8K of image slot s (0: zeros) into the output
+-- the 8K of image slot s (0: zeros) into the output, 256 bytes at a time
+-- (copied from the page at $2000: esxDOS does not see that slot)
+word po_src = 0
 function page_out(byte s)
-    word j = 0
+    flush()
     if s == 0 then
-        while j < 8192 do
-            out_byte(0)
-            j += 1
-        end
-        return
+        for k = 0, 255 do obuf[k] = 0 end
     end
-    byte a = slot_arr[s]
-    word o = slot_base[s]
-    word e = o + 8192
-    if a == 0 then
-        while o < e do
-            out_byte(img0[o])
-            o += 1
+    word j = 0
+    while j < 8192 do
+        if s ~= 0 then
+            byte d = img_get(s, j)      -- (maps the page at $2000)
+            po_src = 0x2000 + j
+            asm
+                ld hl,(g_po_src)
+                ld de,g_obuf
+                ld bc,256
+                ldir
+            end
         end
-    elseif a == 1 then
-        while o < e do
-            out_byte(img1[o])
-            o += 1
-        end
-    elseif a == 2 then
-        while o < e do
-            out_byte(img2[o])
-            o += 1
-        end
-    elseif a == 3 then
-        while o < e do
-            out_byte(img3[o])
-            o += 1
-        end
-    else
-        while o < e do
-            out_byte(img4[o])
-            o += 1
+        file_write(outh, addr(obuf), 256)
+        j += 256
+    end
+end
+
+-- ibuf[from..from+n) into image slot s from offset off (inside its 8K)
+word ic_from = 0
+function img_copy(byte s, word off, word from, word n)
+    img_put(s, off, ibuf[from])         -- (maps the page at $2000)
+    po_src = 0x2000 + off
+    ic_from = addr(ibuf) + from
+    rx_n = n
+    asm
+        ld hl,(g_ic_from)
+        ld de,(g_po_src)
+        ld bc,(g_rx_n)
+        ldir
+    end
+end
+
+-- ibuf[0..n) emitted: the bytes up to the end of an 8K slot in one go, the
+-- first byte of a slot through emit (the MMU guards)
+function emit_block(word n)
+    word i = 0
+    while i < n do
+        word w = word(pc)
+        if not strict or pc < 0 or pc > 0xFFFF or (w & 0x1FFF) == 0 then
+            emit(ibuf[i])
+            i += 1
+        else
+            word k = 8192 - (w & 0x1FFF)
+            if k > n - i then k = n - i end
+            byte page = slots[byte(w >> 13)]
+            if page < 224 then
+                byte s = pdir[page]
+                if s == 0 then s = page_slot(page) end
+                if s ~= 0 then img_copy(s, w & 0x1FFF, i, k) end
+            end
+            last_write = pc + k - 1
+            pc += k
+            i += k
         end
     end
+end
+
+-- a db line of plain bytes ($h, $hh, decimal up to 255, commas, blanks):
+-- parsed in assembly into ibuf and emitted as a block; false (nothing done)
+-- for anything else
+word dp_s = 0
+byte dp_n = 0
+byte dp_ok = 0
+function db_fast(word s, word e) -> bool
+    if e <= s then return false end
+    byte keep = lbuf[e]
+    lbuf[e] = 0                         -- (the end)
+    dp_s = s
+    asm
+        ld hl,(g_dp_s)
+        ld de,g_lbuf
+        add hl,de
+        ld de,g_ibuf
+        xor a
+        ld (g_dp_n),a
+        ld (g_dp_ok),a
+.item:
+        ld a,(hl)
+        cp ' '
+        jr z,.ws
+        cp 9
+        jr nz,.val
+.ws:
+        inc hl
+        jr .item
+.val:
+        cp '$'
+        jr z,.hex
+        sub '0'
+        cp 10
+        jr nc,.bad
+        ld b,a
+        inc hl
+.dl:
+        ld a,(hl)
+        sub '0'
+        cp 10
+        jr nc,.got
+        ld c,a
+        ld a,b
+        cp 26
+        jr nc,.bad
+        add a,a
+        ld b,a
+        add a,a
+        add a,a
+        add a,b
+        add a,c
+        jr c,.bad
+        ld b,a
+        inc hl
+        jr .dl
+.hex:
+        inc hl
+        ld a,(hl)
+        or $20
+        sub '0'
+        cp 10
+        jr c,.h1
+        sub 49
+        cp 6
+        jr nc,.bad
+        add a,10
+.h1:
+        ld b,a
+        inc hl
+        ld a,(hl)
+        or $20
+        sub '0'
+        cp 10
+        jr c,.h2
+        sub 49
+        cp 6
+        jr nc,.got
+        add a,10
+.h2:
+        ld c,a
+        ld a,b
+        add a,a
+        add a,a
+        add a,a
+        add a,a
+        or c
+        ld b,a
+        inc hl
+.got:
+        ld a,b
+        ld (de),a
+        inc de
+        ld a,(g_dp_n)
+        inc a
+        jr z,.bad
+        ld (g_dp_n),a
+.sep:
+        ld a,(hl)
+        cp ' '
+        jr z,.ws2
+        cp 9
+        jr nz,.sep2
+.ws2:
+        inc hl
+        jr .sep
+.sep2:
+        or a
+        jr z,.ok
+        cp ','
+        jr nz,.bad
+        inc hl
+        jp .item
+.ok:
+        ld a,1
+        ld (g_dp_ok),a
+.bad:
+    end
+    lbuf[e] = keep
+    if dp_ok == 0 then return false end
+    emit_block(dp_n)
+    return true
 end
 
 function has_bank(byte b) -> bool
@@ -2081,7 +2363,7 @@ function savenex(word s, word e)
     trim(s, e)
     s = ts
     word w = s
-    while w < te and not is_blank(lbuf[w]) do w += 1 end
+    while w < te and not ((cc[lbuf[w]] & CC_BLANK) ~= 0) do w += 1 end
     word cs = s
     word ce = w
     split_ops(w, te)
@@ -2160,8 +2442,8 @@ function mmu(word s, word e)
     word a = ts
     word b = te
     byte opt = 0
-    if b - a >= 2 and is_blank(lbuf[b - 2]) then
-        byte c = lc(lbuf[b - 1])
+    if b - a >= 2 and ((cc[lbuf[b - 2]] & CC_BLANK) ~= 0) then
+        byte c = lcase[lbuf[b - 1]]
         if c == 'e' or c == 'n' or c == 'w' then
             opt = c
             b -= 1
@@ -2171,7 +2453,7 @@ function mmu(word s, word e)
     end
     -- one or two slot numbers
     word m = a
-    while m < b and not is_blank(lbuf[m]) do m += 1 end
+    while m < b and not ((cc[lbuf[m]] & CC_BLANK) ~= 0) do m += 1 end
     long lo = ev(a, m)
     long hi = lo
     trim(m, b)
@@ -2192,6 +2474,7 @@ function mmu(word s, word e)
         guard[byte(k)] = opt
         k += 1
     end
+    sv += 1
     if nops > 1 then
         pc = ev(ors[1], ore[1])
         last_write = -1
@@ -2270,8 +2553,46 @@ function incbin(word s, word e)
         last_write = pc - 1
         return
     end
-    -- (read in blocks)
-    if strict then file_seek(h, off) end
+    -- (read in blocks: the bytes up to the end of an 8K slot go into the
+    -- image in one go; the first byte of a slot goes through emit, which
+    -- checks the MMU guards)
+    if strict then
+        file_seek(h, off)
+        while n > 0 and not failed do
+            word w = word(pc)
+            if pc < 0 or pc > 0xFFFF or (w & 0x1FFF) == 0 then
+                if file_read(h, addr(ibuf), 1) == 0 then
+                    if fail() then msg("INCBIN: the file ends early") end
+                    break
+                end
+                byte page = slots[byte(pc >> 13)]
+                if page < 224 then pkeep[page] = 1 end
+                emit(ibuf[0])
+                n -= 1
+            else
+                word k = 8192 - (w & 0x1FFF)
+                if n < k then k = word(n) end
+                if k > 256 then k = 256 end
+                word got = file_read(h, addr(ibuf), k)
+                if got == 0 then
+                    if fail() then msg("INCBIN: the file ends early") end
+                    break
+                end
+                byte page = slots[byte(w >> 13)]
+                if page < 224 then
+                    pkeep[page] = 1
+                    byte s = pdir[page]
+                    if s == 0 then s = page_slot(page) end
+                    if s ~= 0 then img_copy(s, w & 0x1FFF, 0, got) end
+                end
+                last_write = pc + got - 1
+                pc += got
+                n -= got
+            end
+        end
+        file_close(h)
+        return
+    end
     word got = 0
     word bp = 0
     while n > 0 and not failed do
@@ -2319,6 +2640,10 @@ function pseudo_or_insn(byte id, word as_, word ae)
         return
     end
     if id >= M_DB and id <= M_DZ then
+        if db_fast(as_, ae) then
+            if id == M_DZ then emit(0) end
+            return
+        end
         items_begin(as_, ae)
         while items_next() do
             if not db_string(it_s, it_e) then
@@ -2400,7 +2725,12 @@ function pseudo_or_insn(byte id, word as_, word ae)
         return
     end
     if id == M_SAVENEX then
-        savenex(as_, ae)
+        -- (the one pass: at the end, after the kept lines)
+        if deferring then
+            sn_defer = true
+        else
+            savenex(as_, ae)
+        end
         return
     end
     -- an instruction
@@ -2469,29 +2799,261 @@ function strip_comment()
         elseif c == '"' then
             quote = c
         elseif c == 39 then
-            bool af = i >= 2 and lc(lbuf[i - 2]) == 'a' and lc(lbuf[i - 1]) == 'f'
-            if af and i >= 3 and is_ident_char(lbuf[i - 3]) then af = false end
+            bool af = i >= 2 and lcase[lbuf[i - 2]] == 'a' and lcase[lbuf[i - 1]] == 'f'
+            if af and i >= 3 and ((cc[lbuf[i - 3]] & CC_IDENT) ~= 0) then af = false end
             if not af then quote = c end
         end
         i += 1
     end
 end
 
+-- ---------------------------------------------------------------- one pass
+
+far noinit byte rp[64000]          -- the kept lines: 21 bytes each (rh)
+word rp_len = 0
+word nrp = 0
+byte rh[21]                 -- lno, pc, last_write, pc after, gsym, snapshot, file offset
+long rec_before = 0
+long rec_lw = 0
+long rec_after = 0
+-- slots and guard before the line: snapshots (a new one when they change)
+const MAXSNAP = 128
+byte snap_slots[1024]
+byte snap_guard[1024]
+byte nsnap = 0
+byte snap_cur = 0
+byte rs_v = 255             -- sv of the last snapshot
+byte cur_id = 0             -- the mnemonic / pseudo-op of the line
+
+-- n bytes of memory at src (not $2000..$3FFF) to the end of rp
+word rx_near = 0
+word rx_far = 0
+word rx_n = 0
+function rp_put(word src, word n)
+    if n > 64000 - rp_len then
+        need_full = true
+        return
+    end
+    while n > 0 do
+        rp[rp_len] = 0              -- (maps the page at $2000)
+        word k = 8192 - (rp_len & 8191)
+        if k > n then k = n end
+        rx_near = src
+        rx_far = 0x2000 + (rp_len & 8191)
+        rx_n = k
+        asm
+            ld hl,(g_rx_near)
+            ld de,(g_rx_far)
+            ld bc,(g_rx_n)
+            ldir
+        end
+        src += k
+        rp_len += k
+        n -= k
+    end
+end
+
+-- rp[pos..pos+n) to memory at dst
+function rp_get(word pos, word dst, word n)
+    while n > 0 do
+        byte d = rp[pos]            -- (maps the page at $2000)
+        word k = 8192 - (pos & 8191)
+        if k > n then k = n end
+        rx_near = dst
+        rx_far = 0x2000 + (pos & 8191)
+        rx_n = k
+        asm
+            ld hl,(g_rx_far)
+            ld de,(g_rx_near)
+            ld bc,(g_rx_n)
+            ldir
+        end
+        dst += k
+        pos += k
+        n -= k
+    end
+end
+
+-- keep the line (its number and the state before it; the text is read
+-- again from the file)
+function rp_save()
+    asm
+        ld de,g_rh
+        ld hl,g_lno
+        ld bc,2
+        ldir
+        ld hl,g_rec_before
+        ld bc,4
+        ldir
+        ld hl,g_rec_lw
+        ld bc,4
+        ldir
+        ld hl,g_pc
+        ld bc,4
+        ldir
+        ld hl,g_gsym
+        ld bc,2
+        ldir
+        ld a,(g_snap_cur)
+        ld (de),a
+        inc de
+        ld hl,g_ln_off
+        ld bc,4
+        ldir
+    end
+    rp_put(addr(rh), 21)
+    nrp += 1
+end
+
+-- assemble the kept lines again, in order (every symbol is known now): they
+-- are read from the file again (from their offsets: the blocks between are
+-- skipped); a line that comes out with another size: need_full
+word rl_no = 0
+long rl_off = 0
+function replay_all()
+    inh = file_open(in_name, FILE_READ)
+    if inh == FILE_ERROR then
+        need_full = true
+        return
+    end
+    in_eof = false
+    rb_pos = 0
+    rb_len = 0
+    rd_off = 0
+    word pos = 0
+    word k = 0
+    replaying = true
+    while k < nrp and not failed and not need_full do
+        rp_get(pos, addr(rh), 21)
+        pos += 21
+        asm
+            ld hl,g_rh
+            ld de,g_rl_no
+            ld bc,2
+            ldir
+            ld de,g_pc
+            ld bc,4
+            ldir
+            ld de,g_last_write
+            ld bc,4
+            ldir
+            ld de,g_rec_after
+            ld bc,4
+            ldir
+            ld de,g_gsym
+            ld bc,2
+            ldir
+            ld a,(hl)
+            ld (g_snap_cur),a
+            inc hl
+            ld de,g_rl_off
+            ld bc,4
+            ldir
+        end
+        -- the block that holds the line
+        while rl_off >= rd_off + rb_len and not need_full do
+            rd_off += rb_len
+            rb_len = file_read(inh, addr(rb), 512)
+            rb_pos = 0
+            if rb_len == 0 then need_full = true end
+        end
+        if need_full then break end
+        rb_pos = word(rl_off - rd_off)
+        in_eof = false
+        if not read_text_ln() then
+            need_full = true
+            break
+        end
+        lno = rl_no
+        word sb = word(snap_cur) * 8
+        for i = 0, 7 do
+            slots[i] = snap_slots[sb + i]
+            guard[i] = snap_guard[sb + i]
+        end
+        -- the last global label (for `.local` names)
+        glen = 0
+        if gsym ~= 0 then
+            word o = soff[gsym]
+            byte n = slen[gsym]
+            if n > 128 then n = 128 end
+            byte i = 0
+            while i < n do
+                gbuf[i] = spool[o + i]
+                i += 1
+            end
+            glen = n
+        end
+        sv += 1
+        source_ln_body()
+        if not failed and pc ~= rec_after then need_full = true end
+        k += 1
+    end
+    replaying = false
+    file_close(inh)
+end
+
+-- every image slot cleared (before the classic passes)
+function clear_image()
+    byte s = 1
+    while s <= nslots do
+        img_put(s, 0, 0)                -- (maps the page at $2000)
+        dma_fill(0x2000, 8192, 0)
+        s += 1
+    end
+    for i = 0, 223 do pkeep[i] = 0 end
+end
+
 function do_source_ln()
+    if not deferring then
+        source_ln_body()
+        return
+    end
+    line_undef = false
+    sn_defer = false
+    if rs_v ~= sv then
+        if nsnap >= MAXSNAP then
+            need_full = true
+        else
+            word sb = word(nsnap) * 8
+            for i = 0, 7 do
+                snap_slots[sb + i] = slots[i]
+                snap_guard[sb + i] = guard[i]
+            end
+            snap_cur = nsnap
+            nsnap += 1
+        end
+        rs_v = sv
+    end
+    rec_before = pc
+    rec_lw = last_write
+    source_ln_body()
+    if sn_defer then
+        rp_save()
+    elseif line_undef then
+        byte id = cur_id
+        if id < M_OPT or (id >= M_DB and id < M_DS) or id == M_ASSERT then
+            rp_save()
+        else
+            need_full = true
+        end
+    end
+end
+
+function source_ln_body()
     strip_comment()
     here = pc
     word p = 0
     word lab_s = 0
     word lab_e = 0
-    if llen > 0 and is_ident_start(lbuf[0]) then
-        while p < llen and is_ident_char(lbuf[p]) do p += 1 end
+    if llen > 0 and ((cc[lbuf[0]] & CC_START) ~= 0) then
+        while p < llen and ((cc[lbuf[p]] & CC_IDENT) ~= 0) do p += 1 end
         lab_e = p
         if p < llen and lbuf[p] == ':' then p += 1 end
     else
-        while p < llen and is_blank(lbuf[p]) do p += 1 end
-        if p < llen and is_ident_start(lbuf[p]) then
+        while p < llen and ((cc[lbuf[p]] & CC_BLANK) ~= 0) do p += 1 end
+        if p < llen and ((cc[lbuf[p]] & CC_START) ~= 0) then
             word q = p
-            while q < llen and is_ident_char(lbuf[q]) do q += 1 end
+            while q < llen and ((cc[lbuf[q]] & CC_IDENT) ~= 0) do q += 1 end
             if q < llen and lbuf[q] == ':' then
                 lab_s = p
                 lab_e = q
@@ -2500,18 +3062,19 @@ function do_source_ln()
         end
     end
     -- the mnemonic / pseudo-op
-    while p < llen and is_blank(lbuf[p]) do p += 1 end
+    while p < llen and ((cc[lbuf[p]] & CC_BLANK) ~= 0) do p += 1 end
     oplen = 0
-    while p < llen and not is_blank(lbuf[p]) do
+    while p < llen and not ((cc[lbuf[p]] & CC_BLANK) ~= 0) do
         if oplen < 15 then
-            opbuf[oplen] = lc(lbuf[p])
+            opbuf[oplen] = lcase[lbuf[p]]
         end
         oplen += 1
         p += 1
     end
     byte id = 0
     if oplen > 0 and oplen <= 15 then id = mn_find() end
-    if lab_e > lab_s then
+    cur_id = id
+    if lab_e > lab_s and not replaying then
         if id >= M_EQU and id <= M_DEFL then
             long v = ev(p, llen)
             define(lab_s, lab_e, v)
@@ -2550,11 +3113,13 @@ function run_pass()
     slots[6] = 0
     slots[7] = 1
     for i = 0, 7 do guard[i] = 0 end
+    sv += 1
     for i = 0, 223 do pdir[i] = 0 end
     nslots = 0
     in_eof = false
     rb_pos = 0
     rb_len = 0
+    rd_off = 0
     inh = file_open(in_name, FILE_READ)
     if inh == FILE_ERROR then
         failed = true
@@ -2563,7 +3128,7 @@ function run_pass()
         msg("cannot open the input (in.asm or out.asm)")
         return
     end
-    while not failed and read_text_ln() do
+    while not failed and not need_full and read_text_ln() do
         lno += 1
         do_source_ln()
     end
@@ -2577,17 +3142,34 @@ log_start(false)
 log_note("asm: assembling...")
 string in_name = "in.asm"
 if not file_exists(in_name) then in_name = "out.asm" end
+cc_init()
 mn_init()
 slot_tables()
 nex_init_order()
-strict = false
-run_pass()
+-- one pass and the kept lines
 strict = true
-byte rounds = 0
-while true do
+deferring = true
+run_pass()
+deferring = false
+bool full = failed or need_full
+if not full then
+    replay_all()
+    full = need_full
+end
+if full then
+    -- the classic passes: a forward reference may change a size, or a line
+    -- failed (reported as they report it)
+    clear_image()
+    need_full = false
+    strict = false
     run_pass()
-    rounds += 1
-    if failed or not changed or rounds >= 8 then break end
+    strict = true
+    byte rounds = 0
+    while true do
+        run_pass()
+        rounds += 1
+        if failed or not changed or rounds >= 8 then break end
+    end
 end
 if failed then
     outh = file_open("asm.err", FILE_WRITE)
@@ -2621,7 +3203,7 @@ else
     end
     log_s("asm: ")
     log_n(pass)
-    log_s(" passes, ")
+    if pass == 1 then log_s(" pass, ") else log_s(" passes, ") end
     log_n(nsym)
     log_s(" symbols, wrote ")
     log_s(name)

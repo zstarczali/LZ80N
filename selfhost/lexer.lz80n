@@ -64,6 +64,9 @@ const T_DOT = 64
 const T_ARROW = 65
 const T_EOF = 66
 const T_ERROR = 255
+const T_FILE = 254              -- the records after it are of file `line >> 13`
+                                -- (their lines do not have it): a module copied
+                                -- from its .tok file; file 0 ends it
 
 const NKEYWORDS = 25
 string keywords[] = {
@@ -84,10 +87,20 @@ word cno = 1
 bool failed = false
 bool expand = false             -- expand includes and modules (expand.on)
 
+-- the input is read in 512-byte blocks
+byte ib[512]
+word ib_pos = 0
+word ib_len = 0
+
 function next_in() -> byte
-    word g = file_getc(inh)
-    if g == FILE_EOF then return 0 end
-    return byte(g)
+    if ib_pos >= ib_len then
+        ib_len = file_read(inh, addr(ib), 512)
+        ib_pos = 0
+        if ib_len == 0 then return 0 end
+    end
+    byte c = ib[ib_pos]
+    ib_pos += 1
+    return c
 end
 
 -- size - pos, at most 60000 (word arithmetic while it is above 2)
@@ -167,7 +180,7 @@ end
 byte outh
 byte obuf[256]
 word olen = 0
-far byte text[32000]            -- text of the current token
+far noinit byte text[32000]            -- text of the current token
 word tlen = 0
 
 function flush()
@@ -661,6 +674,8 @@ function lex_file(string name) -> bool
     end
     size = file_size(inh)
     pos = 0
+    ib_pos = 0
+    ib_len = 0
     sync_rest()
     c0 = 0
     c1 = 0
@@ -677,6 +692,43 @@ function lex_file(string name) -> bool
     file_close(inh)
     fidx = outer
     return true
+end
+
+-- a standard module lexed by the export (lib/lib_x.tok next to
+-- lib/lib_x.lz80n): its records copied, between two T_FILE records; false
+-- if there is no .tok file
+function copy_tokens(string name) -> bool
+    byte h = file_open(sub(name, 0, len(name) - 6) .. ".tok", FILE_READ)
+    if h == FILE_ERROR then return false end
+    -- the number of the file, as lex_file gives it
+    byte f = 7
+    if nfiles < 8 then
+        f = nfiles
+        src_names[nfiles] = name
+        nfiles += 1
+    end
+    out_byte(T_FILE)
+    out_word(word(f) * 8192)
+    out_word(0)
+    flush()
+    -- a word: the number of tokens, then the records
+    if file_read(h, addr(ib), 2) == 2 then ntokens += word(ib[0]) | word(ib[1]) << 8 end
+    word got = file_read(h, addr(ib), 512)
+    while got > 0 do
+        file_write(outh, addr(ib), got)
+        got = file_read(h, addr(ib), 512)
+    end
+    file_close(h)
+    out_byte(T_FILE)
+    out_word(0)
+    out_word(0)
+    return true
+end
+
+-- lex a module, or copy its tokens when the export made them
+function lex_module(string name) -> bool
+    if copy_tokens(name) then return true end
+    return lex_file(name)
 end
 
 -- `include "path"` (the keyword is read): lex that file here, once
@@ -739,6 +791,8 @@ function include_file(word l, word c)
     lno = ln
     cno = cn
     file_seek(inh, pos + 2)
+    ib_pos = 0
+    ib_len = 0
 end
 
 -- the standard modules, in the order compiler/src/main.rs puts them in
@@ -794,42 +848,131 @@ end
 
 -- which modules does the main file mention? (a plain text search, as
 -- compiler/src/prelude.rs does: comments and strings count too)
+-- The file is read in blocks; fm_scan (in assembly) looks at each position
+-- whose character starts a pattern and compares the patterns that start
+-- with it (a chain for each first character).
+byte fm_buf[560]                -- 16 kept + 512 read + 16 zeros
+byte fm_first[128]              -- first pattern (+1) starting with a character
+byte fm_next[28]                -- the next one with the same first character (+1)
+byte fm_pat[336]                -- 12 bytes a pattern: its length, its characters
+byte fm_hit[28]
+word fm_n = 0                   -- the positions to look at
+byte fm_k = 0
+
+function fm_scan()
+    asm
+        ld hl,g_fm_buf
+        ld bc,(g_fm_n)
+.pos:
+        ld a,b
+        or c
+        jr z,.done
+        ld a,(hl)
+        and 127
+        ld e,a
+        ld d,0
+        push hl
+        ld hl,g_fm_first
+        add hl,de
+        ld a,(hl)
+        pop hl
+        or a
+        jr z,.next
+.pat:
+        dec a
+        ld (g_fm_k),a
+        push bc
+        push hl
+        ld e,a
+        ld d,12
+        mul d,e
+        push hl
+        ld hl,g_fm_pat
+        add hl,de
+        ex de,hl                ; de = the pattern
+        pop hl                  ; hl = the position
+        ld a,(de)
+        ld b,a
+        inc de
+.cmp:
+        ld a,(de)
+        cp (hl)
+        jr nz,.miss
+        inc de
+        inc hl
+        djnz .cmp
+        ld a,(g_fm_k)
+        ld e,a
+        ld d,0
+        ld hl,g_fm_hit
+        add hl,de
+        ld (hl),1
+.miss:
+        pop hl
+        pop bc
+        ld a,(g_fm_k)
+        ld e,a
+        ld d,0
+        push hl
+        ld hl,g_fm_next
+        add hl,de
+        ld a,(hl)
+        pop hl
+        or a
+        jr nz,.pat
+.next:
+        inc hl
+        dec bc
+        jr .pos
+.done:
+    end
+end
+
 function find_modules()
     byte h = file_open("in.lz80n", FILE_READ)
     if h == FILE_ERROR then return end
-    byte prog[28]               -- characters of each pattern matched so far
-    for k = 0, NPATTERNS - 1 do prog[k] = 0 end
-    -- the characters that start a pattern: other characters are skipped
-    -- quickly while no pattern is half matched
-    byte starts[128]
-    for k = 0, 127 do starts[k] = 0 end
-    for k = 0, NPATTERNS - 1 do starts[asc(patterns[k], 0) & 127] = 1 end
-    byte busy = 0               -- patterns with prog > 0
-    word g = file_getc(h)
-    while g ~= FILE_EOF do
-        byte ch = byte(g)
-        if busy ~= 0 or starts[ch & 127] ~= 0 then
-        busy = 0
-        for k = 0, NPATTERNS - 1 do
-            byte m = prog[k]
-            if asc(patterns[k], m) == ch then
-                m += 1
-                if m == len(patterns[k]) then
-                    module_used[pattern_module[k]] = true
-                    m = 0
-                end
-            elseif asc(patterns[k], 0) == ch then
-                m = 1
-            else
-                m = 0
-            end
-            prog[k] = m
-            if m ~= 0 then busy += 1 end
+    for k = 0, 127 do fm_first[k] = 0 end
+    for k = 0, NPATTERNS - 1 do
+        byte c = asc(patterns[k], 0) & 127
+        fm_next[k] = fm_first[c]
+        fm_first[c] = k + 1
+        byte n = len(patterns[k])
+        word pa = word(k) * 12
+        fm_pat[pa] = n
+        for j = 0, n - 1 do fm_pat[pa + 1 + j] = asc(patterns[k], j) end
+        fm_hit[k] = 0
+    end
+    word have = 0
+    bool eof = false
+    while true do
+        if not eof then
+            word got = file_read(h, addr(fm_buf) + have, 512)
+            if got == 0 then eof = true end
+            have += got
         end
+        -- (the last 16 characters wait for the next block: no pattern is longer)
+        word n = 0
+        if eof then
+            n = have
+        elseif have > 16 then
+            n = have - 16
         end
-        g = file_getc(h)
+        for k = 0, 15 do fm_buf[have + k] = 0 end
+        fm_n = n
+        fm_scan()
+        word r = have - n
+        word i = 0
+        while i < r do
+            fm_buf[i] = fm_buf[n + i]
+            i += 1
+        end
+        have = r
+        if eof then break end
     end
     file_close(h)
+    for k = 0, NPATTERNS - 1 do
+        if fm_hit[k] ~= 0 then module_used[pattern_module[k]] = true end
+    end
 end
 
 -- ---------------------------------------------------------------- main
@@ -857,12 +1000,12 @@ end
 outh = file_open("tokens.bin", FILE_WRITE)
 if expand then
     -- the built-in constants (KEY_A, BLACK, ...) come first
-    if not lex_file("lib/lib_consts.lz80n") then error(1, 1, "cannot read lib/lib_consts.lz80n") end
+    if not lex_module("lib/lib_consts.lz80n") then error(1, 1, "cannot read lib/lib_consts.lz80n") end
     drop_all_bars()
     find_modules()
     for k = 0, NMODULES - 1 do
         if module_used[k] and not failed then
-            if not lex_file(module_files[k]) then error(1, 1, "cannot read " .. module_files[k]) end
+            if not lex_module(module_files[k]) then error(1, 1, "cannot read " .. module_files[k]) end
         end
     end
 end

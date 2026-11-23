@@ -109,7 +109,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "lz80nc"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "embed-resource",
  "png",

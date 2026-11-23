@@ -189,6 +189,7 @@ function out_node(word n)
         out_list(n1[n])
     elseif k == S_FAR then
         open("far", n)
+        if nf[n] ~= 0 then out_s(" noinit") end
         out_opt(n1[n])
     elseif k == S_VAR then
         open("var", n)

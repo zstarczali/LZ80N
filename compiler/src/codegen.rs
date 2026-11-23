@@ -203,6 +203,8 @@ struct Gen {
     images: Vec<(String, crate::assets::Image, u32)>,
     /// Contents of the banked 8K pages (pictures, far arrays): (page, bytes, note).
     far_pages: Vec<(u32, Vec<u8>, String)>,
+    /// pages of `far noinit` arrays: not cleared at startup
+    noinit_pages: std::collections::HashSet<u32>,
     /// Compiled functions, kept apart so they can be banked: (key, label, code).
     fn_chunks: Vec<(String, String, String)>,
     base_dir: std::path::PathBuf,
@@ -745,7 +747,7 @@ impl Gen {
             if let Item::Stmt(s) = item {
                 let r = match &s.kind {
                     StmtKind::VarDecl { is_const: false, .. } => self.declare_global(s),
-                    StmtKind::Far(inner) => self.declare_far(inner),
+                    StmtKind::Far(inner, noinit) => self.declare_far(inner, *noinit),
                     _ => Ok(()),
                 };
                 if let Err(d) = r {
@@ -764,7 +766,7 @@ impl Gen {
             if let Item::Stmt(s) = item {
                 let r = match &s.kind {
                     StmtKind::VarDecl { name, init, is_const: false, .. } => self.init_global(name, init, s.pos),
-                    StmtKind::VarDecl { .. } | StmtKind::Asset { .. } | StmtKind::Far(_) => Ok(()),
+                    StmtKind::VarDecl { .. } | StmtKind::Asset { .. } | StmtKind::Far(..) => Ok(()),
                     _ => self.stmt(s),
                 };
                 if let Err(d) = r {
@@ -867,7 +869,7 @@ impl Gen {
         Ok(first)
     }
 
-    fn declare_far(&mut self, s: &Stmt) -> R<()> {
+    fn declare_far(&mut self, s: &Stmt, noinit: bool) -> R<()> {
         let StmtKind::VarDecl { ty: Some(tr), name, array, init, .. } = &s.kind else { unreachable!() };
         self.check_new_name(name, s.pos)?;
         let ty = match self.resolve_type(tr, s.pos)? {
@@ -905,6 +907,9 @@ impl Gen {
         for k in 0..pages as usize {
             let chunk = bytes[k * 8192..((k + 1) * 8192).min(bytes_len)].to_vec();
             self.far_pages.push((first + k as u32, chunk, format!("far {name}")));
+            if noinit {
+                self.noinit_pages.insert(first + k as u32);
+            }
         }
         self.globals.insert(name.clone(), Sym::Far { ty, len, sub, page: first });
         Ok(())
@@ -1945,7 +1950,7 @@ impl Gen {
             }
             StmtKind::For { var, start, end, step, body } => self.for_loop(s.pos, var, start, end, step, body),
             StmtKind::Asset { .. } => Err(Diag::new(s.pos, "`asset` declarations must be at the top level")),
-            StmtKind::Far(_) => Err(Diag::new(s.pos, "`far` arrays must be declared at the top level")),
+            StmtKind::Far(..) => Err(Diag::new(s.pos, "`far` arrays must be declared at the top level")),
             StmtKind::Return(e) => {
                 if let Some(id) = self.cur_ret_struct {
                     let Some(e) = e else { return Err(Diag::new(s.pos, "missing return value")) };
@@ -5481,10 +5486,12 @@ impl Gen {
             .filter(|(sz, _)| *sz <= PAGE_CAP)
             .collect();
         cands.sort_by(|a, b| b.0.cmp(&a.0));
-        for (sz, key) in cands {
-            if size <= RESIDENT_LIMIT {
-                break;
-            }
+        // the largest ones first; at the end the smallest one that is enough
+        // alone, so small (often called) functions stay resident
+        while size > RESIDENT_LIMIT && !cands.is_empty() {
+            let excess = size - RESIDENT_LIMIT;
+            let pick = cands.iter().rposition(|(sz, _)| sz.saturating_sub(STUB_SIZE) >= excess).unwrap_or(0);
+            let (sz, key) = cands.remove(pick);
             banked.insert(key);
             size = size.saturating_sub(sz) + STUB_SIZE;
         }
@@ -5534,9 +5541,12 @@ impl Gen {
         for (k, (_, members)) in pages.iter().enumerate() {
             let page = first + k;
             let _ = writeln!(pages_text, "; code page {page}\n    MMU 2 e, {page}\n    ORG $4000");
+            // calls between functions of the same page need no rt_bcall
+            let here: HashSet<&str> = members.iter().map(|&i| self.fn_chunks[i].1.as_str()).collect();
             for &i in members {
                 let (_, label, _) = &self.fn_chunks[i];
                 let code = self.chunk_code(i, opts).replacen(&format!("\n{label}:\n"), &format!("\n{label}_bank:\n"), 1);
+                let code = same_page_calls(&code, &here);
                 pages_text.push_str(&code);
                 let _ = writeln!(stubs, "{label}:\n    ld hl,{label}_bank\n    ld a,{page}\n    jp rt_bcall");
             }
@@ -5671,7 +5681,11 @@ impl Gen {
 
     /// Pages cleared at startup.
     fn zero_pages(&self) -> Vec<u32> {
-        self.far_pages.iter().filter(|(_, b, _)| Self::zero_page(b)).map(|(p, _, _)| *p).collect()
+        self.far_pages
+            .iter()
+            .filter(|(p, b, _)| Self::zero_page(b) && !self.noinit_pages.contains(p))
+            .map(|(p, _, _)| *p)
+            .collect()
     }
 }
 
@@ -5682,6 +5696,25 @@ const RESIDENT_LIMIT: usize = 30500;
 const OUTLINE_MIN: usize = 48;
 const PAGE_CAP: usize = 7800;
 const STUB_SIZE: usize = 8;
+
+/// `call f` -> `call f_bank` for the functions `here` (they are in the code
+/// page of the caller).
+fn same_page_calls(code: &str, here: &HashSet<&str>) -> String {
+    let mut out = String::with_capacity(code.len() + 64);
+    for line in code.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if let Some(target) = body.trim_start().strip_prefix("call ") {
+            if here.contains(target.trim()) {
+                out.push_str(body.trim_end());
+                out.push_str("_bank");
+                out.push_str(&line[body.len()..]);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
 
 /// Estimated size of the resident part of an output (up to `__program_end`).
 pub(crate) fn resident_size(out: &str) -> usize {

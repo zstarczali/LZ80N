@@ -79,6 +79,7 @@ const T_DOT = 64
 const T_ARROW = 65
 const T_EOF = 66
 const T_ERROR = 255
+const T_FILE = 254      -- (lexer.lz80n) the lines of the records after it are of file `line >> 13`
 
 -- debug names of the token kinds (as Rust's `{:?}`, lower case)
 -- the names of the token kinds (for messages), separated by spaces
@@ -179,16 +180,16 @@ const B_LOR = 18
 -- ---------------------------------------------------------------- tokens
 
 const MAX_TOKENS = 48000
-far byte tk[48000]          -- kind
+far noinit byte tk[48000]          -- kind
 -- (words as two byte arrays: a far array holds at most 64K bytes, so a
 -- word array at most 32767 elements)
-far byte tl_lo[48000]       -- line
-far byte tl_hi[48000]
-far byte tc_[48000]         -- column (at most 255)
-far byte to_lo[48000]       -- text: offset in tpool (numbers: their 4 bytes there)
-far byte to_hi[48000]
-far byte tn_lo[48000]       -- text: length
-far byte tn_hi[48000]
+far noinit byte tl_lo[48000]       -- line
+far noinit byte tl_hi[48000]
+far noinit byte tc_[48000]         -- column (at most 255)
+far noinit byte to_lo[48000]       -- text: offset in tpool (numbers: their 4 bytes there)
+far noinit byte to_hi[48000]
+far noinit byte tn_lo[48000]       -- text: length
+far noinit byte tn_hi[48000]
 
 function tlno(word t) -> word
     return word(tl_hi[t]) << 8 | tl_lo[t]
@@ -221,12 +222,12 @@ function tval_hi(word t) -> word
     word o = toff_(t)
     return word(tpool[o + 2]) | word(tpool[o + 3]) << 8
 end
-far byte tpool[60000]
+far noinit byte tpool[60000]
 -- identifiers are interned: equal names share their text (and offset)
 far word ihead[4096]
-far word ioff[8000]
-far word ilen[8000]
-far word inext[8000]
+far noinit word ioff[8000]
+far noinit word ilen[8000]
+far noinit word inext[8000]
 word nint = 0
 word ntok = 1                -- token 0 is unused: 0 means "none"
 word pool_len = 0
@@ -234,13 +235,112 @@ word pool_len = 0
 byte inh
 bool eof_in = false
 
+-- tokens.bin is read in 512-byte blocks
+byte ibuf[512]
+word ib_pos = 0
+word ib_len = 0
+
+function in_fill()
+    ib_len = file_read(inh, addr(ibuf), 512)
+    ib_pos = 0
+    if ib_len == 0 then eof_in = true end
+end
+
 function in_byte() -> byte
-    word g = file_getc(inh)
-    if g == FILE_EOF then
-        eof_in = true
-        return 0
+    if ib_pos >= ib_len then
+        in_fill()
+        if eof_in then return 0 end
     end
-    return byte(g)
+    byte c = ibuf[ib_pos]
+    ib_pos += 1
+    return c
+end
+
+-- n bytes of the input into tpool[at..] (the ones below 60000); their hash
+-- (h = h * 31 + c) in pc_hash. In steps: the bytes of the input block that
+-- fall in one 8K page of tpool are copied in assembly.
+word pc_hash = 0
+word pc_src = 0
+word pc_dst = 0
+word pc_n = 0
+byte pc_st = 0
+byte pc_hh = 0              -- 1: hash the bytes (identifiers), 0: only copy them
+function pool_copy(word dst, word n)
+    pc_hash = 0
+    while n > 0 do
+        if ib_pos >= ib_len then
+            in_fill()
+            if eof_in then return end
+        end
+        word k = ib_len - ib_pos
+        if k > n then k = n end
+        pc_st = 0
+        if dst < 60000 then
+            word room = 8192 - (dst & 8191)
+            if k > room then k = room end
+            if k > 60000 - dst then k = 60000 - dst end
+            tpool[dst] = 0           -- (maps the page of `dst` at $2000)
+            pc_dst = 0x2000 + (dst & 8191)
+            pc_st = 1
+        end
+        pc_src = addr(ibuf) + ib_pos
+        pc_n = k
+        asm
+            push ix
+            ld hl,(g_pc_src)
+            ld ix,(g_pc_dst)
+            ld bc,(g_pc_n)
+            ld a,(g_pc_hh)
+            or a
+            jr nz,.l
+            ld a,(g_pc_st)
+            or a
+            jr z,.e
+            ld a,b
+            or c
+            jr z,.e
+            ld de,(g_pc_dst)
+            ldir
+            jr .e
+.l:
+            ld a,b
+            or c
+            jr z,.e
+            ld a,(hl)
+            inc hl
+            push hl
+            push bc
+            ld c,a
+            ld a,(g_pc_st)
+            or a
+            jr z,.ns
+            ld (ix+0),c
+            inc ix
+.ns:
+            ld hl,(g_pc_hash)
+            ld d,h
+            ld e,l
+            add hl,hl
+            add hl,hl
+            add hl,hl
+            add hl,hl
+            add hl,hl
+            or a
+            sbc hl,de
+            ld b,0
+            add hl,bc
+            ld (g_pc_hash),hl
+            pop bc
+            pop hl
+            dec bc
+            jr .l
+.e:
+            pop ix
+        end
+        ib_pos += k
+        dst += k
+        n -= k
+    end
 end
 
 function in_word() -> word
@@ -381,16 +481,34 @@ end
 -- ---------------------------------------------------------------- nodes
 
 const MAX_NODES = 32000
-far byte nk[32000]
-far byte nf[32000]
-far word nl[32000]
-far byte nc[32000]       -- (at most 255)
-far word n1[32000]
-far word n2[32000]
-far word n3[32000]
-far word n4[32000]
-far word nx[32000]
+far noinit byte nk[32000]
+far noinit byte nf[32000]
+far noinit word nl[32000]
+far noinit byte nc[32000]       -- (at most 255)
+far noinit word n1[32000]
+far noinit word n2[32000]
+far noinit word n3[32000]
+far noinit word n4[32000]
+far noinit word nx[32000]
 word nnodes = 0
+
+-- the fields of the 4096 nodes from n on become 0 (`noinit`: a block is
+-- cleared when its first node is made, not all 480K at startup); the write
+-- maps the page at $2000
+function node_block(word n)
+    nf[n] = 0
+    dma_fill(0x2000 + (n & 8191), 4096, 0)
+    n1[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    n2[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    n3[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    n4[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    nx[n] = 0
+    dma_fill(0x2000, 8192, 0)
+end
 
 function node(byte kind, word t) -> word
     if nnodes >= MAX_NODES - 1 then
@@ -399,6 +517,7 @@ function node(byte kind, word t) -> word
     end
     nnodes += 1
     word n = nnodes
+    if (n & 4095) == 0 then node_block(n) end
     nk[n] = kind
     nl[n] = tlno(t)
     nc[n] = tcol(t)
@@ -717,10 +836,18 @@ function stmt() -> word
     elseif k == T_FAR then
         s = node(S_FAR, t0)
         next()
+        if peek2() == T_IDENT and text_is(ti, "noinit") then
+            nf[s] = 1                   -- (not cleared at startup)
+            next()
+        end
         word inner = stmt()
         if failed then return 0 end
         if nk[inner] ~= S_VAR or n1[inner] == 0 or n3[inner] == 0 or nf[inner] ~= 0 then
             if fail_tok(t0) then msg("`far` needs an array declaration: `far byte name[1000]`") end
+            return 0
+        end
+        if nf[s] ~= 0 and n4[inner] ~= 0 then
+            if fail_tok(t0) then msg("a `far noinit` array has no initial values") end
             return 0
         end
         n1[s] = inner
@@ -1121,58 +1248,73 @@ function load_tokens() -> bool
         print("cannot open tokens.bin, error", file_status)
         return false
     end
+    ib_pos = 0
+    ib_len = 0
+    -- token 0 and node 0 mean "none" (token 1: an empty file)
+    for t0 = 0, 1 do
+        tk[t0] = 0
+        tl_lo[t0] = 0
+        tl_hi[t0] = 0
+        tc_[t0] = 0
+        to_lo[t0] = 0
+        to_hi[t0] = 0
+        tn_lo[t0] = 0
+        tn_hi[t0] = 0
+    end
+    nk[0] = 0
+    nl[0] = 0
+    nc[0] = 0
+    node_block(0)
+    word fadd = 0               -- (T_FILE) the file of a copied module's lines
     while not eof_in do
         byte k = in_byte()
         if eof_in then break end
-        if ntok >= MAX_TOKENS then
+        word ln = in_word()
+        word cl = in_word()
+        if k == T_FILE then
+            fadd = ln
+        elseif ntok >= MAX_TOKENS then
             fail_at(0, 0)
             msg("not supported by the self-hosted compiler yet: programs of more than 48000 tokens")
             break
-        end
+        else
+        ln += fadd
         word t = ntok
         ntok += 1
         tk[t] = k
-        word ln = in_word()
         tl_lo[t] = byte(ln)
         tl_hi[t] = byte(ln >> 8)
-        word cl = in_word()
         if cl > 255 then cl = 255 end
         tc_[t] = byte(cl)
-        set_toff(t, 0)
-        tn_lo[t] = 0
-        tn_hi[t] = 0
+        word off = 0
+        word n = 0
         if k == T_INT or k == T_FIXED then
             -- the value: 4 bytes in the pool
             if pool_len + 4 > 60000 then
                 if fail_at(ln, cl) then msg("program too large: more than 60000 bytes of names and texts") end
                 break
             end
-            set_toff(t, pool_len)
-            word vl = in_word()
-            word vh = in_word()
-            tpool[pool_len] = byte(vl)
-            tpool[pool_len + 1] = byte(vl >> 8)
-            tpool[pool_len + 2] = byte(vh)
-            tpool[pool_len + 3] = byte(vh >> 8)
+            off = pool_len
+            pc_hh = 0
+            pool_copy(pool_len, 4)
             pool_len += 4
         elseif k == T_IDENT or k == T_STR or k == T_ASM_BODY or k == T_ERROR then
-            word n = in_word()
-            set_toff(t, pool_len)
-            tn_lo[t] = byte(n)
-            tn_hi[t] = byte(n >> 8)
-            word i = 0
-            word h = 0
-            while i < n do
-                byte c = in_byte()
-                h = (h << 5) - h + c
-                if pool_len + i < 60000 then tpool[pool_len + i] = c end
-                i += 1
-            end
+            n = in_word()
+            off = pool_len
+            pc_hh = 0
+            if k == T_IDENT then pc_hh = 1 end
+            pool_copy(pool_len, n)
+        end
+        to_lo[t] = byte(off)
+        to_hi[t] = byte(off >> 8)
+        tn_lo[t] = byte(n)
+        tn_hi[t] = byte(n >> 8)
+        if k == T_IDENT or k == T_STR or k == T_ASM_BODY or k == T_ERROR then
             if pool_len + n > 60000 then
                 if fail_at(tlno(t), tcol(t)) then msg("program too large: more than 60000 bytes of names and texts") end
                 break
             end
-            if k == T_IDENT then intern(t, h & 4095) end
+            if k == T_IDENT then intern(t, pc_hash & 4095) end
             if toff_(t) == pool_len then pool_len += n end
         end
         if k == T_ERROR then
@@ -1182,6 +1324,7 @@ function load_tokens() -> bool
             break
         end
         if k == T_EOF then break end
+        end
     end
     file_close(inh)
     return true

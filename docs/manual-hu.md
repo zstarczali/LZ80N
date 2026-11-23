@@ -8,7 +8,7 @@ fordítja, és `.nex` fájlba csomagolja, amely közvetlenül fut a Nexten vagy
 emulátorban. Nincs interpreter, nincs virtuális gép és nincs szemétgyűjtő: amit
 leírsz, az Z80N utasításokká válik.
 
-Ez a kézikönyv a nyelvet és a könyvtárait az 1.4.0-s verzió állapota szerint
+Ez a kézikönyv a nyelvet és a könyvtárait az 1.5.0-s verzió állapota szerint
 írja le (lásd [`CHANGELOG.md`](../CHANGELOG.md)). Az angol változat: [`manual-en.md`](manual-en.md). A tömör műszaki
 specifikáció: [`spec.md`](spec.md).
 
@@ -1437,7 +1437,12 @@ scores[i] = scores[i - 1] + 10
   deklarálható.
 * Az adatok 8K-s lapokon vannak a 14. 16K-s banktól felfelé, a képekkel
   (`image(...)`) közös területen: együtt kb. 780 KB. A kezdőérték a `.nex`
-  fájl része; a kezdőérték nélküli tömböket induláskor nullázza a program.
+  fájl része; a kezdőérték nélküli tömböket induláskor nullázza a program
+  (28 MHz-en 8 KB-onként kb. 1 ms).
+* A `far noinit byte buf[60000]` tömböt nem nullázza: amíg a program nem ír
+  az elemeibe, azt tartalmazzák, ami épp a memóriában volt. Nagy, olvasás
+  előtt úgyis feltöltött tömböknél megspórolja ezt az időt. Kezdőértéke nem
+  lehet.
 * Egy elem ugyanúgy olvasható és írható, mint bármely tömbelem. Hozzáféréskor
   a megfelelő lap az MMU 1. slotjába (`$2000`–`$3FFF`) kerül, ezért kicsit
   drágább egy közönséges tömbnél (kb. 60–80 T-ciklus, ha a lap már be van
@@ -1802,10 +1807,11 @@ COPY "myprog.lz80n" TO "in.lz80n"
 A hibák a `codegen.err`, `asm.err` vagy `assets.err` fájlba kerülnek; a
 `build.log` a lépések üzeneteit tartalmazza, amelyek fordítás közben egy, az
 IDE-hez hasonló képernyőn, egy ablakban is megjelennek. Egy kis program
-fordítása 28 MHz-en kb. 2 másodperc munka (plusz a lépések betöltése az SD
-kártyáról); egy Layer 2 modult használó programé kb. 13 másodperc. Csak azok
+fordítása 28 MHz-en kb. 1,2 másodperc munka (plusz a lépések betöltése az SD
+kártyáról); egy Layer 2 modult használó programé kb. 6 másodperc. Csak azok
 a függvények fordulnak le, amelyeket a program meghívhat (egy modulban sok
-olyan van, amit nem használ), a futtatókörnyezet pedig előre lefordítva
-érkezik (`lib/rt_core.bin`).
+olyan van, amit nem használ), a futtatókörnyezet előre lefordítva
+(`lib/rt_core.bin`), a standard modulok előre lexelve érkeznek (`lib/*.tok`),
+az assembler pedig egy menetben dolgozik.
 
 A nyelv ugyanaz, mint a PC-s `lz80nc`-vel (a részletek: `selfhost/README.md`).
