@@ -26,7 +26,8 @@ On every new version update all of these, in one go:
    - `lz80n.html`: `"softwareVersion"` in the JSON-LD, the `Download LZ80N x.y.z` hero button,
      and the feature cards / example count if they changed
    - `index.html`: a new `STUDIO NEWS` section for the version (dated, with the main changes),
-     above the older LZ80N sections
+     above the older LZ80N sections; add its `#lz80n-NNN-title` to the ZX Spectrum font rules in
+     the `<style>` of `index.html` (three lines, also the `span` and the mobile ones)
    - the download archives need no change: `download.php` and `downloads/LZ80N/index.php`
      serve whatever the `publish` workflow uploaded
 
