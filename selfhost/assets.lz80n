@@ -241,7 +241,7 @@ end
 
 -- ---- inflate (RFC 1951)
 
-far byte win[32768]
+far noinit byte win[32768]
 word wpos = 0
 
 function put(byte b)

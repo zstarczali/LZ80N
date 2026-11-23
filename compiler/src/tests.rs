@@ -2027,6 +2027,23 @@ fn far_zero_pages_are_cleared() {
 }
 
 
+/// `far noinit` arrays are not cleared: they keep what was in memory.
+#[test]
+fn far_noinit_pages_are_kept() {
+    let src = "far noinit byte z[20000]\nfar byte t[300]\nfar noinit word w[2]\nw[1] = 500\nz[1] = 3\n\
+               byte noinit = 4\nprint(z[0], z[1], z[19999], t[1], w[0], w[1], noinit)";
+    let out = run_with("r_far_noinit", src, |c| {
+        for p in 28..40u8 {
+            c.pages.entry(p).or_insert_with(|| vec![0xAA; 8192]);
+        }
+    });
+    if let Some((out, _)) = out {
+        assert_eq!(out, "170 3 170 0 43690 500 4\n");
+    }
+    assert!(err("far noinit byte a[2] = {1, 2}").contains("no initial values"));
+    assert!(err("far noinit byte a").contains("needs an array"));
+}
+
 /// Every function in its own code page gives the same results.
 #[test]
 fn run_banked_code() {
@@ -3794,8 +3811,11 @@ mod ast_text {
 
     pub fn stmt(out: &mut String, s: &Stmt) {
         match &s.kind {
-            StmtKind::Far(inner) => {
+            StmtKind::Far(inner, noinit) => {
                 open(out, "far", s.pos);
+                if *noinit {
+                    out.push_str(" noinit");
+                }
                 out.push(' ');
                 stmt(out, inner);
             }
@@ -4217,9 +4237,7 @@ fn selfhost_asm_errors() {
 
 /// The runtime files the self-hosted code generator copies from the SD card.
 fn selfhost_runtime_files() -> Vec<(String, Vec<u8>)> {
-    let mut f = crate::selfhost_support_files();
-    if std::env::var("NOTOK").is_ok() { f.retain(|x| !x.0.ends_with(".tok")); }
-    f
+    crate::selfhost_support_files()
 }
 
 /// The support files in a folder that the test assembler's INCBIN falls

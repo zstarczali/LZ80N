@@ -272,7 +272,7 @@ function scan(doc) {
   const asm = []; // [first body line, end line]
   let inBlockComment = false;
   const typeNames = 'bool|byte|sbyte|word|sword|fixed|string|[A-Z][A-Za-z0-9_]*';
-  const varRe = new RegExp(`^\\s*(far\\s+)?(${typeNames})\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*)?\\s*(=|$)`);
+  const varRe = new RegExp(`^\\s*(far\\s+(?:noinit\\s+)?)?(${typeNames})\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*)?\\s*(=|$)`);
   for (let i = 0; i < doc.lineCount; i++) {
     const raw = doc.lineAt(i).text;
     if (inAsm) {
@@ -452,7 +452,7 @@ function typeOf(doc, name, line) {
     }
   }
   // local or global declaration above the line
-  const re = new RegExp(`^\\s*(?:far\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s+${name}\\b`);
+  const re = new RegExp(`^\\s*(?:far\\s+(?:noinit\\s+)?)?([A-Za-z_][A-Za-z0-9_]*)\\s+${name}\\b`);
   for (let i = line; i >= 0; i--) {
     const m = re.exec(code(doc.lineAt(i).text));
     if (m && !B.KEYWORDS.includes(m[1])) return m[1];
@@ -605,7 +605,7 @@ const completionProvider = {
         if (m) add(m[2], CK.Variable, m[1] + ' (parameter)');
       }
       for (let i = fn.line + 1; i <= pos.line; i++) {
-        const m = /^\s*(?:far\s+)?(bool|byte|sbyte|word|sword|fixed|string|[A-Z]\w*)\s+([A-Za-z_]\w*)/.exec(code(doc.lineAt(i).text));
+        const m = /^\s*(?:far\s+(?:noinit\s+)?)?(bool|byte|sbyte|word|sword|fixed|string|[A-Z]\w*)\s+([A-Za-z_]\w*)/.exec(code(doc.lineAt(i).text));
         if (m) add(m[2], CK.Variable, m[1]);
         const f = /^\s*for\s+([A-Za-z_]\w*)\s*=/.exec(doc.lineAt(i).text);
         if (f) add(f[1], CK.Variable, 'loop variable');

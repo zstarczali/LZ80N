@@ -1523,6 +1523,10 @@ pub fn load_nex(nex: &[u8]) -> Result<Cpu, String> {
         };
         cpu.mem[addr..addr + 16384].copy_from_slice(data);
     }
+    // the pages the NEX does not load hold garbage, as on a real machine
+    for page in 28..224u16 {
+        cpu.pages.entry(page as u8).or_insert_with(|| vec![0xAA; 8192]);
+    }
     cpu.sp = u16::from_le_bytes([nex[12], nex[13]]);
     cpu.pc = u16::from_le_bytes([nex[14], nex[15]]);
     Ok(cpu)

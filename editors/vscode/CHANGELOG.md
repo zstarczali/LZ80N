@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0
+
+* Follows LZ80N 1.5.0 (faster compiling on the Next).
+* `far noinit` arrays in highlighting, completion and the outline.
+
 ## 1.4.0
 
 * Follows LZ80N 1.4.0 (the compiler and the LZ80N IDE on the Next, the

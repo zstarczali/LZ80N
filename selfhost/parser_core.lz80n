@@ -180,16 +180,16 @@ const B_LOR = 18
 -- ---------------------------------------------------------------- tokens
 
 const MAX_TOKENS = 48000
-far byte tk[48000]          -- kind
+far noinit byte tk[48000]          -- kind
 -- (words as two byte arrays: a far array holds at most 64K bytes, so a
 -- word array at most 32767 elements)
-far byte tl_lo[48000]       -- line
-far byte tl_hi[48000]
-far byte tc_[48000]         -- column (at most 255)
-far byte to_lo[48000]       -- text: offset in tpool (numbers: their 4 bytes there)
-far byte to_hi[48000]
-far byte tn_lo[48000]       -- text: length
-far byte tn_hi[48000]
+far noinit byte tl_lo[48000]       -- line
+far noinit byte tl_hi[48000]
+far noinit byte tc_[48000]         -- column (at most 255)
+far noinit byte to_lo[48000]       -- text: offset in tpool (numbers: their 4 bytes there)
+far noinit byte to_hi[48000]
+far noinit byte tn_lo[48000]       -- text: length
+far noinit byte tn_hi[48000]
 
 function tlno(word t) -> word
     return word(tl_hi[t]) << 8 | tl_lo[t]
@@ -222,12 +222,12 @@ function tval_hi(word t) -> word
     word o = toff_(t)
     return word(tpool[o + 2]) | word(tpool[o + 3]) << 8
 end
-far byte tpool[60000]
+far noinit byte tpool[60000]
 -- identifiers are interned: equal names share their text (and offset)
 far word ihead[4096]
-far word ioff[8000]
-far word ilen[8000]
-far word inext[8000]
+far noinit word ioff[8000]
+far noinit word ilen[8000]
+far noinit word inext[8000]
 word nint = 0
 word ntok = 1                -- token 0 is unused: 0 means "none"
 word pool_len = 0
@@ -481,16 +481,34 @@ end
 -- ---------------------------------------------------------------- nodes
 
 const MAX_NODES = 32000
-far byte nk[32000]
-far byte nf[32000]
-far word nl[32000]
-far byte nc[32000]       -- (at most 255)
-far word n1[32000]
-far word n2[32000]
-far word n3[32000]
-far word n4[32000]
-far word nx[32000]
+far noinit byte nk[32000]
+far noinit byte nf[32000]
+far noinit word nl[32000]
+far noinit byte nc[32000]       -- (at most 255)
+far noinit word n1[32000]
+far noinit word n2[32000]
+far noinit word n3[32000]
+far noinit word n4[32000]
+far noinit word nx[32000]
 word nnodes = 0
+
+-- the fields of the 4096 nodes from n on become 0 (`noinit`: a block is
+-- cleared when its first node is made, not all 480K at startup); the write
+-- maps the page at $2000
+function node_block(word n)
+    nf[n] = 0
+    dma_fill(0x2000 + (n & 8191), 4096, 0)
+    n1[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    n2[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    n3[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    n4[n] = 0
+    dma_fill(0x2000, 8192, 0)
+    nx[n] = 0
+    dma_fill(0x2000, 8192, 0)
+end
 
 function node(byte kind, word t) -> word
     if nnodes >= MAX_NODES - 1 then
@@ -499,6 +517,7 @@ function node(byte kind, word t) -> word
     end
     nnodes += 1
     word n = nnodes
+    if (n & 4095) == 0 then node_block(n) end
     nk[n] = kind
     nl[n] = tlno(t)
     nc[n] = tcol(t)
@@ -817,10 +836,18 @@ function stmt() -> word
     elseif k == T_FAR then
         s = node(S_FAR, t0)
         next()
+        if peek2() == T_IDENT and text_is(ti, "noinit") then
+            nf[s] = 1                   -- (not cleared at startup)
+            next()
+        end
         word inner = stmt()
         if failed then return 0 end
         if nk[inner] ~= S_VAR or n1[inner] == 0 or n3[inner] == 0 or nf[inner] ~= 0 then
             if fail_tok(t0) then msg("`far` needs an array declaration: `far byte name[1000]`") end
+            return 0
+        end
+        if nf[s] ~= 0 and n4[inner] ~= 0 then
+            if fail_tok(t0) then msg("a `far noinit` array has no initial values") end
             return 0
         end
         n1[s] = inner
@@ -1223,6 +1250,21 @@ function load_tokens() -> bool
     end
     ib_pos = 0
     ib_len = 0
+    -- token 0 and node 0 mean "none" (token 1: an empty file)
+    for t0 = 0, 1 do
+        tk[t0] = 0
+        tl_lo[t0] = 0
+        tl_hi[t0] = 0
+        tc_[t0] = 0
+        to_lo[t0] = 0
+        to_hi[t0] = 0
+        tn_lo[t0] = 0
+        tn_hi[t0] = 0
+    end
+    nk[0] = 0
+    nl[0] = 0
+    nc[0] = 0
+    node_block(0)
     word fadd = 0               -- (T_FILE) the file of a copied module's lines
     while not eof_in do
         byte k = in_byte()

@@ -571,22 +571,22 @@ const SK_FUNC = 5
 const SK_ASSET = 6          -- sid: the asset number
 
 const MAXSY = 8000
-far byte sk[8000]           -- kind
-far byte sty[8000]          -- type (function: return type, TY_NONE = none)
-far word sname[8000]        -- name token (0: a hidden temporary)
-far word sown[8000]         -- params / locals: the function symbol (0 = main)
-far word sid[8000]          -- locals: number; constants: value (low word)
-far word sv2[8000]          -- constants: value (high word); functions: node;
+far noinit byte sk[8000]           -- kind
+far noinit byte sty[8000]          -- type (function: return type, TY_NONE = none)
+far noinit word sname[8000]        -- name token (0: a hidden temporary)
+far noinit word sown[8000]         -- params / locals: the function symbol (0 = main)
+far noinit word sid[8000]          -- locals: number; constants: value (low word)
+far noinit word sv2[8000]          -- constants: value (high word); functions: node;
                             -- global arrays: initializer list
-far word slen[8000]         -- arrays: element count (0 = scalar), the first dimension
-far byte sdim[8000]         -- arrays of more dimensions: the record of the others;
+far noinit word slen[8000]         -- arrays: element count (0 = scalar), the first dimension
+far noinit byte sdim[8000]         -- arrays of more dimensions: the record of the others;
                             -- functions: 1 = `interrupt frame`, 2 = `interrupt raster(slen)`
-far byte sdead[8000]        -- out of scope
-far byte snp[8000]          -- functions: number of parameters
-far byte spage[8000]        -- far arrays: first 8K page (0 = not far)
-far byte sbank[8000]        -- functions: code page (0 = resident)
-far byte sstruct[8000]      -- methods: struct number + 1 (0 = a plain function)
-far word snext[8000]        -- the previous symbol with the same name hash
+far noinit byte sdead[8000]        -- out of scope
+far noinit byte snp[8000]          -- functions: number of parameters
+far noinit byte spage[8000]        -- far arrays: first 8K page (0 = not far)
+far noinit byte sbank[8000]        -- functions: code page (0 = resident)
+far noinit byte sstruct[8000]      -- methods: struct number + 1 (0 = a plain function)
+far noinit word snext[8000]        -- the previous symbol with the same name hash
 far word shead[1024]        -- name hash -> the newest symbol
 word nsy = 0
 long resident_used = 0      -- estimated bytes of code and data so far (resident)
@@ -637,6 +637,24 @@ function is_ref_param(word s) -> bool
     return sk[s] == SK_PARAM and (sty[s] == TY_STR or is_struct(sty[s]))
 end
 
+-- (the symbol arrays are `noinit`)
+function sym_clear(word s)
+    sk[s] = 0
+    sname[s] = 0
+    sty[s] = 0
+    sown[s] = 0
+    sdead[s] = 0
+    slen[s] = 0
+    sdim[s] = 0
+    sid[s] = 0
+    sv2[s] = 0
+    snp[s] = 0
+    spage[s] = 0
+    sbank[s] = 0
+    sstruct[s] = 0
+    snext[s] = 0
+end
+
 function new_sym(byte kind, word name, byte ty) -> word
     if nsy >= MAXSY - 1 then
         if fail_at(0, 0) then msg("too many symbols") end
@@ -644,18 +662,11 @@ function new_sym(byte kind, word name, byte ty) -> word
     end
     nsy += 1
     word s = nsy
+    sym_clear(s)
     sk[s] = kind
     sname[s] = name
     sty[s] = ty
     sown[s] = cur_fn
-    sdead[s] = 0
-    slen[s] = 0
-    sdim[s] = 0
-    sid[s] = 0
-    sv2[s] = 0
-    spage[s] = 0
-    sbank[s] = 0
-    sstruct[s] = 0
     if name ~= 0 then
         word h = name_hash(name)
         snext[s] = shead[h]
@@ -765,9 +776,9 @@ end
 
 -- string literals: zero-terminated s_N (print) and length-prefixed ps_N (values)
 const MAXSTR = 3000
-far word strs[3000]
+far noinit word strs[3000]
 word nstrs = 0
-far word pstrs[3000]
+far noinit word pstrs[3000]
 word npstrs = 0
 
 function str_label(word tok) -> word
@@ -1745,7 +1756,7 @@ end
 -- an initializer list in element order (nested lists are rows, short rows
 -- are padded with 0 = the default value): flat_[0 .. nflat)
 const MAXFLAT = 4096
-far word flat_[4096]
+far noinit word flat_[4096]
 word nflat = 0
 word fl_dims[4]
 byte fl_nd = 0
@@ -4314,8 +4325,8 @@ end
 -- ---- call graph (for recursion)
 
 const MAXEDGE = 4000
-far word eto[4000]          -- callee symbol
-far word enext[4000]        -- next edge of the same caller
+far noinit word eto[4000]          -- callee symbol
+far noinit word enext[4000]        -- next edge of the same caller
 far word efirst[8000]       -- first edge of a function symbol
 word nedge = 0
 word seen_mark = 0
@@ -4544,7 +4555,7 @@ function mark_live()
 end
 
 -- can a call to `from` lead to a call of `target`?
-far word stack_[3000]
+far noinit word stack_[3000]
 function reaches(word from, word target) -> bool
     seen_mark += 1
     word sp_ = 0
@@ -4742,6 +4753,7 @@ function assign_str_sym(word s, word value)
 end
 
 -- declare a variable (global at the top level of the main program)
+bool far_noinit = false     -- the `far` declaration has `noinit`
 function declare_var(word s, bool top, bool far_)
     word name = n2[s]
     word init = n4[s]
@@ -4807,8 +4819,9 @@ function declare_var(word s, bool top, bool far_)
                 return
             end
             spage[v] = next_page
-            if init ~= 0 then
-                -- its values are stored in the pages (not cleared at startup)
+            if init ~= 0 or far_noinit then
+                -- its values are stored in the pages, or it has none (not
+                -- cleared at startup)
                 sv2[v] = init
                 byte pi = 0
                 while pi < pages do
@@ -5296,6 +5309,7 @@ function declare_all()
         elseif k == S_VAR then
             declare_var(it, true, false)
         elseif k == S_FAR then
+            far_noinit = nf[it] ~= 0
             declare_var(n1[it], true, true)
         elseif k == I_INTERRUPT then
             declare_interrupt(it)
@@ -5427,9 +5441,9 @@ end
 -- of code pages, called in order from a resident list of calls
 
 const MAXMST = 2000
-far word mst_pl[2000]       -- main.tmp offset of statement i (low, high word)
-far word mst_ph[2000]
-far word mst_cost[2000]     -- its estimated size
+far noinit word mst_pl[2000]       -- main.tmp offset of statement i (low, high word)
+far noinit word mst_ph[2000]
+far noinit word mst_cost[2000]     -- its estimated size
 
 function mst_pos(word i) -> long
     return long(mst_ph[i]) << 16 | long(mst_pl[i])
@@ -5965,6 +5979,7 @@ end
 
 log_start(false)
 log_note("codegen: generating code...")
+sym_clear(0)                        -- (symbol 0: "none")
 if load_tokens() then
     if not failed then
         ti = 1

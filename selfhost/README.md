@@ -220,13 +220,15 @@ up to 32 KB.
     smallest function that is enough on its own is banked last), and calls
     between functions of the same code page skip `rt_bcall`.
 
-  `hello.lz80n`: lexer 0.11 s, code generator 0.66 s, assembler 0.72 s at
+  `hello.lz80n`: lexer 0.10 s, code generator 0.49 s, assembler 0.64 s at
   28 MHz (it was 0.40 + 0.71 + 1.74 s); `life.lz80n` (with the Layer 2
-  module) 0.31 + 2.74 + 3.19 s (3.11 + 3.99 + 6.06 s). The assembler alone,
+  module) 0.31 + 2.59 + 3.12 s (3.11 + 3.99 + 6.06 s). The assembler alone,
   on the full assembly of the examples (`selfhost_asm_all_examples`): 40-50%
-  faster, `images` and `samples` (data) about 3.5-7 times. A third of the
-  code generator's time for a small program is clearing its `far` arrays
-  when it starts. `profile_stage` (ignored) shows where a stage spends its
+  faster, `images` and `samples` (data) about 3.5-7 times. The big
+  arrays are `far noinit`: what must start as 0 is cleared when it is first
+  used (nodes in blocks of 4096, the assembler's image by the page), and the
+  test emulator fills the pages a NEX does not load with garbage.
+  `profile_stage` (ignored) shows where a stage spends its
   time.
 * The build log: every stage writes its lines (with the time it took) to
   the screen and to `build.log`, and shows the lines of the stages before

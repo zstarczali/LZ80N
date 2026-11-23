@@ -145,7 +145,8 @@ asm ... end             -- raw Z80N assembly lines
   saves/restores it when any banked page exists. Values are evaluated
   before the target is mapped. All-zero pages are not stored in the .nex
   (SAVENEX AUTO skips empty banks) and are cleared at startup
-  (`rt_far_zero`). No place()/by-ref/addr() for far elements.
+  (`rt_far_zero`), except those of `far noinit` arrays (no initialiser; they
+  hold garbage until written; `noinit` is a word only after `far`). No place()/by-ref/addr() for far elements.
 * Code banking: functions are compiled into separate chunks. If the
   estimated resident size (asm_size, ~exact) exceeds 30500 bytes, the
   largest non-interrupt functions move into 8K code pages (first fit,

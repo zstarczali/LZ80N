@@ -291,14 +291,24 @@ impl Parser {
             }
             Tok::Far => {
                 self.next();
+                // `noinit` is a word only here (and no type has that name)
+                let noinit = matches!(self.peek(), Tok::Ident(n) if n == "noinit")
+                    && matches!(self.peek_at(1), Tok::Ident(_));
+                if noinit {
+                    self.next();
+                }
                 let inner = self.stmt()?;
                 match &inner.kind {
-                    StmtKind::VarDecl { ty: Some(_), array: Some(_), is_const: false, .. } => {}
+                    StmtKind::VarDecl { ty: Some(_), array: Some(_), is_const: false, init, .. } => {
+                        if noinit && init.is_some() {
+                            return Err(Diag::new(pos, "a `far noinit` array has no initial values"));
+                        }
+                    }
                     _ => {
                         return Err(Diag::new(pos, "`far` needs an array declaration: `far byte name[1000]`"));
                     }
                 }
-                StmtKind::Far(Box::new(inner))
+                StmtKind::Far(Box::new(inner), noinit)
             }
             Tok::Asset => {
                 self.next();

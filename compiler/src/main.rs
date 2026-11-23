@@ -110,7 +110,7 @@ fn library_name_errors(prog: &ast::Program) -> Vec<diag::Diag> {
                     stmts(body, out);
                 }
                 StmtKind::While { body, .. } => stmts(body, out),
-                StmtKind::Far(inner) => stmts(std::slice::from_ref(inner), out),
+                StmtKind::Far(inner, _) => stmts(std::slice::from_ref(inner), out),
                 StmtKind::If { arms, otherwise } => {
                     for (_, b) in arms {
                         stmts(b, out);

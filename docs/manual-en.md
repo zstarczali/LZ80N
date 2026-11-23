@@ -9,7 +9,7 @@ on the Next or in an emulator. There is no interpreter, no virtual machine and
 no garbage collector: what you write becomes Z80N instructions.
 
 This manual describes the language and its libraries as implemented in
-version 1.4.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
+version 1.5.0 (see [`CHANGELOG.md`](../CHANGELOG.md)). A Hungarian translation is in [`manual-hu.md`](manual-hu.md).
 The compact technical specification is [`spec.md`](spec.md).
 
 ---
@@ -1423,7 +1423,11 @@ scores[i] = scores[i - 1] + 10
 * The data is stored in 8K pages from 16K bank 14 up, shared with the
   pictures (`image(...)`): about 780 KB together. The values of an
   initialiser are part of the `.nex` file; arrays without one are cleared
-  when the program starts.
+  when the program starts (about 1 ms for each 8K at 28 MHz).
+* `far noinit byte buf[60000]` is not cleared: until the program writes its
+  elements they hold whatever was in memory. It saves the time for large
+  arrays that are filled before they are read. Such an array has no
+  initialiser.
 * An element is read or assigned like any array element. A page is mapped
   into MMU slot 1 (`$2000`–`$3FFF`) on access, so it costs a little more
   than an ordinary array (about 60–80 T-states when the page is already
@@ -1777,7 +1781,7 @@ COPY "myprog.lz80n" TO "in.lz80n"
 
 Errors go to `codegen.err`, `asm.err` or `assets.err`; `build.log` has the
 messages of the stages, which also appear on the screen in a window that
-looks like the IDE. A small program takes about 1.5 seconds of work at
+looks like the IDE. A small program takes about 1.2 seconds of work at
 28 MHz (plus loading the stages from the SD card); one that uses the Layer 2
 module about 6 seconds. Only the functions the program can call are
 compiled (a module has many it does not use), the runtime comes

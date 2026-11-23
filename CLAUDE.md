@@ -11,9 +11,12 @@ On every new version update all of these, in one go:
 3. `README.md` — the version badge and the `Status:` line
 4. `docs/manual-en.md` and `docs/manual-hu.md` — the version line, plus the new features
 5. `docs/spec.md` — new language elements and library functions
-6. `docs/manual-en.pdf` and `docs/manual-hu.pdf` — regenerate them the way
-   `.github/workflows/release.yml` does: pandoc 3.5 (`-f gfm -t html5 --standalone --css pdf.css`)
-   then WeasyPrint 63.1, with the DejaVu Sans / DejaVu Sans Mono fonts
+6. `docs/manual-en.pdf` and `docs/manual-hu.pdf` — regenerate them whenever a manual `.md`
+   changes, with headless Chrome (or Edge) and `docs/pdf.css`; pandoc and WeasyPrint are not
+   needed here (only `.github/workflows/release.yml` uses them). From the repository root, TMP
+   being a temporary folder:
+   `npm i --no-save --prefix TMP marked@15.0.7 marked-gfm-heading-id@4.1.1 dejavu-fonts-ttf@2.37.3`
+   then `node scripts/manual-pdf.mjs TMP`; check the page count and look at a few pages
 7. VS Code extension (`editors/vscode`), when the language or library changed:
    `package.json` version, `CHANGELOG.md`, `builtins.js` (hover/completion), the function regex in
    `syntaxes/lz80n.tmLanguage.json`, `SPRITE_MEMBERS` etc. in `extension.js`.

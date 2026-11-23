@@ -315,13 +315,13 @@ end
 const HSIZE = 4096
 const MAXSYM = 6000
 far word hhead[4096]
-far word snext[6000]
-far word soff[6000]
-far byte slen[6000]
-far word svl[6000]
-far word svh[6000]
-far word spass[6000]        -- pass in which it was last defined
-far byte spool[65000]
+far noinit word snext[6000]
+far noinit word soff[6000]
+far noinit byte slen[6000]
+far noinit word svl[6000]
+far noinit word svh[6000]
+far noinit word spass[6000]        -- pass in which it was last defined
+far noinit byte spool[65000]
 word nsym = 0
 word spool_len = 0
 word pass = 0
@@ -867,11 +867,11 @@ end
 -- ---------------------------------------------------------------- output image
 
 const SLOT_PAGES = 35
-far byte img0[57344]        -- 7 pages each
-far byte img1[57344]
-far byte img2[57344]
-far byte img3[57344]
-far byte img4[57344]
+far noinit byte img0[57344]        -- 7 pages each
+far noinit byte img1[57344]
+far noinit byte img2[57344]
+far noinit byte img3[57344]
+far noinit byte img4[57344]
 byte pdir[224]              -- 8K page -> image slot (1..35), 0 = not written
 byte pkeep[224]             -- pages written by INCBIN
 byte nslots = 0
@@ -929,7 +929,9 @@ function page_slot(byte p) -> byte
     end
     nslots += 1
     pdir[p] = nslots
-    -- (no clearing: far arrays start as zeros, and a slot is used once)
+    -- (the arrays are `noinit`; the write maps the page at $2000)
+    img_put(nslots, 0, 0)
+    dma_fill(0x2000, 8192, 0)
     return nslots
 end
 
@@ -2807,7 +2809,7 @@ end
 
 -- ---------------------------------------------------------------- one pass
 
-far byte rp[64000]          -- the kept lines: 21 bytes each (rh)
+far noinit byte rp[64000]          -- the kept lines: 21 bytes each (rh)
 word rp_len = 0
 word nrp = 0
 byte rh[21]                 -- lno, pc, last_write, pc after, gsym, snapshot, file offset
@@ -2994,11 +2996,8 @@ end
 function clear_image()
     byte s = 1
     while s <= nslots do
-        word j = 0
-        while j < 8192 do
-            img_put(s, j, 0)
-            j += 1
-        end
+        img_put(s, 0, 0)                -- (maps the page at $2000)
+        dma_fill(0x2000, 8192, 0)
         s += 1
     end
     for i = 0, 223 do pkeep[i] = 0 end

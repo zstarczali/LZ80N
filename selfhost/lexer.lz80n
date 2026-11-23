@@ -180,7 +180,7 @@ end
 byte outh
 byte obuf[256]
 word olen = 0
-far byte text[32000]            -- text of the current token
+far noinit byte text[32000]            -- text of the current token
 word tlen = 0
 
 function flush()
