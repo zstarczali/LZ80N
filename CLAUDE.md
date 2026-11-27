@@ -25,9 +25,11 @@ On every new version update all of these, in one go:
 8. **The product site, `F:\Development\product-site`** (a separate git repository):
    - `lz80n.html`: `"softwareVersion"` in the JSON-LD, the `Download LZ80N x.y.z` hero button,
      and the feature cards / example count if they changed
-   - `index.html`: a new `STUDIO NEWS` section for the version (dated, with the main changes),
-     above the older LZ80N sections; add its `#lz80n-NNN-title` to the ZX Spectrum font rules in
-     the `<style>` of `index.html` (three lines, also the `span` and the mobile ones)
+   - `lz80n.html`: a new `news-item` article (dated, with the main changes) at the top of the
+     `#news` section, which keeps the news of every version
+   - `index.html`: only the latest LZ80N news stays there: replace the previous version's
+     `STUDIO NEWS` section with the new one (its title has the class `lz80n-news-t`, which gives
+     the ZX Spectrum font) and keep its `ALL LZ80N NEWS` button
    - the download archives need no change: `download.php` and `downloads/LZ80N/index.php`
      serve whatever the `publish` workflow uploaded
 
